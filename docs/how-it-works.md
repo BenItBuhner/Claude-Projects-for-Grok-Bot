@@ -80,7 +80,8 @@ trimmed above `staging_max_mb`; a sweep runs at most hourly and never touches an
 
 - `display`, `bot_name`, `operator_name`, `timezone`
 - `mcp_host` / `mcp_port`, `allowed_hosts` (add your tunnel hostname here)
-- `viewer_ports`
+- `viewer_ports`: VNC/noVNC ports; UI actions refuse while a viewer is connected. `install.sh` writes `5900+N` and `6080+N`
+  for display `:N`, and an empty value falls back to the same ports
 - `environment_labels` / `environment_ids` (optional): map Claude Code's "Running on …" labels to names like "the workstation"
 - `staging_dir`, `staging_ttl_hours`, `staging_max_mb`, `attachments_dir`, `skill_path`
 - `state_dir`, `ui_lock_file`, `launcher`, `xdotool`, `xclip`, `idb_python`, `extra_lib_path`, `gi_typelib_path` for hosts with a custom layout

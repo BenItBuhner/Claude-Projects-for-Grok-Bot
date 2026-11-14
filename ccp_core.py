@@ -545,12 +545,34 @@ def ui_lock(op, force=False, timeout=None):
         _tlock.release()
 
 # ---------------------------------------------------------------- IndexedDB snapshot (no UI)
-def idb_snapshot():
-    r = subprocess.run([str(IDB_PY), str(IDB_SCRIPT)], capture_output=True, text=True, timeout=120)
-    if r.returncode != 0:
-        time.sleep(3); r = subprocess.run([str(IDB_PY), str(IDB_SCRIPT)], capture_output=True, text=True, timeout=120)
-    if r.returncode != 0: raise AppError('could not read the app cache: ' + (r.stderr.strip().splitlines() or ['?'])[-1][:200])
-    d = json.loads(r.stdout); (CACHE/'idb.json').write_text(json.dumps(d, ensure_ascii=False)); return d
+IDB_RESOLVE_MAX_AGE = float(os.environ.get('CCP_IDB_RESOLVE_MAX_AGE', '30'))
+
+def _idb_cached(newer_than):
+    """The last snapshot if it was written at or after `newer_than` (epoch seconds), else None."""
+    p = CACHE/'idb.json'
+    try:
+        if p.stat().st_mtime >= newer_than: return json.loads(p.read_text())
+    except Exception: pass
+    return None
+
+def idb_snapshot(max_age=0.0):
+    """Read the app's IndexedDB (copy + full deserialize in a child process: the heaviest memory step in ccp).
+    One reader at a time across processes: callers that queued behind a reader reuse its result instead of starting
+    their own, since it is at least as fresh as what they asked for. max_age > 0 also accepts a snapshot that recent."""
+    t_req = time.time()
+    if max_age > 0 and (d := _idb_cached(t_req - max_age)) is not None: return d
+    CACHE.mkdir(parents=True, exist_ok=True)
+    with open(CACHE/'idb.lock', 'a+') as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        # another process finished a read while we waited for the lock: use it
+        if (d := _idb_cached(t_req - max(0.0, max_age))) is not None: return d
+        r = subprocess.run([str(IDB_PY), str(IDB_SCRIPT)], capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            time.sleep(3); r = subprocess.run([str(IDB_PY), str(IDB_SCRIPT)], capture_output=True, text=True, timeout=120)
+        if r.returncode != 0: raise AppError('could not read the app cache: ' + (r.stderr.strip().splitlines() or ['?'])[-1][:200])
+        d = json.loads(r.stdout)
+        t = CACHE/'idb.json.tmp'; t.write_text(json.dumps(d, ensure_ascii=False)); t.replace(CACHE/'idb.json')
+        return d
 def project_rows(snap, include_archived=False):
     rows = []
     for c in snap.get('channels') or []:
@@ -566,7 +588,14 @@ def project_rows(snap, include_archived=False):
                      'threads_waiting_on_you': (cache or {}).get('threads_waiting'), 'last_read_local': ct((cache or {}).get('read_at'))})
     rows.sort(key=lambda r: r['last_activity'] or '', reverse=True); return rows
 def resolve_project(q, snap=None):
-    snap = snap or idb_snapshot(); rows = project_rows(snap, include_archived=True); qq = norm(q).casefold()
+    if snap is None:
+        # A recent snapshot is enough to map a name or id to a project; a miss falls back to a fresh read
+        # (a project created or renamed in the last few seconds).
+        try: return _resolve_in(q, idb_snapshot(max_age=IDB_RESOLVE_MAX_AGE))
+        except NotFound: snap = idb_snapshot()
+    return _resolve_in(q, snap)
+def _resolve_in(q, snap):
+    rows = project_rows(snap, include_archived=True); qq = norm(q).casefold()
     for r in rows:
         if r['primary_thread_id']: _OVERVIEW[r['id']] = r['primary_thread_id']
     for test in (lambda r: r['id'] == q or r['primary_thread_id'] == q,

@@ -95,10 +95,20 @@ run mkdir -p "$CONFIG_DIR"; run chmod 700 "$CONFIG_DIR"
 if [ "$DRY" = 0 ]; then
   [ -z "$TZ_NAME" ] && TZ_NAME="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
   CCP_REPO="$REPO" CCP_CFG="$CONFIG_FILE" CCP_DISP="$DISPLAY_ID" CCP_BN="$BOT_NAME" CCP_OP="$OPERATOR" CCP_TZ="$TZ_NAME" \
+  CCP_VNC_PORT="$VNC_PORT" CCP_NOVNC_PORT="$NOVNC_PORT" \
   "$REPO/.venv/bin/python" - <<'PY'
 import json, os, pathlib
 p = pathlib.Path(os.environ['CCP_CFG']); cfg = json.loads(p.read_text()) if p.is_file() else {}
 repo = os.environ['CCP_REPO']
+# viewer_ports: the ports this installer gives x11vnc and noVNC, so the "pause while someone watches" check is explicit in
+# the config. Ports set by hand are kept; ports that were the old display's defaults follow a --display change.
+def _defaults(disp):
+    try: n = int(str(disp).split(':', 1)[1].split('.', 1)[0])
+    except Exception: return None
+    return [5900 + n, 6080 + n]
+old_ports = [int(x) for x in (cfg.get('viewer_ports') or [])]
+if not old_ports or old_ports == _defaults(cfg.get('display')):
+    cfg['viewer_ports'] = [int(os.environ['CCP_VNC_PORT']), int(os.environ['CCP_NOVNC_PORT'])]
 cfg.update({'display': os.environ['CCP_DISP'], 'launcher': f'{repo}/bin/claude-desktop-launch', 'idb_python': f'{repo}/.venv/bin/python'})
 for env, key in (('CCP_BN', 'bot_name'), ('CCP_OP', 'operator_name'), ('CCP_TZ', 'timezone')):
     if os.environ.get(env): cfg[key] = os.environ[env]

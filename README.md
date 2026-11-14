@@ -1,6 +1,8 @@
-<p align="center"><img src="docs/images/banner.png" width="720" alt="Claude Code and Grok Bot"></p>
+# claude-code-projects-mcp
 
-# claude-projects-mcp
+<p align="center"><img src="docs/assets/claude-code-projects-plugin-hero.webp" width="100%" alt="The Claude Code mascot linked to the Grok Bot orb by a dotted line on a dark background."></p>
+
+<p align="center"><a href="docs/assets/plugin-launch-v7-1080p.mp4"><strong>▶ Watch the demo</strong></a> (25 s, 1080p)</p>
 
 **Grok Bot, working in your Claude Code Projects.**
 
@@ -11,7 +13,6 @@ alongside you.
 - **Hand off work.** "Ask the docs project to fix the broken links" goes straight into that Project's thread.
 - **Keep track.** Grok Bot reads your Projects and their threads, sees what's done or waiting on you, and tells you.
 - **Pick up results.** It waits for replies, fetches files and PRs, and reports back wherever you're chatting with it.
-
 - **Unblock threads.** Projects run in Auto permission mode but still stop on cards like "Claude would like to add this
   folder to the session". Grok Bot sees them, approves what's clearly part of your task, and asks you about the rest.
 - **Relay between Projects.** It forwards a message (and its files) from one thread to another, verbatim, with a header
@@ -44,11 +45,13 @@ More in [Limits and known friction](docs/limits.md).
 
 Read: `claude_projects_list`, `claude_project_get`, `claude_thread_read`, `claude_thread_status`, `claude_thread_wait`,
 `claude_thread_attachment_get`, `claude_thread_permissions`, `claude_project_env`, `claude_app_status`, `claude_staging`,
-`claude_skill_get`, `claude_policy_get`.
+`claude_skill_get`, `claude_policy_get`, `claude_refresh`.
 
 Write (each has a dry run): `claude_thread_send`, `claude_thread_forward`, `claude_thread_permission`, `claude_thread_create`,
-`claude_project_create`, `claude_project_pin`, `claude_project_add_repo`, `claude_project_remove_repo`,
-`claude_project_set_env`, `claude_policy_propose` (writes a proposal file only).
+`claude_project_add_repo`, `claude_project_remove_repo`, `claude_project_set_env`.
+
+Write, no dry run: `claude_project_create` and `claude_project_pin` act as soon as they are called, and
+`claude_policy_propose` writes a proposal file only.
 
 ## Install with your bot
 
@@ -161,8 +164,8 @@ Some MCP clients keep the tool list they saw first; every tool can still be call
 - **Private by default.** The HTTP server binds `127.0.0.1`, requires a random bearer token (chmod 600) and keeps
   DNS-rebinding protection on. Don't expose it without a tunnel or VPN in front. No Claude tokens or cookies are read.
 - **Writes are explicit.** Sending, forwarding, creating threads or Projects, pressing permission cards and editing
-  Project settings each need a separate tool call, act as you, and spend your Claude usage. Every one of them has a
-  `dry_run`; permission presses and forwards default to it.
+  Project settings each need a separate tool call, act as you, and spend your Claude usage. All of them except
+  `claude_project_create` and `claude_project_pin` have a `dry_run`; permission presses and forwards default to it.
 - **Labeled.** Every message the plugin types starts with `[sent by Grok Bot]`, and reads mark those messages
   `sent_by_bot: true`. The tag is a label, not authentication.
 - **Your policy.** The default POLICY is in [skill/SKILL.md](skill/SKILL.md). Override it in
@@ -195,4 +198,4 @@ Unofficial: not made or endorsed by Anthropic or by Grok Bot.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The Claude and Grok Bot marks in the banner belong to their owners and aren't covered by this license.
+MIT, see [LICENSE](LICENSE). The Claude and Grok Bot marks in the README image belong to their owners and aren't covered by this license.

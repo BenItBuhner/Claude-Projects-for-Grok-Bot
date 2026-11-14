@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 (2026-11-14)
 
 ### Compatibility
 - With `legacy_field_aliases` on, `current_state` (and any dict with `waiting_on`) also carries `status_legacy` /
@@ -32,6 +32,8 @@
 - `CHANGELOG.md`.
 
 ### Changed
+- README: titled `claude-code-projects-mcp`, new hero image and a link to the launch demo (`docs/assets/`), all 23
+  tools listed (adds `claude_refresh`). The old `docs/images/banner.png` is removed.
 - Attachments are chosen by typing each absolute path into the GTK file chooser's location bar (Ctrl+L) instead of
   browsing the Places sidebar.
 - Base64 attachments are staged in a unique folder per send (`outgoing/<stamp>-<id>/<filename>`) instead of overwriting
@@ -42,6 +44,13 @@
 - An orphaned GTK "Open Files" chooser left by a failed attach is cancelled before and after every attach, and sends refuse
   to type while one is open (it used to swallow every later send's keystrokes).
 - Clipboard paste read-back is verified and retried once; non-ASCII text goes through the clipboard.
+- README: `claude_project_create` and `claude_project_pin` have no dry run (the README said every write tool had one).
+- `install.sh` writes `viewer_ports` (`5900+N`, `6080+N` for display `:N`) into the config, so the "pause while a viewer
+  is connected" check is visible there. Ports set by hand are kept; default ports follow a `--display` change.
+- Memory: every tool call that names a project used to copy and fully deserialize the app's IndexedDB in its own child
+  process, so parallel calls from several bots stacked those reads up against the service's `MemoryMax`. Now one read
+  runs at a time (callers queued behind it reuse its result) and project lookups accept a snapshot up to 30 s old
+  (`CCP_IDB_RESOLVE_MAX_AGE`), falling back to a fresh read when the name or id isn't in it.
 
 ## 0.1.0 (2026-11-10)
 - First private release: Projects, threads, sends with the `[sent by Grok Bot]` origin bracket, attachments, Project admin
