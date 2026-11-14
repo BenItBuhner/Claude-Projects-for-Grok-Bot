@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Fallback for sign-in: hand a claude://... callback URL (copied from the browser's address bar) to the running app.
+case "${1:-}" in claude://*) ;; *) echo "usage: claude-open-url 'claude://...'" >&2; exit 2;; esac
+exec "$(dirname "$(readlink -f "$0")")/claude-desktop-launch" "$1"

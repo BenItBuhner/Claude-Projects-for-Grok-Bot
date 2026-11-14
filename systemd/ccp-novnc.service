@@ -1,0 +1,10 @@
+[Unit]
+Description=claude-projects-mcp: noVNC web viewport for @DISPLAY@ on @VIEWPORT_BIND@:@NOVNC_PORT@
+After=ccp-vnc.service
+Wants=ccp-vnc.service
+[Service]
+ExecStart=/usr/bin/websockify --web @NOVNC_WEB@ @VIEWPORT_BIND@:@NOVNC_PORT@ 127.0.0.1:@VNC_PORT@
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=default.target

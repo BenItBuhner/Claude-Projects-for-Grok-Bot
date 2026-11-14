@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# stdio <-> HTTP bridge for an MCP client (e.g. a Grok Bot computer) that reaches the server over a tunnel or VPN.
+#   grok-bot-bridge https://your-host.example/mcp /path/to/mcp.token
+# The token is read from the file into an env var and expanded by mcp-remote, so it never appears in argv or `ps`.
+set -euo pipefail
+URL="${1:?usage: grok-bot-bridge <https://host/mcp> <token-file>}"; TOKEN_FILE="${2:?token file}"
+[ -r "$TOKEN_FILE" ] || { echo "grok-bot-bridge: cannot read $TOKEN_FILE" >&2; exit 2; }
+CCP_AUTH="Bearer $(tr -d '\r\n' < "$TOKEN_FILE")"; export CCP_AUTH
+exec npx -y mcp-remote@0.16.5 "$URL" --transport http-only --header 'Authorization:${CCP_AUTH}'

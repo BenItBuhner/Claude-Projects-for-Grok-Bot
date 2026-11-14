@@ -1,0 +1,12 @@
+[Unit]
+Description=claude-projects-mcp: Openbox window manager on @DISPLAY@
+After=ccp-xvfb.service
+Requires=ccp-xvfb.service
+[Service]
+Environment=DISPLAY=@DISPLAY@
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/bin/openbox
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=default.target

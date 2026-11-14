@@ -1,0 +1,7 @@
+[Unit]
+Description=claude-projects-mcp: headless X display @DISPLAY@ (the Claude app's own viewport)
+[Service]
+ExecStart=/usr/bin/Xvfb @DISPLAY@ -screen 0 @SCREEN@x24 -nolisten tcp
+Restart=on-failure
+[Install]
+WantedBy=default.target

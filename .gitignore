@@ -1,0 +1,38 @@
+# secrets / tokens / local config
+mcp.token
+*.token
+.env
+.env.*
+*.pem
+*.key
+vncpass*
+keyring-pass
+config.json
+# python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# runtime state
+cache/
+logs/
+attachments/
+.ccp-idb-*/
+*.log
+# editor / OS
+.DS_Store
+*.swp
+*~
+
+# local runtime state when state_dir points inside the checkout
+cache/
+logs/
+backups/
+scratch/
+.ccp-idb-*/
+*.dupbackup
+next/
+# host-specific helper binaries (e.g. a user-local xclip)
+local/
+staging/

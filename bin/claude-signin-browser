@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Opens sign-in / OAuth pages inside the Claude app's viewport with a dedicated browser profile
+# (never touches your normal browser profile). Set as BROWSER for the Claude desktop service.
+set -euo pipefail
+CFG_DIR="${CCP_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp}"
+PROFILE="$CFG_DIR/browser-profile"; mkdir -p "$PROFILE"; chmod 700 "$PROFILE"
+for b in chromium chromium-browser google-chrome-stable google-chrome; do
+  if command -v "$b" >/dev/null 2>&1; then
+    exec "$b" --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check --password-store=gnome-libsecret --start-maximized "$@"
+  fi
+done
+if command -v firefox >/dev/null 2>&1; then exec firefox --profile "$PROFILE" --new-instance "$@"; fi
+if command -v firefox-esr >/dev/null 2>&1; then exec firefox-esr --profile "$PROFILE" --new-instance "$@"; fi
+echo "claude-signin-browser: no chromium/chrome/firefox found; install one (install.sh does)" >&2; exit 127

@@ -1,0 +1,13 @@
+[Unit]
+Description=claude-projects-mcp: GNOME Keyring secret service (unlocked with a random local password) for the Claude app
+Requires=dbus.socket
+After=dbus.socket
+[Service]
+Type=dbus
+BusName=org.freedesktop.secrets
+StandardInput=file:@CONFIG_DIR@/keyring-pass
+ExecStart=/usr/bin/gnome-keyring-daemon --foreground --unlock --components=secrets --control-directory=%t/keyring
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=default.target
