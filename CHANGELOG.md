@@ -26,6 +26,9 @@ Not tagged or released yet. Brings the guided setup to the public repo: one copy
   upkeep (status, verify, check_beta, tidy) and surfaces host changes.
 - README rebuilt around one copy-paste prompt. The manual steps moved to `docs/manual-install.md`, and hosts are
   covered in `docs/hosts.md`.
+- README: the download-only "Watch the demo" link and the 2.4 MB video it pointed at
+  (`docs/assets/plugin-launch-v7-1080p.mp4`) are removed. A placeholder ("Demo: coming soon on X") marks where the demo
+  post's link goes.
 
 ### Host scripts (review fixes)
 - Windows (`hosts/windows/setup.ps1`):

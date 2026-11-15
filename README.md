@@ -1,8 +1,10 @@
 # Claude Projects for Grok Bot
 
+<!-- HERO_LINK: once the demo post is up, wrap the <img> below in <a href="DEMO_URL">...</a> so the image opens it. -->
 <p align="center"><img src="docs/assets/claude-code-projects-plugin-hero.webp" width="100%" alt="The Claude Code mascot linked to the Grok Bot orb by a dotted line on a dark background."></p>
 
-<p align="center"><a href="docs/assets/plugin-launch-v7-1080p.mp4"><strong>▶ Watch the demo</strong></a> (25 s, 1080p)</p>
+<!-- DEMO_URL: replace with X post link -->
+<p align="center">Demo: coming soon on X</p>
 
 **Grok Bot, working in your Claude Code Projects.** Hand off work to a Project, keep track of what's done or waiting on
 you, pick up results, and unblock threads stuck on a permission card. It runs on your own Claude subscription, through
