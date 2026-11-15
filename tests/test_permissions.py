@@ -126,6 +126,7 @@ def test_op_permission_dry_run_and_apply(monkeypatch):
     monkeypatch.setattr(C, 'go_home', lambda: True)
     monkeypatch.setattr(C, 'ui_lock', FakeLock)
     monkeypatch.setattr(C, 'log', lambda m: None); monkeypatch.setattr(C.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(C, 'busy_state', lambda tid: False); monkeypatch.setattr(C, 'dialogs', lambda: [])   # no real accessibility bus
     monkeypatch.setattr(C, 'detect_permission_cards', lambda: state['cards'])
     def fake_act(e, what=''):
         pressed.append(e.label); state['cards'] = []; return True
