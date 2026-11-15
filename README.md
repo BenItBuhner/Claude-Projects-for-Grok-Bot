@@ -11,7 +11,7 @@ you, pick up results, and unblock threads stuck on a permission card. It runs on
 the real Claude app on an always-on computer of yours.
 
 An MCP server with 24 tools. Works with Grok Bot or any agent that speaks MCP and can run shell commands.
-Latest release: [v1.0.2](https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot/releases/latest).
+Latest release: [v1.0.3](https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot/releases/latest).
 
 ## Set it up
 
@@ -62,7 +62,7 @@ Everything it types starts with `[sent by Grok Bot]`, so you and Claude can alwa
 ## How it works
 
 ```
-Grok Bot ──MCP──▶ cpg_mcp.py ──▶ claude-projects (CLI) ──AT-SPI + xdotool──▶ Claude desktop app on a headless display
+Grok Bot ──MCP──▶ claude_projects/mcp_server.py ──▶ claude-projects (CLI) ──AT-SPI + xdotool──▶ Claude desktop app on a headless display
                                        └──── private copy of the app's IndexedDB (project list, sessions)
 ```
 

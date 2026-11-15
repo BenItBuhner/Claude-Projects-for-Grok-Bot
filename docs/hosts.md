@@ -8,7 +8,7 @@ on, because your agent reaches your Projects through it.
 |---|---|---|---|
 | **Always-on Linux** (recommended) | natively | `./claude-projects setup preflight`, then `./claude-projects setup install` | `preflight` warns if the machine can still suspend |
 | **Always-on Mac** (macOS 13+, not yet tried on a real Mac) | a small Ubuntu 24.04 VM (Lima, instance `claude-projects`, 2 CPUs, 4 GB, no access to your files) | `bash hosts/macos/setup.sh` | a LaunchAgent starts the VM at login; keep the user logged in (or turn on automatic login); `--no-sleep` sets `pmset -c sleep 0` |
-| **Always-on Windows PC** | a dedicated WSL2 distro `ClaudeProjects` (Ubuntu 24.04, user `cpg` without sudo, systemd on); needs WSL 2.4.4+ (the script updates it) | `powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1` | a scheduled task keeps the distro running from sign-in, so turn on automatic sign-in, or add `-AtStartup` to also start it at boot; `-WebDownload` for PCs without the Microsoft Store; `-NoSleep` turns off sleep on AC |
+| **Always-on Windows PC** | a dedicated WSL2 distro `ClaudeProjects` (Ubuntu 24.04, user `claude` without sudo, systemd on); needs WSL 2.4.4+ (the script updates it) | `powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1` | a scheduled task keeps the distro running from sign-in, so turn on automatic sign-in, or add `-AtStartup` to also start it at boot; `-WebDownload` for PCs without the Microsoft Store; `-NoSleep` turns off sleep on AC |
 | Laptop (any OS) | as above | as above | works only while it's awake and plugged in |
 | Your agent's own box | natively, stdio on the same machine | as Linux | **fallback**: works only while the box is up |
 
@@ -34,7 +34,7 @@ bash hosts/macos/setup.sh --ref v1.0.2                                          
 powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1 -Ref v1.0.2     # Windows
 ```
 
-Both scripts also read `CPG_REPO_REF` (the flag wins). On a fresh install they clone and check out that ref; on a
+Both scripts also read `CLAUDE_PROJECTS_REPO_REF` (the flag wins). On a fresh install they clone and check out that ref; on a
 re-run, where `~/claude-projects-mcp` already exists in the VM or distro, they fetch the ref from origin and check it
 out, and they refuse (leaving the clone as it is) when it has uncommitted changes or local commits that origin doesn't
 have. Without a ref nothing changes: a missing clone gets the default branch and an existing one is left alone, so to go
@@ -53,9 +53,9 @@ hosts\windows\claude-projects.cmd setup status      # Windows: runs ./claude-pro
 
 | host | same machine | over SSH |
 |---|---|---|
-| Linux | `~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/cpg_mcp.py --stdio` | `ssh you@host <that command>` |
+| Linux | `~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/claude_projects/mcp_server.py --stdio` | `ssh you@host <that command>` |
 | Mac | `limactl shell claude-projects -- bash -lc '<that command>'` (single quotes: `~` must expand inside the VM) | `ssh you@mac "limactl shell claude-projects -- bash -lc '<that command>'"` (Remote Login on) |
-| Windows | `wsl.exe -d ClaudeProjects -u cpg --exec /home/cpg/claude-projects-mcp/.venv/bin/python /home/cpg/claude-projects-mcp/cpg_mcp.py --stdio` | `ssh you@pc <that command>` (OpenSSH Server on) |
+| Windows | `wsl.exe -d ClaudeProjects -u claude --exec /home/claude/claude-projects-mcp/.venv/bin/python /home/claude/claude-projects-mcp/claude_projects/mcp_server.py --stdio` | `ssh you@pc <that command>` (OpenSSH Server on) |
 
 Or HTTP through your own tunnel or VPN to `127.0.0.1:8791`, with `bin/grok-bot-bridge` (see [Manual install](manual-install.md)).
 `./claude-projects setup connect` prints the exact commands for the host it runs on.

@@ -24,8 +24,7 @@ backups/
 staging/
 scratch/
 next/
-.cpg-idb-*/
-.ccp-idb-*/
+.claude-projects-idb-*/
 *.dupbackup
 *.log
 

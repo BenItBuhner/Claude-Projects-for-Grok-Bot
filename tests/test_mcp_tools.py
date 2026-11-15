@@ -5,7 +5,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
 
 mcp_mod = pytest.importorskip('mcp')
-import cpg_mcp as M
+from claude_projects import mcp_server as M
 
 EXPECTED = {
     'claude_projects_list', 'claude_project_get', 'claude_thread_read', 'claude_thread_attachment_get', 'claude_thread_send',
@@ -45,7 +45,7 @@ def test_send_passes_bot_name(monkeypatch):
     monkeypatch.setattr(M, 'run', fake_run)
     asyncio.run(M.claude_thread_send('Demo Project', 'hello', bot_name='Scout', dry_run=True))
     assert seen['args'][:2] == ['send', 'Demo Project'] and '--bot-name' in seen['args'] and 'Scout' in seen['args']
-    assert '--dry-run' in seen['args'] and seen['msg'] == 'hello'   # the bracket is added once, in cpg_core
+    assert '--dry-run' in seen['args'] and seen['msg'] == 'hello'   # the bracket is added once, in claude_projects.core
     asyncio.run(M.claude_thread_create('Demo Project', 'T', 'do it', dry_run=True, bot_name='Scout'))
     assert seen['args'][0] == 'create-thread' and 'Scout' in seen['args']
 
@@ -54,7 +54,7 @@ def test_systemd_templates_render(tmp_path):
     subs = {'DISPLAY': ':99', 'SCREEN': '540x1170', 'REPO': '/opt/x', 'CONFIG_DIR': '/c', 'CONFIG_FILE': '/c/config.json',
             'VNC_PORT': '5999', 'NOVNC_PORT': '6179', 'VIEWPORT_BIND': '127.0.0.1', 'NOVNC_WEB': '/usr/share/novnc',
             'MCP_HOST': '127.0.0.1', 'MCP_PORT': '8791', 'KEYRING_ENV': 'Environment=XDG_DATA_HOME=/k'}
-    for f in (pathlib.Path(M.__file__).parent / 'systemd').iterdir():
+    for f in (pathlib.Path(M.__file__).parent.parent / 'systemd').iterdir():
         s = f.read_text()
         for k, v in subs.items(): s = s.replace(f'@{k}@', v)
         assert not re.search(r'@[A-Z_]+@', s), f.name
@@ -105,7 +105,7 @@ def test_skill_and_policy_tools():
 
 
 def test_skill_documents_every_tool():
-    text = (pathlib.Path(M.__file__).parent / 'skill' / 'SKILL.md').read_text()
+    text = (pathlib.Path(M.__file__).parent.parent / 'skill' / 'SKILL.md').read_text()
     missing = [n for n in tools() if n not in text]
     assert not missing, missing
 

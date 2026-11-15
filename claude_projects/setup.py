@@ -14,31 +14,25 @@ referred to by path only.
 """
 import os, sys, re, json, time, shutil, socket, pathlib, platform, subprocess, datetime, argparse, getpass, hashlib, secrets
 
-REPO = pathlib.Path(__file__).resolve().parent
+REPO = pathlib.Path(__file__).resolve().parent.parent   # the checkout
+_PKG = REPO / 'claude_projects'   # run as a file: import from the checkout, not from inside the package
+sys.path[:] = [p for p in sys.path if pathlib.Path(p or '.').resolve() != _PKG]
 sys.path.insert(0, str(REPO))
-import cpg_config  # noqa: E402  (stdlib only)
-from cpg_origin import ORIGIN_PREFIX  # noqa: E402
+from claude_projects import config as cfg_mod  # noqa: E402  (stdlib only)
+from claude_projects.origin import ORIGIN_PREFIX  # noqa: E402
 
-CFG = cpg_config.CFG
-CONFIG_DIR = cpg_config.CONFIG_DIR
-CONFIG_FILE = cpg_config.CONFIG_FILE
+CFG = cfg_mod.CFG
+CONFIG_DIR = cfg_mod.CONFIG_DIR
+CONFIG_FILE = cfg_mod.CONFIG_FILE
 STATE_DIR = pathlib.Path(CFG['state_dir'])
 STATE_FILE = STATE_DIR / 'setup.json'
 UNIT_DIR = pathlib.Path(os.environ.get('XDG_CONFIG_HOME') or (pathlib.Path.home() / '.config')) / 'systemd' / 'user'
 LEGACY_MCP_UNIT = 'claude-projects-mcp'   # the hand-built layout from before install.sh (one unit + venv/)
-UNIT_PREFIX, OLD_UNIT_PREFIX = 'cpg', 'ccp'   # install.sh's units; before 1.0.2 they were called ccp-*
+UNIT_PREFIX = 'claude-projects'   # install.sh's units: claude-projects-xvfb, -wm, -keyring, -desktop, -vnc, -novnc, -mcp, -refresh
 
 
-def unit_prefix():
-    """'cpg', or 'ccp' for an install.sh install from before the rename that still has only ccp-* units (it keeps
-    working until install.sh runs again, which moves it to the cpg-* names)."""
-    if not (UNIT_DIR / f'{UNIT_PREFIX}-xvfb.service').exists() and (UNIT_DIR / f'{OLD_UNIT_PREFIX}-xvfb.service').exists():
-        return OLD_UNIT_PREFIX
-    return UNIT_PREFIX
-
-
-def U(name): return f'{unit_prefix()}-{name}'
-def core_units(): return [U('xvfb'), U('wm'), U('keyring'), U('claude-desktop')]
+def U(name): return f'{UNIT_PREFIX}-{name}'
+def core_units(): return [U('xvfb'), U('wm'), U('keyring'), U('desktop')]
 def viewport_units(): return [U('vnc'), U('novnc')]
 def mcp_unit(): return U('mcp')
 def all_units(): return core_units() + viewport_units() + [mcp_unit()]
@@ -137,7 +131,7 @@ def overall(checks):
 
 
 def as_root(cmd):
-    """How the agent runs a root command on this host. In the Windows distro the cpg user has no sudo on purpose: root
+    """How the agent runs a root command on this host. In the Windows distro the claude user has no sudo on purpose: root
     steps go through `wsl.exe -u root` from Windows."""
     if detect_platform().get('wsl') or (load_state().get('host') or {}).get('class') == 'windows_runtime':
         return f"wsl.exe -d {os.environ.get('WSL_DISTRO_NAME') or 'ClaudeProjects'} -u root -- bash -c '{cmd}'   (from Windows)"
@@ -147,7 +141,7 @@ def as_root(cmd):
 
 
 def service_mode():
-    """'systemd' (user units) or 'process' (cpg_proc.py: hosts without user systemd, such as a container on tini)."""
+    """'systemd' (user units) or 'process' (claude_projects/proc.py: hosts without user systemd, such as a container on tini)."""
     return (CFG.get('service_mode') or 'systemd').strip()
 
 
@@ -156,7 +150,7 @@ def http_enabled(): return CFG.get('mcp_http', True) is not False
 
 def _systemctl_user(*args, timeout=30):
     if service_mode() == 'process':
-        return RUN([sys.executable, str(REPO / 'cpg_proc.py'), *args], timeout=timeout)
+        return RUN([*cfg_mod.module_argv('claude_projects.proc'), *args], timeout=timeout)
     return RUN(['systemctl', '--user', *args], timeout=timeout)
 
 
@@ -183,7 +177,7 @@ def _port_open(port, host='127.0.0.1'):
     except OSError: return False
 
 
-def _display_n(): return cpg_config.display_number(CFG.get('display') or ':99')
+def _display_n(): return cfg_mod.display_number(CFG.get('display') or ':99')
 
 
 def ports():
@@ -192,7 +186,7 @@ def ports():
 
 
 def layout():
-    """'standard' (install.sh: .venv + cpg-* units), 'legacy' (the hand-built layout: venv/ and one
+    """'standard' (install.sh: .venv + claude-projects-* units), 'legacy' (the hand-built layout: venv/ and one
     claude-projects-mcp.service, with the display and the app started some other way) or None."""
     if (REPO / '.venv' / 'bin' / 'python').exists() and CONFIG_FILE.is_file() and all((UNIT_DIR / f'{u}.service').exists() for u in core_units()):
         return 'standard'
@@ -230,8 +224,8 @@ def detect_platform():
         except Exception: f['wsl'] = False
         f['lima'] = pathlib.Path('/etc/lima-boot.conf').exists() or f['hostname'].startswith('lima-')
         f['pid1'] = _pid1(); cf = _container_facts(); f['container'] = _in_container(cf)
-        # a host without systemd is how the Grok Bot box runs; CPG_HOST_KIND=box (or --host-kind box) says so outright
-        reason = 'CPG_HOST_KIND=box' if os.environ.get('CPG_HOST_KIND') == 'box' else box_reason(dict(cf, pid1=f['pid1'], wsl=f['wsl'], lima=f['lima']))
+        # a host without systemd is how the Grok Bot box runs; CLAUDE_PROJECTS_HOST_KIND=box (or --host-kind box) says so outright
+        reason = 'CLAUDE_PROJECTS_HOST_KIND=box' if os.environ.get('CLAUDE_PROJECTS_HOST_KIND') == 'box' else box_reason(dict(cf, pid1=f['pid1'], wsl=f['wsl'], lima=f['lima']))
         f['grok_bot_box'] = bool(reason)
         if reason: f['box_reason'] = reason
         f['laptop'] = _is_laptop()
@@ -342,7 +336,7 @@ def linux_checks(f, host_class):
     if rc == 0: out.append(check('systemd_user', 'pass', 'user systemd is running', service_mode='systemd'))
     elif f.get('pid1') not in ('systemd', None) and not f.get('wsl'):
         mode = 'process'
-        out.append(check('systemd_user', 'pass', f"no systemd here (PID 1 is {f.get('pid1')}): the plugin runs its own process supervisor (cpg_proc.py)",
+        out.append(check('systemd_user', 'pass', f"no systemd here (PID 1 is {f.get('pid1')}): the plugin runs its own process supervisor (claude_projects/proc.py)",
                          service_mode='process'))
     else:
         fix = ("WSL: put '[boot]\\nsystemd=true' in /etc/wsl.conf, then 'wsl --shutdown' and reopen" if f.get('wsl')
@@ -358,7 +352,7 @@ def linux_checks(f, host_class):
         out.append(check('user', 'warn', 'running as root; the plugin is meant to run as a regular user', fix='Create or use a regular user with sudo'))
     rc, _, _ = RUN(['sudo', '-n', 'true'], timeout=10)
     if host_class == 'windows_runtime' and rc != 0 and os.geteuid() != 0:
-        # the Windows distro's cpg user has no sudo by design: hosts/windows/setup.ps1 runs the root steps itself
+        # the Windows distro's claude user has no sudo by design: hosts/windows/setup.ps1 runs the root steps itself
         out.append(check('sudo', 'pass', 'root steps run from Windows with wsl -u root; no sudo needed',
                          command=as_root(f'{REPO}/install.sh --apt-only')))
     else: out.append(check('sudo', 'pass' if rc == 0 or os.geteuid() == 0 else 'warn',
@@ -587,12 +581,12 @@ def cmd_reconfigure(a):
     rc, out, err = RUN(args, timeout=900)
     after, cfg_after = _unit_hashes(), _file_hash(CONFIG_FILE)
     changed = [u for u in after if after[u] != before.get(u)]
-    restart = [u for u in changed if u != U('claude-desktop') and u in all_units()]
+    restart = [u for u in changed if u != U('desktop') and u in all_units()]
     if cfg_after != cfg_before and mcp_unit() not in restart: restart.append(mcp_unit())
     held = []
-    if U('claude-desktop') in changed:
-        if a.restart_app: restart.append(U('claude-desktop'))
-        else: held.append(U('claude-desktop'))
+    if U('desktop') in changed:
+        if a.restart_app: restart.append(U('desktop'))
+        else: held.append(U('desktop'))
     for u in restart:
         if unit_enabled(u) or unit_active(u): _systemctl_user('restart', f'{u}.service')
     vp = _viewport_auto_off()
@@ -856,7 +850,7 @@ def cmd_check_beta(a):
     if v == 'unknown':
         shot = STATE_DIR / 'setup-beta-check.jpg'; s = CLI(['screenshot', str(shot)], 60)
         if s.get('file'): res['screenshot'] = s['file']
-    if v == 'app_unreachable': res['next_action'] = unit_log_hint(U('claude-desktop')) + '; claude-projects setup verify'
+    if v == 'app_unreachable': res['next_action'] = unit_log_hint(U('desktop')) + '; claude-projects setup verify'
     if v == 'app_outdated': res['next_action'] = as_root('apt-get update && apt-get install --only-upgrade -y claude-desktop') + ', then claude-projects setup check-beta'
     if BETA_MESSAGES.get(v): res['tell_user'] = BETA_MESSAGES[v]
     # the 10-minute background refresh only makes sense when there are Projects to refresh
@@ -870,9 +864,9 @@ def cmd_check_beta(a):
 # ---------------------------------------------------------------- connecting the agent
 
 def connect_options():
-    py = venv_python(); srv = REPO / 'cpg_mcp.py'; tok = CFG.get('token_file')
+    py = venv_python(); tok = CFG.get('token_file')
     user, host = getpass.getuser(), socket.gethostname(); hc = load_state().get('host', {}).get('class')
-    stdio = f'{py} {srv} --stdio'
+    stdio = f'env PYTHONPATH={REPO} {py} -m claude_projects.mcp_server --stdio'
     opts = {
         'same_host': {'when': 'the agent runs on this machine (for example the Grok Bot box)', 'transport': 'stdio', 'command': stdio},
         'ssh': {'when': 'the agent can SSH to this machine', 'transport': 'stdio over ssh', 'command': f'ssh {user}@{host} {stdio}'},
@@ -889,7 +883,7 @@ def connect_options():
         opts['ssh']['command'] = f'ssh <you>@<mac> limactl shell claude-projects -- {stdio}'
         opts['ssh']['when'] = 'the agent can SSH to the Mac (Remote Login on)'
     if hc == 'windows_runtime':
-        opts['ssh']['command'] = f'ssh <you>@<pc> wsl.exe -d ClaudeProjects -u cpg --exec {stdio}'
+        opts['ssh']['command'] = f'ssh <you>@<pc> wsl.exe -d ClaudeProjects -u claude --exec {stdio}'
         opts['ssh']['when'] = 'the agent can SSH to the PC (OpenSSH Server on)'
     rec = 'same_host' if hc == 'grok_bot_box' else 'ssh'
     return opts, rec
@@ -914,7 +908,7 @@ def _first_project(projects):
 
 def mcp_tool_names():
     py = venv_python()
-    code = 'import asyncio,json,cpg_mcp;print(json.dumps([t.name for t in asyncio.run(cpg_mcp.mcp.list_tools())]))'
+    code = 'import asyncio,json;from claude_projects import mcp_server as m;print(json.dumps([t.name for t in asyncio.run(m.mcp.list_tools())]))'
     rc, o, e = RUN([str(py if py.exists() else sys.executable), '-c', code], timeout=60,
                    env=dict(os.environ, PYTHONPATH=str(REPO), PYTHONWARNINGS='ignore'))
     try: return json.loads(o.strip().splitlines()[-1])
@@ -969,8 +963,8 @@ def cmd_verify(a):
     if sk.get('sha256'): checks.append(check('skill', 'pass', f"sha256 {sk['sha256']}", sha256=sk['sha256']))
     # app
     s = CLI(['status'], 60)
-    if s.get('app'): checks.append(check('app', 'fail', s['app'], fix=unit_log_hint(U('claude-desktop'))))
-    elif s.get('error'): checks.append(check('app', 'fail', s.get('message', 'status failed'), fix=unit_log_hint(U('claude-desktop'))))
+    if s.get('app'): checks.append(check('app', 'fail', s['app'], fix=unit_log_hint(U('desktop'))))
+    elif s.get('error'): checks.append(check('app', 'fail', s.get('message', 'status failed'), fix=unit_log_hint(U('desktop'))))
     else:
         checks.append(check('app', 'pass', f"route {s.get('route')}"))
         checks.append(check('signed_in', 'pass' if s.get('signed_in') else 'fail', 'signed in' if s.get('signed_in') else 'not signed in', fix=None if s.get('signed_in') else 'claude-projects setup signin start'))
@@ -1030,7 +1024,7 @@ def cmd_tidy(a):
             acts.append({'what': f'stale UI-lock holder record (pid {pid} is gone)', 'done': apply})
     except Exception: pass
     cutoff = time.time() - 3600
-    for d in [*STATE_DIR.glob('.cpg-idb-*'), *STATE_DIR.glob('.ccp-idb-*')]:   # .ccp-idb-*: left by releases before 1.0.2
+    for d in STATE_DIR.glob('.claude-projects-idb-*'):
         try:
             if d.stat().st_mtime < cutoff:
                 if apply: shutil.rmtree(d, ignore_errors=True)
@@ -1102,7 +1096,7 @@ def compute_status():
             return done('installed_unhealthy', 'claude-projects setup install   (re-creates the missing service files)', None, missing=missing)
         if not all(units.values()):
             down = [u for u, v in units.items() if not v]
-            outside = _app_pids() if U('claude-desktop') in down else []
+            outside = _app_pids() if U('desktop') in down else []
             if outside:
                 return done('installed_unhealthy', 'ask the user, then stop that app and run claude-projects setup start', (
                     f'The Claude app on {socket.gethostname()} was started by hand, outside the plugin\'s services, so the plugin '
@@ -1134,13 +1128,13 @@ def compute_status():
 
 
 def _app_pids():
-    """Claude app processes not started by the plugin's cpg-claude-desktop service."""
-    if installed() and unit_active(U('claude-desktop')): return []
+    """Claude app processes not started by the plugin's claude-projects-desktop service."""
+    if installed() and unit_active(U('desktop')): return []
     rc, o, _ = RUN(['pgrep', '-f', '-a', 'claude-desktop'], timeout=10)
     pids = []
     for ln in (o or '').splitlines():
         pid, _, cmd = ln.partition(' ')
-        if pid.isdigit() and int(pid) != os.getpid() and not any(x in cmd for x in ('claude-desktop-launch', 'pgrep', 'cpg_setup', 'cpg_proc', 'ccp_setup', 'ccp_proc')):
+        if pid.isdigit() and int(pid) != os.getpid() and not any(x in cmd for x in ('claude-desktop-launch', 'pgrep', 'claude_projects')):
             pids.append(int(pid))
     return pids
 

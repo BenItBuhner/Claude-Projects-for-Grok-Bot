@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import conftest  # noqa: F401  (isolated config when run as a plain script)
 
-import cpg_core as C
+from claude_projects import core as C
 
 
 def test_loading_text_is_not_content():
@@ -29,7 +29,7 @@ def test_save_target_is_ascii_and_in_dir():
 
 
 def test_store_file_moves_and_indexes(monkeypatch):
-    tmp = Path(tempfile.mkdtemp(prefix='cpg-dl-test-'))
+    tmp = Path(tempfile.mkdtemp(prefix='claude-projects-dl-test-'))
     monkeypatch.setattr(C, 'ATT_DIR', tmp / 'attachments')
     src_dir = tmp / 'attachments' / 'incoming' / '1'
     src_dir.mkdir(parents=True)

@@ -3,8 +3,8 @@ import pathlib, sys
 import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_core as C
-import cpg_staging as S
+from claude_projects import core as C
+from claude_projects import staging as S
 
 SRC = {'project': 'Docs', 'project_id': 'chan_SRC', 'primary_thread_id': 'cse_SRC', 'thread_id': 'cmsg_CHILD', 'thread_title': 'Fix links',
        'messages': [

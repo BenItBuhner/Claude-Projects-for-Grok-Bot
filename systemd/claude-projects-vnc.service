@@ -1,7 +1,7 @@
 [Unit]
 Description=claude-projects-mcp: x11vnc view of @DISPLAY@ (localhost only, password protected)
-After=cpg-xvfb.service
-Requires=cpg-xvfb.service
+After=claude-projects-xvfb.service
+Requires=claude-projects-xvfb.service
 [Service]
 ExecStartPre=/bin/sleep 2
 ExecStart=/usr/bin/x11vnc -display @DISPLAY@ -localhost -rfbport @VNC_PORT@ -rfbauth @CONFIG_DIR@/vncpass -forever -shared -noxdamage -quiet

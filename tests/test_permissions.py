@@ -3,12 +3,12 @@ import pathlib, sys
 import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_permissions as P
-import cpg_core as C
+from claude_projects import permissions as P
+from claude_projects import core as C
 
 
 class Tree:
-    """Build {id, parent, role, name, text} snapshots the way cpg_core._snapshot_subtree does."""
+    """Build {id, parent, role, name, text} snapshots the way core_mod._snapshot_subtree does."""
     def __init__(self): self.nodes = []
     def add(self, role, name='', text='', parent=None):
         nid = len(self.nodes); self.nodes.append({'id': nid, 'parent': parent, 'role': role, 'name': name, 'text': text}); return nid

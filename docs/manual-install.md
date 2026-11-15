@@ -39,7 +39,7 @@ and log in in the browser that opens inside it. If it stops on a `claude://...` 
 
 ## 4. Configure
 
-Settings live in `~/.config/claude-projects-mcp/config.json` (every key also has a `CPG_*` environment variable):
+Settings live in `~/.config/claude-projects-mcp/config.json` (every key also has a `CLAUDE_PROJECTS_*` environment variable):
 
 | key | default | what |
 |---|---|---|
@@ -48,7 +48,7 @@ Settings live in `~/.config/claude-projects-mcp/config.json` (every key also has
 | `timezone` | machine zone | zone for `*_local` timestamps |
 | `mcp_host` / `mcp_port` | `127.0.0.1` / `8791` | HTTP listener (`install.sh --mcp-port N`) |
 | `mcp_http` | `true` | `false` = no HTTP server, stdio only (`install.sh --no-http`; the box default) |
-| `service_mode` | picked by install.sh | `systemd` (user units) or `process` (the plugin's own supervisor, `cpg_proc.py`, on hosts without user systemd) |
+| `service_mode` | picked by install.sh | `systemd` (user units) or `process` (the plugin's own supervisor, `claude_projects/proc.py`, on hosts without user systemd) |
 | `keyring_data_dir` | private dir (new installs) | where the plugin's own gnome-keyring keeps its keyring, apart from a desktop login keyring |
 | `allowed_hosts` | `[]` | extra Host headers (your tunnel hostname) |
 | `viewer_ports` | `5900+N`, `6080+N` | VNC/noVNC ports; UI actions refuse while a viewer is connected |
@@ -59,22 +59,22 @@ Your rules for agents go in `~/.config/claude-projects-mcp/policy.md` (see [Safe
 
 ## 5. Run as a service
 
-The installer enables user services (and `loginctl enable-linger`, so they survive logout). The MCP server is `cpg-mcp`:
+The installer enables user services (and `loginctl enable-linger`, so they survive logout). The MCP server is `claude-projects-mcp`:
 
 ```bash
-systemctl --user status cpg-mcp
-systemctl --user restart cpg-mcp            # after a config change or `git pull`
-journalctl --user -u cpg-mcp -n 50
+systemctl --user status claude-projects-mcp
+systemctl --user restart claude-projects-mcp            # after a config change or `git pull`
+journalctl --user -u claude-projects-mcp -n 50
 curl -s http://127.0.0.1:8791/healthz       # -> ok
 ```
 
 On a host without user systemd (for example a container whose PID 1 is tini) the installer picks process mode: the same
-unit files, run by `cpg_proc.py`, with its own D-Bus session bus. Logs are in `~/.local/state/claude-projects-mcp/proc/logs/`.
+unit files, run by `claude_projects/proc.py`, with its own D-Bus session bus. Logs are in `~/.local/state/claude-projects-mcp/proc/logs/`.
 
 ```bash
-python3 cpg_proc.py status                  # what runs
+python3 claude_projects/proc.py status                  # what runs
 ./claude-projects setup start               # start everything (also after the host restarted)
-python3 cpg_proc.py restart cpg-mcp
+python3 claude_projects/proc.py restart claude-projects-mcp
 ```
 
 The MCP server starts the supervisor when it isn't running, so an agent that connects over stdio brings the services
@@ -85,12 +85,12 @@ back by itself.
 **Same computer or over SSH (stdio, no token needed):**
 
 ```bash
-~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/cpg_mcp.py --stdio
-ssh you@your-host ~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/cpg_mcp.py --stdio
+~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/claude_projects/mcp_server.py --stdio
+ssh you@your-host ~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/claude_projects/mcp_server.py --stdio
 ```
 
 **Over HTTP with `mcp-remote`** (point your own tunnel or VPN at `127.0.0.1:8791`, add its hostname to
-`allowed_hosts`, restart `cpg-mcp`, and copy `~/.config/claude-projects-mcp/mcp.token` privately to the client).
+`allowed_hosts`, restart `claude-projects-mcp`, and copy `~/.config/claude-projects-mcp/mcp.token` privately to the client).
 For example in Cursor's `~/.cursor/mcp.json`:
 
 ```json
@@ -99,8 +99,8 @@ For example in Cursor's `~/.cursor/mcp.json`:
     "claude-projects": {
       "command": "npx",
       "args": ["-y", "mcp-remote@0.16.5", "https://your-host.example/mcp", "--transport", "http-only",
-               "--header", "Authorization:${CPG_AUTH}"],
-      "env": { "CPG_AUTH": "Bearer <contents of mcp.token>" }
+               "--header", "Authorization:${CLAUDE_PROJECTS_AUTH}"],
+      "env": { "CLAUDE_PROJECTS_AUTH": "Bearer <contents of mcp.token>" }
     }
   }
 }

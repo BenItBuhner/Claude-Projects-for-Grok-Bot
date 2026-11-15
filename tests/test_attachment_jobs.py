@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_core as C
+from claude_projects import core as C
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 32
 
@@ -123,17 +123,17 @@ def test_worker_command_line(monkeypatch, tmp_path):
     monkeypatch.setattr(C, '_use_systemd_scope', lambda: False)
     C._att_spawn_worker('k', {'chan': 'chan_X', 'message_index': 138, 'n': 2, 'thread': 'Design review', 'force': True})
     argv = seen['argv']
-    assert argv[2:] == ['--json', '--force', 'attachment', 'get', 'chan_X', '138.2', '--job', '--thread', 'Design review']
+    assert argv[1:3] == ['-m', 'claude_projects'] and argv[3:] == ['--json', '--force', 'attachment', 'get', 'chan_X', '138.2', '--job', '--thread', 'Design review']
     assert seen['kw']['start_new_session'] is True
 
 
 def test_cli_and_mcp_pass_the_budget():
-    root = pathlib.Path(C.__file__).resolve().parent
-    mcp_src = (root / 'cpg_mcp.py').read_text()
+    root = pathlib.Path(C.__file__).resolve().parent.parent
+    mcp_src = (root / 'claude_projects/mcp_server.py').read_text()
     tool = mcp_src[mcp_src.index('async def claude_thread_attachment_get'):mcp_src.index('@mcp.tool()', mcp_src.index('async def claude_thread_attachment_get'))]
     assert "'--budget', str(ATTACH_BUDGET)" in tool and "'--refresh'" in tool
-    assert float(__import__('re').search(r"CPG_ATTACH_BUDGET', '(\d+)'", mcp_src).group(1)) <= 45
-    core = (root / 'cpg_core.py').read_text()
+    assert float(__import__('re').search(r"CLAUDE_PROJECTS_ATTACH_BUDGET', '(\d+)'", mcp_src).group(1)) <= 45
+    core = (root / 'claude_projects/core.py').read_text()
     assert "'--budget'" in core and "'--job'" in core and "'--refresh'" in core
 
 

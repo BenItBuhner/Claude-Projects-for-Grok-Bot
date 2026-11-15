@@ -57,14 +57,14 @@ Linux runtime, with its own copy of the app signed in separately; the user's own
 
 | | macOS 13+ | Windows 10 22H2 / 11 |
 |---|---|---|
-| runtime | Lima VM `claude-projects`: Ubuntu 24.04, 2 CPUs, 4 GB, 20 GB, `--mount-none` | WSL2 distro `ClaudeProjects`: Ubuntu 24.04, user `cpg` without sudo, systemd on in `/etc/wsl.conf` |
+| runtime | Lima VM `claude-projects`: Ubuntu 24.04, 2 CPUs, 4 GB, 20 GB, `--mount-none` | WSL2 distro `ClaudeProjects`: Ubuntu 24.04, user `claude` without sudo, systemd on in `/etc/wsl.conf` |
 | one-shot script | `bash hosts/macos/setup.sh` | `powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1` |
-| run claude-projects | `limactl shell claude-projects -- bash -lc 'cd ~/claude-projects-mcp && ./claude-projects setup status'` (or `hosts/macos/claude-projects`) | base64 script via `wsl.exe -d ClaudeProjects -u cpg --exec /bin/bash -c ...` (or `hosts\windows\claude-projects.cmd` from cmd) |
+| run claude-projects | `limactl shell claude-projects -- bash -lc 'cd ~/claude-projects-mcp && ./claude-projects setup status'` (or `hosts/macos/claude-projects`) | base64 script via `wsl.exe -d ClaudeProjects -u claude --exec /bin/bash -c ...` (or `hosts\windows\claude-projects.cmd` from cmd) |
 | root steps | `sudo` inside the VM (Lima's user has it) | from Windows: `wsl.exe -d ClaudeProjects -u root ...` |
 | stays running | LaunchAgent starts the VM at login; linger inside | hidden scheduled task keeps `sleep infinity` running in the distro; optional at-startup task |
 | ports | Lima forwards the guest's localhost to the Mac's `127.0.0.1` | WSL `localhostForwarding` to Windows `127.0.0.1` |
 | viewer link | `http://127.0.0.1:6179/vnc.html` in the Mac browser | `http://127.0.0.1:6179/vnc.html` in the Windows browser |
-| password file | in the VM: `~/.config/claude-projects-mcp/vncpass.txt` | in the distro: `/home/cpg/.config/claude-projects-mcp/vncpass.txt` |
+| password file | in the VM: `~/.config/claude-projects-mcp/vncpass.txt` | in the distro: `/home/claude/.config/claude-projects-mcp/vncpass.txt` |
 | always-on | `pmset -c sleep 0` (ask), auto login | `powercfg /change standby-timeout-ac 0` (ask), auto sign-in or `-AtStartup` |
 
 Prefer the script. When it isn't available or stops halfway, do the same steps by hand: they're spelled out, with
@@ -112,8 +112,9 @@ the box, pass the warning on to the user before you install.
   8791; `--mcp-port N` moves it and `--no-http` turns it off.
 - Without systemd, nothing restarts the services after the box restarts until the MCP server starts (it brings the
   supervisor up) or you run `./claude-projects setup start`. `status` does it too.
-- Installs from before 1.0.2 use older names for the CLI, services and variables. They still work and count as a normal
-  install; the next `install.sh` renames them (table: "Names before 1.0.2" in `docs/how-it-works.md`).
+- Installs from 1.0.2 and earlier have their services under older names, so `status` reports them as not installed
+  yet. `install` migrates them in place (old services removed, `claude-projects-*` installed, config, sign-in and state
+  kept); see "Migration from older names" in `docs/how-it-works.md`.
 - An older hand-built install (`claude-projects-mcp.service` with `venv/`) is recognized as installed. `install` leaves
   it alone (`legacy_layout`); migrating needs `--migrate` and the user's OK.
 
@@ -159,8 +160,8 @@ has a project list. Verdicts:
 
 `./claude-projects setup connect` lists the options and recommends one:
 
-- **same host** (the box): stdio, `<repo>/.venv/bin/python <repo>/cpg_mcp.py --stdio`. No token involved.
-- **ssh**: the same command over `ssh user@host ...` (Mac: `limactl shell claude-projects -- bash -lc '...'`; Windows: `wsl.exe -d ClaudeProjects -u cpg --exec ...`; `claude-projects setup connect` prints the exact line).
+- **same host** (the box): stdio, `<repo>/.venv/bin/python <repo>/claude_projects/mcp_server.py --stdio`. No token involved.
+- **ssh**: the same command over `ssh user@host ...` (Mac: `limactl shell claude-projects -- bash -lc '...'`; Windows: `wsl.exe -d ClaudeProjects -u claude --exec ...`; `claude-projects setup connect` prints the exact line).
 - **tunnel**: the user's own tunnel or VPN to `127.0.0.1:8791`, `allowed_hosts` in config, a private copy of the
   token file, and `bin/grok-bot-bridge <url> <token-file>`. Nothing here sets up a tunnel for them.
 

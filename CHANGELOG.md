@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.3 (2026-11-15)
+
+### One package, plain names
+- The code is one Python package, `claude_projects/` (`core`, `config`, `mcp_server`, `permissions`, `policy`,
+  `staging`, `setup`, `origin`, `proc`, `idb`, plus `__main__`). Nothing in the tree carries an internal short prefix
+  any more, and the compatibility shims of 1.0.2 (the old CLI name, the old module files and host wrappers) are gone.
+- One entry point: `claude-projects` (the checkout's wrapper, or `python -m claude_projects`; `pyproject.toml` also
+  declares it as a console script). The MCP server is `python -m claude_projects.mcp_server` (`--stdio` for stdio);
+  the CLI's background jobs run the same way, so `pgrep -fa claude_projects` finds everything the plugin runs.
+- The services are `claude-projects-xvfb`, `-wm`, `-keyring`, `-desktop`, `-vnc`, `-novnc`, `-mcp`, and
+  `-refresh` (+ `.timer`); the environment variables are `CLAUDE_PROJECTS_*`; the Windows distro's plugin user is
+  `claude`.
+
+### Migration
+- `claude-projects setup install` / `install.sh` on an older install stops and removes the services of 1.0.2 and
+  earlier, installs the `claude-projects-*` ones, deletes leftover shim files and a `~/.local/bin` link to the old CLI
+  name, and keeps config, sign-in and state. The hand-built layout (`claude-projects-mcp.service` + `venv/`) is still
+  recognized; point its `ExecStart` at `venv/bin/python -m claude_projects.mcp_server` with
+  `Environment=PYTHONPATH=<checkout>` (see docs/deploy.md).
+- Variables exported under the old short prefixes are still read when the `CLAUDE_PROJECTS_*` name is not set.
+- `hosts/windows/setup.ps1` uses `claude` for fresh distros and keeps an existing distro's default user and home;
+  on a Mac an existing VM under its old name keeps being used.
+
+### Fixes
+- Computer-use permission cards ("Claude wants to use: …", "Allow for this session" / "Allow once"): detected as type
+  `computer_use` with the apps (`displayName`, `bundleId`, `tier`) parsed; an Allow presses the app's "Background
+  computer use" Continue when it appears, then checks that the card is gone and reports diagnostics when it is not.
+
 ## 1.0.2 (2026-11-15)
 
 Brings the guided setup to the public repo: one copy-paste prompt, an agent-driven

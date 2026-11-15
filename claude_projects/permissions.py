@@ -6,8 +6,10 @@ Claude Code Projects always run in 'Auto' permission mode, but threads still sto
     Claude wants to add a repository: owner/name                            [Add repository] [Not now]
     Allow Claude to use this machine? <machine>                             [Allow] [Deny]
     Allow Claude to run `npm test`?                                         [Allow once] [Always allow] [Deny]
+    Claude wants to use: Sketchpad All c:\\...\\sketchpad.exe Notepad All     [Deny] [Allow for this session]
+    Computer Request Access requests permission {"apps": [...]}            [Allow once] [Deny]
 
-The app renders these as a block of text plus push buttons. cpg_core snapshots the open transcript's accessibility tree
+The app renders these as a block of text plus push buttons. claude_projects.core snapshots the open transcript's accessibility tree
 into plain dicts ({id, parent, role, name, text}) and this module finds the cards in that snapshot, so the same code
 is exercised by mock tests and by the live read.
 
@@ -22,12 +24,16 @@ OPTION_RE = re.compile(r"^(add folder|add repository|add repo|add directory|not 
                        r"continue|cancel|dismiss|use this machine|allow machine|allow access|block)$", re.I)
 PROMPT_RE = re.compile(r"(would like to|wants to|needs (your )?(permission|approval)|requires? (your )?(permission|approval)|"
                        r"\ballow claude\b|do you want to (allow|add|trust|run)|permission to|grant .*access|trust this|"
-                       r"add this (folder|directory|repo)|approval controls|\bapprove\b.*\?|allow .*\?)", re.I)
+                       r"add this (folder|directory|repo)|approval controls|\bapprove\b.*\?|allow .*\?|requests? (your )?permission|"
+                       r"request access|take over (the|your) screen)", re.I)
 # a prompt needs at least one affirmative-looking option to count as a permission card
 AFFIRM_RE = re.compile(r'^(add|allow|always|approve|yes|trust|grant|connect|use this|continue)', re.I)
 NEGATE_RE = re.compile(r"^(not now|don'?t|do not|deny|reject|decline|no\b|skip|cancel|dismiss|block)", re.I)
 
 TYPES = [
+    # computer use (screen control): 'Claude wants to use: <app> <tier> ...', 'Computer Request Access requests permission'
+    ('computer_use', re.compile(r'claude wants to use\b|wants to use your computer|computer[ _:]?request[ _]?access|request_access|'
+                                r'take over (the|your) screen|allow claude to control', re.I)),
     ('add_folder', re.compile(r'(add|access|use) (this|a|the) (folder|directory)|folder to the session|add folder', re.I)),
     ('add_repository', re.compile(r'(add|attach|connect) (this |a |the )?(github )?(repository|repo)\b|add repository', re.I)),
     ('allow_machine', re.compile(r'(machine|device|computer|environment|remote host)\b', re.I)),
@@ -65,6 +71,50 @@ def extract_target(prompt, kind=None):
     return mm.group(1).rstrip('.,;)') if mm else None
 
 
+TIER_WORDS = {'all': 'full', 'full': 'full', 'full control': 'full', 'click': 'click', 'clicks': 'click', 'click only': 'click',
+              'clicks only': 'click', 'read': 'read', 'read only': 'read', 'view': 'read', 'view only': 'read', 'see only': 'read'}
+_APP_PATH_RE = re.compile(r'([A-Za-z]:\\|\\\\|/|\.exe$|\.app$|^[a-z0-9-]+(\.[a-z0-9-]+){2,}$)', re.I)
+
+
+def computer_use_apps(lines, text=''):
+    """Apps a computer-use card asks for: [{displayName, bundleId, tier}] (tier: full | click | read | the raw label).
+    Two renderings: the desktop card lists 'Claude wants to use:' then per app its name, a tier label ('All') and on
+    some hosts the program path; the generic tool card shows the request as JSON ({"apps": [{bundleId, displayName, tier}]})."""
+    import json as _json
+    m = re.search(r'\{.*"apps"\s*:.*\}', text or '', re.S)
+    if m:
+        frag = m.group(0)
+        for end in range(len(frag), 0, -1):
+            if frag[end - 1] != '}': continue
+            try: data = _json.loads(frag[:end]); break
+            except Exception: continue
+        else: data = None
+        if isinstance(data, dict) and isinstance(data.get('apps'), list):
+            out = []
+            for a in data['apps']:
+                if isinstance(a, str): out.append({'displayName': a, 'bundleId': None, 'tier': None})
+                elif isinstance(a, dict):
+                    out.append({'displayName': a.get('displayName') or a.get('name') or a.get('requestedName'),
+                                'bundleId': a.get('bundleId') or a.get('requestedName'), 'tier': a.get('tier') or a.get('proposedTier')})
+            return out
+    out = []; on = False
+    for raw in lines or []:
+        l = (raw or '').strip()
+        if not l: continue
+        if not on:
+            mm = re.match(r'^claude wants to use\s*:?\s*(.*)$', l, re.I)
+            if mm and not re.search(r'your computer', l, re.I):
+                on = True; l = mm.group(1).strip()
+                if not l: continue
+            else: continue
+        if l.endswith('.') and ' ' in l: break             # 'Your other windows will be hidden, ...' ends the list
+        low = l.casefold()
+        if out and low in TIER_WORDS and out[-1]['tier'] is None: out[-1]['tier'] = TIER_WORDS[low]; out[-1]['tier_label'] = l; continue
+        if out and _APP_PATH_RE.search(l) and out[-1]['bundleId'] is None: out[-1]['bundleId'] = l; continue
+        out.append({'displayName': l, 'bundleId': None, 'tier': None})
+    return out
+
+
 def card_id(kind, target, prompt):
     h = hashlib.sha1(f'{kind}\x00{target or ""}\x00{(prompt or "")[:200]}'.encode('utf-8')).hexdigest()[:10]
     return f'perm_{h}'
@@ -75,6 +125,17 @@ def find_cards(nodes, max_up=6):
     by_id = {n['id']: n for n in nodes}
     children = {}
     for n in nodes: children.setdefault(n.get('parent'), []).append(n)
+
+    def subtree_lines(nid, limit=200):
+        out = []; st = [nid]
+        while st and len(out) < limit:
+            cur = st.pop(); n = by_id.get(cur)
+            if not n: continue
+            if n['role'] != 'push button' and n['role'] in ('static', 'text', 'label', 'heading', 'paragraph', 'code', 'link') and not children.get(cur):
+                t = (n.get('text') or n.get('name') or '').strip()
+                if t: out.append(t)
+            st.extend(reversed([c['id'] for c in children.get(cur, [])]))
+        return out
 
     def subtree_text(nid, skip_buttons=True, limit=4000):
         out = []; st = [nid]; seen = 0
@@ -129,9 +190,14 @@ def find_cards(nodes, max_up=6):
         if c in inner_anc: continue
         card = cards[c]; prompt = card['prompt']
         kind = classify(prompt); target = extract_target(prompt, kind)
+        extra = {}
+        if kind == 'computer_use':
+            apps = computer_use_apps(subtree_lines(c), prompt)
+            extra = {'apps': apps, 'tiers': sorted({a['tier'] for a in apps if a.get('tier')})}
+            target = ', '.join(a['displayName'] for a in apps if a.get('displayName')) or target
         res.append({'card_id': card_id(kind, target, prompt), 'type': kind, 'target': target, 'prompt': prompt[:600],
                     'options': card['options'], 'affirmative_options': [o for o in card['options'] if AFFIRM_RE.match(o)],
-                    'negative_options': [o for o in card['options'] if NEGATE_RE.match(o)],
+                    'negative_options': [o for o in card['options'] if NEGATE_RE.match(o)], **extra,
                     '_container': c, '_option_ids': card['option_ids']})
     return res
 

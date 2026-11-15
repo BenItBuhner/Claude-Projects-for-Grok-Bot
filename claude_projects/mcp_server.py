@@ -2,22 +2,24 @@
 
 Every tool runs `claude-projects --json ...` in a subprocess (fresh accessibility connection each call; UI work is serialized by claude-projects's lock).
 Transports:
-  python cpg_mcp.py            Streamable HTTP on CPG_MCP_HOST:CPG_MCP_PORT (default 127.0.0.1:8791) at /mcp,
-                               Authorization: Bearer <contents of token_file> (see cpg_config.py)
-  python cpg_mcp.py --stdio    stdio (for an MCP client on the same machine or over `ssh host ... --stdio`); no token
+  python claude_projects/mcp_server.py            Streamable HTTP on CLAUDE_PROJECTS_MCP_HOST:CLAUDE_PROJECTS_MCP_PORT (default 127.0.0.1:8791) at /mcp,
+                               Authorization: Bearer <contents of token_file> (see claude_projects/config.py)
+  python claude_projects/mcp_server.py --stdio    stdio (for an MCP client on the same machine or over `ssh host ... --stdio`); no token
 """
 import os, sys, json, hmac, asyncio, tempfile, pathlib
 from typing import Optional, Union
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from cpg_config import CFG
-from cpg_origin import ORIGIN_PREFIX, origin_header
-import cpg_config, cpg_policy, cpg_staging
+_PKG = pathlib.Path(__file__).resolve().parent   # run as a file (python claude_projects/<module>.py): import from the checkout,
+sys.path[:] = [p for p in sys.path if pathlib.Path(p or '.').resolve() != _PKG]   # not from inside the package
+sys.path.insert(0, str(_PKG.parent))
+from claude_projects.config import CFG
+from claude_projects.origin import ORIGIN_PREFIX, origin_header
+from claude_projects import config as cfg_mod, policy as policy_mod, staging as staging_mod
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent, ImageContent
-HERE = pathlib.Path(__file__).resolve().parent
-CLI = os.environ.get('CPG_BIN') or str(HERE/'claude-projects')
-STAGE = cpg_staging.from_config(CFG); TMPD = STAGE.dir('msg')   # temp message / attachment-list files (deleted after each call)
-POLICY = cpg_policy.Policy(CFG['skill_path'], cpg_config.CONFIG_DIR)
+HERE = pathlib.Path(__file__).resolve().parent.parent   # the checkout
+CLI = os.environ.get('CLAUDE_PROJECTS_BIN') or str(HERE/'claude-projects')
+STAGE = staging_mod.from_config(CFG); TMPD = STAGE.dir('msg')   # temp message / attachment-list files (deleted after each call)
+POLICY = policy_mod.Policy(CFG['skill_path'], cfg_mod.CONFIG_DIR)
 STDIO = '--stdio' in sys.argv[1:]
 HOST = CFG['mcp_host']; PORT = int(CFG['mcp_port'])
 OPERATOR = CFG.get('operator_name') or 'the user'
@@ -59,8 +61,8 @@ def _is_busy(res):
     msg = (res.get('message') or '').lower()
     return 'busy' in msg and res.get('error') in ('Busy', 'ToolError', None)
 
-ATTACH_BUDGET = float(os.environ.get('CPG_ATTACH_BUDGET', '40'))   # MCP clients give up near 60 s
-SEND_BUDGET = float(os.environ.get('CPG_SEND_BUDGET', '40'))
+ATTACH_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_BUDGET', '40'))   # MCP clients give up near 60 s
+SEND_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_SEND_BUDGET', '40'))
 
 
 async def run(args, timeout=900, msg=None, attach=None, busy_budget=None):
@@ -71,10 +73,10 @@ async def run(args, timeout=900, msg=None, attach=None, busy_budget=None):
     tmp = None; tmp2 = None
     try:
         if msg is not None:
-            fd, tmp = tempfile.mkstemp(prefix='cpg-msg-', dir=str(TMPD)); os.write(fd, msg.encode()); os.close(fd)
+            fd, tmp = tempfile.mkstemp(prefix='claude-projects-msg-', dir=str(TMPD)); os.write(fd, msg.encode()); os.close(fd)
             args = args + ['--file', tmp]
         if attach:
-            fd, tmp2 = tempfile.mkstemp(prefix='cpg-att-', suffix='.json', dir=str(TMPD)); os.write(fd, json.dumps(attach).encode()); os.close(fd)
+            fd, tmp2 = tempfile.mkstemp(prefix='claude-projects-att-', suffix='.json', dir=str(TMPD)); os.write(fd, json.dumps(attach).encode()); os.close(fd)
             args = args + ['--attach-json', tmp2]
         t0 = _time.monotonic(); delay = 2.0; attempt = 0; last = None; lock_waited_s = 0.0
         while True:
@@ -461,7 +463,7 @@ if __name__ == '__main__':
     if CFG.get('service_mode') == 'process':
         # no systemd on this host: nothing else brings the display and the app back after a restart of the box,
         # so the MCP server (started by the agent) starts the plugin's supervisor when it isn't running
-        import cpg_proc; cpg_proc.ensure_up()
+        from claude_projects import proc as proc_mod; proc_mod.ensure_up()
     if STDIO:
         mcp.run('stdio')
     else:

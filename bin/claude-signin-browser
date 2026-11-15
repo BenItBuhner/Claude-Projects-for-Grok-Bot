@@ -3,11 +3,11 @@
 # (never touches your normal browser profile). Set as BROWSER for the Claude desktop service.
 #   claude-signin-browser --check   prints the browser it would use (exit 127 when there is none)
 set -euo pipefail
-CFG_DIR="${CPG_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp}"
+CFG_DIR="${CLAUDE_PROJECTS_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp}"
 PROFILE="$CFG_DIR/browser-profile"
 # Snaps live in /snap/bin, which services and non-login shells often don't have on PATH (systemd user units, the
-# process supervisor, `wsl -u root` scripts): add it, so a real chromium/firefox snap is found. CPG_SNAP_BIN: tests.
-SNAP_BIN="${CPG_SNAP_BIN:-/snap/bin}"
+# process supervisor, `wsl -u root` scripts): add it, so a real chromium/firefox snap is found. CLAUDE_PROJECTS_SNAP_BIN: tests.
+SNAP_BIN="${CLAUDE_PROJECTS_SNAP_BIN:-/snap/bin}"
 case ":$PATH:" in *":$SNAP_BIN:"*) ;; *) [ -d "$SNAP_BIN" ] && PATH="$PATH:$SNAP_BIN";; esac
 # A real snap: $SNAP_BIN/<name> runs, and snapd lists it (when `snap` exists, so a dead snapd isn't a browser).
 real_snap() {

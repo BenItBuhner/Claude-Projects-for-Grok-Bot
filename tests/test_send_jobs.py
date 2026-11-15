@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_core as C
+from claude_projects import core as C
 
 
 @pytest.fixture
@@ -338,8 +338,8 @@ def test_sigterm_in_a_real_worker_process_records_and_cleans(tmp_path):
     script = tmp_path / 'worker.py'
     script.write_text(f"""
 import sys, time, pathlib
-sys.path.insert(0, {str(pathlib.Path(C.__file__).parent)!r})
-import cpg_core as C
+sys.path.insert(0, {str(pathlib.Path(C.__file__).parent.parent)!r})
+from claude_projects import core as C
 C.SEND_JOBS = pathlib.Path({str(jobs)!r})
 def fake_send(project, message, thread=None, **k):
     C._progress('attaching', attached=2, total=6, file='main.js')
@@ -363,7 +363,7 @@ sys.exit(C.main(['--json', 'send-job', {key!r}]))
 
 
 def test_mcp_send_tool_uses_the_job_budget():
-    src = (pathlib.Path(C.__file__).parent / 'cpg_mcp.py').read_text()
+    src = (pathlib.Path(C.__file__).parent.parent / 'claude_projects/mcp_server.py').read_text()
     tool = src[src.index('async def claude_thread_send('):src.index('@mcp.tool()', src.index('async def claude_thread_send('))]
     assert "'--budget', str(SEND_BUDGET)" in tool and "'--job-id'" in tool and 'idempotency_key' in tool
-    assert float(__import__('re').search(r"CPG_SEND_BUDGET', '(\d+)'", src).group(1)) <= 45
+    assert float(__import__('re').search(r"CLAUDE_PROJECTS_SEND_BUDGET', '(\d+)'", src).group(1)) <= 45

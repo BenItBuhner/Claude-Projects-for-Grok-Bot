@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claude-projects - Claude Code Projects tool for a Claude desktop app running on its own X display (see cpg_config.py).
+"""claude-projects - Claude Code Projects tool for a Claude desktop app running on its own X display (see claude_projects/config.py).
 
 Reads projects, primary threads and child threads; sends messages exactly as typed in the app; waits for replies.
 How it works (no tokens or cookies are ever read or exported):
@@ -9,27 +9,29 @@ How it works (no tokens or cookies are ever read or exported):
                     and the rendered transcript is read through the accessibility tree (AT-SPI).
   * sending       : the composer is focused through AT-SPI, the text is typed with X keystrokes (xdotool) on that display,
                     then the app's own Send button is pressed and the new message is read back from the transcript.
-Every message typed into a thread starts with the origin bracket "[sent by Grok Bot]" (see cpg_origin.py).
+Every message typed into a thread starts with the origin bracket "[sent by Grok Bot]" (see claude_projects/origin.py).
 UI work is serialized with a lock file, refused while a VNC viewer is connected (unless
 --force), and the app is returned to its home screen afterwards (unless --stay).
 """
 import os, sys, re, json, time, fcntl, argparse, pathlib, subprocess, datetime, hashlib, unicodedata, warnings, contextlib, threading, shutil
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 H = pathlib.Path.home()
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from cpg_config import CFG, tool as _cfg_tool
-from cpg_origin import add_origin, strip_origin, has_origin, is_bot_sent, origin_header, origin_body, ORIGIN_PREFIX
-import cpg_staging, cpg_permissions as PERM
-STAGE = cpg_staging.from_config(CFG)
+_PKG = pathlib.Path(__file__).resolve().parent   # run as a file (python claude_projects/<module>.py): import from the checkout,
+sys.path[:] = [p for p in sys.path if pathlib.Path(p or '.').resolve() != _PKG]   # not from inside the package
+sys.path.insert(0, str(_PKG.parent))
+from claude_projects.config import CFG, tool as _cfg_tool
+from claude_projects.origin import add_origin, strip_origin, has_origin, is_bot_sent, origin_header, origin_body, ORIGIN_PREFIX
+from claude_projects import staging as staging_mod, permissions as PERM
+STAGE = staging_mod.from_config(CFG)
 ROOT = pathlib.Path(CFG['state_dir']); CACHE = ROOT/'cache'; LOGD = ROOT/'logs'
 LOCKP = pathlib.Path(CFG['ui_lock_file'])
 LAUNCH = CFG['launcher']
 XDO = _cfg_tool(CFG, 'xdotool'); EXTRA_LIB = CFG.get('extra_lib_path') or ''
-IDB_PY = CFG['idb_python']; IDB_SCRIPT = pathlib.Path(__file__).resolve().parent/'cpg_idb.py'
+IDB_PY = CFG['idb_python']
 OPERATOR = CFG.get('operator_name') or 'the user'; HOST_LABEL = CFG.get('host_label') or 'the Claude Code host'
 for d in (CACHE, LOGD): d.mkdir(parents=True, exist_ok=True)
 U = os.getuid()
-import cpg_config; cpg_config.apply_runtime_env(CFG)   # display + session bus (process mode: the supervisor's private bus)
+from claude_projects import config as cfg_mod; cfg_mod.apply_runtime_env(CFG)   # display + session bus (process mode: the supervisor's private bus)
 if CFG.get('gi_typelib_path'): os.environ.setdefault('GI_TYPELIB_PATH', CFG['gi_typelib_path'])
 def _tool_env():
     env = dict(os.environ)
@@ -52,7 +54,7 @@ def log(msg):
         if p.exists() and p.stat().st_size > 2_000_000: p.replace(LOGD/'claude-projects.log.1')
         with open(p, 'a', encoding='utf-8') as f: f.write(line + '\n')
     except Exception: pass
-    if os.environ.get('CPG_VERBOSE'): print(line, file=sys.stderr)
+    if os.environ.get('CLAUDE_PROJECTS_VERBOSE'): print(line, file=sys.stderr)
 class StepTimer:
     """Wall time per step of one UI operation, logged as one line ("timing attachment X: lock 0.0, deeplink 0.9, ...").
     A step's time is what passed since the previous mark, so nothing between two marks goes uncounted."""
@@ -85,7 +87,7 @@ def _zone(name):
     return datetime.datetime.now().astimezone().tzinfo
 DISPLAY_TZ = _zone(CFG.get('timezone')); APP_TZ = _zone(CFG.get('app_timezone'))
 def ct(ts):
-    """ISO/epoch -> 'Nov 04 05:59 PM <zone>' in the configured display zone (CPG_TIMEZONE)."""
+    """ISO/epoch -> 'Nov 04 05:59 PM <zone>' in the configured display zone (CLAUDE_PROJECTS_TIMEZONE)."""
     if not ts: return None
     try:
         d = datetime.datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
@@ -506,7 +508,7 @@ def effective_user_idle_min():
 
 # ---------------------------------------------------------------- UI lock (one UI action at a time)
 _tlock = threading.Lock()
-UI_LOCK_DEFAULT_TIMEOUT = int(os.environ.get('CPG_UI_LOCK_TIMEOUT', '600'))
+UI_LOCK_DEFAULT_TIMEOUT = int(os.environ.get('CLAUDE_PROJECTS_UI_LOCK_TIMEOUT', '600'))
 
 def _read_ui_holder():
     try: return json.loads((ROOT/'ui.holder').read_text())
@@ -540,7 +542,7 @@ def _busy_detail(wait_s, prefix):
 @contextlib.contextmanager
 def ui_lock(op, force=False, timeout=None):
     """Serialize UI work through CFG['ui_lock_file'] (holders unlink the file on exit, so re-check the inode).
-    Default timeout 600s (override via timeout= or CPG_UI_LOCK_TIMEOUT) so multi-bot callers queue behind long send/settle."""
+    Default timeout 600s (override via timeout= or CLAUDE_PROJECTS_UI_LOCK_TIMEOUT) so multi-bot callers queue behind long send/settle."""
     if timeout is None: timeout = UI_LOCK_DEFAULT_TIMEOUT
     if vnc_viewers() and not force:
         raise Refused(f'a VNC/noVNC viewer is connected to {os.environ.get("DISPLAY")} ({OPERATOR} may be using the app); retry later or pass force=true')
@@ -581,7 +583,7 @@ def ui_lock(op, force=False, timeout=None):
         _tlock.release()
 
 # ---------------------------------------------------------------- IndexedDB snapshot (no UI)
-IDB_RESOLVE_MAX_AGE = float(os.environ.get('CPG_IDB_RESOLVE_MAX_AGE', '30'))
+IDB_RESOLVE_MAX_AGE = float(os.environ.get('CLAUDE_PROJECTS_IDB_RESOLVE_MAX_AGE', '30'))
 
 def _idb_cached(newer_than):
     """The last snapshot if it was written at or after `newer_than` (epoch seconds), else None."""
@@ -602,9 +604,9 @@ def idb_snapshot(max_age=0.0):
         fcntl.flock(lf, fcntl.LOCK_EX)
         # another process finished a read while we waited for the lock: use it
         if (d := _idb_cached(t_req - max(0.0, max_age))) is not None: return d
-        r = subprocess.run([str(IDB_PY), str(IDB_SCRIPT)], capture_output=True, text=True, timeout=120)
+        r = subprocess.run(cfg_mod.module_argv('claude_projects.idb', IDB_PY), capture_output=True, text=True, timeout=120)
         if r.returncode != 0:
-            time.sleep(3); r = subprocess.run([str(IDB_PY), str(IDB_SCRIPT)], capture_output=True, text=True, timeout=120)
+            time.sleep(3); r = subprocess.run(cfg_mod.module_argv('claude_projects.idb', IDB_PY), capture_output=True, text=True, timeout=120)
         if r.returncode != 0: raise AppError('could not read the app cache: ' + (r.stderr.strip().splitlines() or ['?'])[-1][:200])
         d = json.loads(r.stdout)
         t = CACHE/'idb.json.tmp'; t.write_text(json.dumps(d, ensure_ascii=False)); t.replace(CACHE/'idb.json')
@@ -686,7 +688,7 @@ def win():
         if nm(app) == 'claude-desktop':
             for f in kids(app):
                 if role(f) == 'frame': return f
-    raise AppError('Claude desktop window not found (is the cpg-claude-desktop service running? claude-projects setup status)')
+    raise AppError('Claude desktop window not found (is the claude-projects-desktop service running? claude-projects setup status)')
 def walk(o, maxn=60000):
     st = [o]; n = 0
     while st and n < maxn:
@@ -715,7 +717,7 @@ def act(e, what=''):
 def deeplink(link):
     if not link.startswith('claude://'): raise ValueError(link)
     # the launcher reads the config file through python twice unless these are set; pass them so a deep link costs one exec
-    env = dict(os.environ, CPG_DISPLAY=str(CFG.get('display') or os.environ.get('DISPLAY') or ':99'), CPG_CLAUDE_BINARY=str(CFG.get('claude_binary') or 'claude-desktop'))
+    env = dict(os.environ, CLAUDE_PROJECTS_DISPLAY=str(CFG.get('display') or os.environ.get('DISPLAY') or ':99'), CLAUDE_PROJECTS_CLAUDE_BINARY=str(CFG.get('claude_binary') or 'claude-desktop'))
     r = subprocess.run([str(LAUNCH), link], capture_output=True, text=True, timeout=90, env=env); log(f'deeplink {link} rc={r.returncode}')
     _mark('deeplink')
 def wait_route(pred, secs=25):
@@ -802,8 +804,8 @@ def msg_panel(thread):
     d, _ = main_doc()
     want = 'Thread messages' if thread else 'Chat messages'
     return find(d, 'panel', want) if d else None
-SETTLE_POLL_S = float(os.environ.get('CPG_SETTLE_POLL_S', '0.4'))
-SETTLE_STABLE_S = float(os.environ.get('CPG_SETTLE_STABLE_S', '0.8'))
+SETTLE_POLL_S = float(os.environ.get('CLAUDE_PROJECTS_SETTLE_POLL_S', '0.4'))
+SETTLE_STABLE_S = float(os.environ.get('CLAUDE_PROJECTS_SETTLE_STABLE_S', '0.8'))
 def settle(thread, maxs=25):
     """wait until the transcript panel exists, 'Loading...' is gone and the message count is stable"""
     t0 = time.time(); prev = None; since = t0; seen = 0
@@ -890,7 +892,7 @@ def parse_article(a, expand=False, include_images=False, markdown=False):
     except Exception as ex: log(f'rich parse error {ex}')
     return m
 def app_time_local(times):
-    """The app renders times in its host's zone (CPG_APP_TIMEZONE). Convert the fullest one to the display zone."""
+    """The app renders times in its host's zone (CLAUDE_PROJECTS_APP_TIMEZONE). Convert the fullest one to the display zone."""
     for t in times:
         m = re.match(r'^[A-Z][a-z]+day, ([A-Z][a-z]+ \d{1,2}, \d{4}) at (\d{1,2}:\d{2}\s?[AP]M)$', t)
         if m:
@@ -1029,7 +1031,7 @@ def resolve_thread(chan, q, threads=None):
 import struct, base64, mimetypes, io
 HTTPC = pathlib.Path(CFG['claude_config_dir'])/'Cache/Cache_Data'          # Chromium "simple" HTTP cache of the app (read-only, copied bytes)
 ATT_DIR = pathlib.Path(CFG['attachments_dir'])          # fetched attachments, named by sha256 (managed staging 'incoming')
-ATT_FILE_CAP = 100 * 2**20; ATT_TOTAL_CAP = int(os.environ.get('CPG_ATTACH_CAP_MB', '500')) * 2**20
+ATT_FILE_CAP = 100 * 2**20; ATT_TOTAL_CAP = int(os.environ.get('CLAUDE_PROJECTS_ATTACH_CAP_MB', '500')) * 2**20
 IMG_MAX_PX = 1600; IMG_MAX_BYTES = 1_000_000
 for _m, _e in (('text/markdown', '.md'), ('application/vnd.android.package-archive', '.apk'), ('image/webp', '.webp'), ('text/x-python', '.py'),
                ('application/typescript', '.ts'), ('text/x-typescript', '.tsx'), ('application/x-yaml', '.yml'), ('application/x-yaml', '.yaml'), ('application/toml', '.toml')):
@@ -1594,7 +1596,7 @@ def _fetch_pane(att, elem):
     return data, name, mi, how, extra
 # ---- originals through the app's own Download control (output chips / file pane), never the HTTP cache
 SAVE_TITLES = ('Save as', 'Save As', 'Save File')
-DL_DIALOG_TIMEOUT = int(os.environ.get('CPG_DL_DIALOG_TIMEOUT', '900')); OV_DIALOG_TIMEOUT = int(os.environ.get('CPG_OV_DIALOG_TIMEOUT', '90')); DL_WRITE_TIMEOUT = int(os.environ.get('CPG_DL_WRITE_TIMEOUT', '900'))
+DL_DIALOG_TIMEOUT = int(os.environ.get('CLAUDE_PROJECTS_DL_DIALOG_TIMEOUT', '900')); OV_DIALOG_TIMEOUT = int(os.environ.get('CLAUDE_PROJECTS_OV_DIALOG_TIMEOUT', '90')); DL_WRITE_TIMEOUT = int(os.environ.get('CLAUDE_PROJECTS_DL_WRITE_TIMEOUT', '900'))
 LOADING_RE = re.compile(r'^\s*(Loading( file)?|Loading\u2026|Loading\.\.\.)\s*$', re.I)
 def is_loading_text(s): return bool(s) and bool(LOADING_RE.match(s))
 def _save_dialog_wid():
@@ -1725,14 +1727,14 @@ def jobs_running():
     return out
 def _use_systemd_scope():
     rd = os.environ.get('XDG_RUNTIME_DIR') or ''
-    return bool(shutil.which('systemd-run')) and bool(rd) and os.path.exists(os.path.join(rd, 'systemd', 'private')) and not os.environ.get('CPG_NO_SCOPE')
+    return bool(shutil.which('systemd-run')) and bool(rd) and os.path.exists(os.path.join(rd, 'systemd', 'private')) and not os.environ.get('CLAUDE_PROJECTS_NO_SCOPE')
 def spawn_job(argv, name):
     """Start a detached worker. Under a systemd user manager it runs in its own transient scope, so restarting the MCP
     service (a deploy) does not kill it mid-job; elsewhere it gets its own session."""
     LOGD.mkdir(parents=True, exist_ok=True)
     with open(LOGD/'jobs.log', 'a') as lf:
         if _use_systemd_scope():
-            unit = f'cpg-job-{name}-{int(time.time())}'
+            unit = f'claude-projects-job-{name}-{int(time.time())}'
             pr = subprocess.Popen(['systemd-run', '--user', '--scope', '--quiet', '--collect', f'--unit={unit}', '--'] + argv,
                                   stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, start_new_session=True, env=dict(os.environ))
             time.sleep(.3)
@@ -1742,7 +1744,7 @@ def spawn_job(argv, name):
         return 'process'
 ATT_JOBS = CACHE/'attachment-jobs'
 SEND_JOBS = CACHE/'send-jobs'
-ATT_BUDGET = float(os.environ.get('CPG_ATTACH_BUDGET', '40'))   # seconds a budgeted call (the MCP tool) waits before answering "pending"
+ATT_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_BUDGET', '40'))   # seconds a budgeted call (the MCP tool) waits before answering "pending"
 def _att_parse(attachment_id, message_index, n):
     if attachment_id:
         mm = re.match(r'^(\d+)[.:/a-z]+(\d+)$', str(attachment_id).strip())
@@ -1798,7 +1800,7 @@ def _att_run_job(key, job):
     finally: job_unlock(f)
 def _att_spawn_worker(key, job):
     """Detached `claude-projects attachment get ... --job` that does the fetch; it outlives this call."""
-    argv = [sys.executable, str(pathlib.Path(__file__).resolve()), '--json'] + (['--force'] if job.get('force') else []) + \
+    argv = [*cfg_mod.module_argv('claude_projects'), '--json'] + (['--force'] if job.get('force') else []) + \
            ['attachment', 'get', job['chan'], f"{job['message_index']}.{job['n']}", '--job'] + (['--thread', job['thread']] if job.get('thread') else []) + \
            (['--refresh'] if job.get('refresh') else [])
     how = spawn_job(argv, f'att-{key[:8]}')
@@ -2169,7 +2171,7 @@ def _click_chooser_open(root, wid):
     _click_xy(g['X'] + g['WIDTH'] - 55, g['Y'] + g['HEIGHT'] - 32)
     time.sleep(1.0)
 ATTACH_BUTTON_NAMES = ('Add', 'Add files', 'Attach', 'Add content', 'Add attachment')
-ATTACH_FILE_TIMEOUT = float(os.environ.get('CPG_ATTACH_FILE_TIMEOUT', '20'))   # one file: picker, path, Open, chip
+ATTACH_FILE_TIMEOUT = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_FILE_TIMEOUT', '20'))   # one file: picker, path, Open, chip
 class AttachError(AppError):
     """One file failed at one step; names both."""
     def __init__(self, name, step, detail=''):
@@ -2357,7 +2359,7 @@ def _attach_one_via_location(f, test_only=False, shot_dir=None, ctx=None, deadli
     raise AttachError(f['name'], f'did not appear in the composer within {int(limit)} s after Open')
 def attach_files(files, test_only=False, shot_dir=None, done=None, deadline=None, per_file=None, progress=None):
     """Primary: one picker pass per file, absolute path typed into the GTK location bar, each file bounded by per_file
-    seconds (CPG_ATTACH_FILE_TIMEOUT) and the whole send by deadline. done (a list) collects the names attached so far,
+    seconds (CLAUDE_PROJECTS_ATTACH_FILE_TIMEOUT) and the whole send by deadline. done (a list) collects the names attached so far,
     so a caller can take them out again when a later file fails.
     Fallback (only if the path step fails before Open is pressed): legacy browse-by-name.
     test_only: type the path, OCR + screenshot, then Cancel; never presses Open; returns per-file results."""
@@ -2482,7 +2484,7 @@ def _parent(e):
     try: return e.get_parent()
     except Exception: return None
 def _snapshot_subtree(root, maxn=3000):
-    """Plain-dict snapshot of an AT-SPI subtree for cpg_permissions.find_cards. Returns (nodes, objs)."""
+    """Plain-dict snapshot of an AT-SPI subtree for perm_mod.find_cards. Returns (nodes, objs)."""
     nodes = []; objs = {}; st = [(root, None)]; n = 0
     while st and n < maxn:
         e, par = st.pop(); nid = n; n += 1
@@ -2516,6 +2518,39 @@ def detect_permission_cards(max_up=6, with_objs=False):
 def _safe_detect_cards():
     try: return detect_permission_cards()
     except Exception as ex: log(f'permission detect error {ex}'); return []
+def _press_diagnostics(btn):
+    """When a pressed card stays: the button's states (busy / held / disabled) and any notice the app showed (toasts,
+    status lines), so the caller can tell 'held by the app', 'refused with a toast' and 'ignored' apart."""
+    out = {}
+    try:
+        ss = btn.get_state_set()
+        out['button'] = {'name': nm(btn), **{k: ss.contains(getattr(A().StateType, k.upper())) for k in ('busy', 'enabled', 'sensitive', 'showing')}}
+    except Exception as ex: out['button_error'] = str(ex)[:120]
+    try:
+        d, _ = main_doc(); seen = []
+        for e in (walk(d, 40000) if d else []):
+            if role(e) in ('alert', 'notification', 'status bar', 'log', 'alert dialog'):
+                t = ' '.join(text_of(x) for x in walk(e, 50) if text_of(x)).strip()
+                if t and t not in seen and 'Choose an option to respond' not in t: seen.append(t[:300])
+        out['notices'] = seen[:8]
+    except Exception as ex: out['notices_error'] = str(ex)[:120]
+    return out
+CU_INTRO_TITLE = re.compile(r'background computer use', re.I)
+def _finish_computer_use_allow(wait_s=6.0):
+    """After Allow on a computer-use card: press 'Continue' in the app's 'Background computer use' intro dialog when it
+    opens (it does once per computer). Touches no other dialog or button. Returns the labels pressed."""
+    t0 = time.time(); pressed = []
+    while time.time() - t0 < wait_s:
+        d, _ = main_doc()
+        for dl in ([e for e in walk(d, 40000) if role(e) in ('dialog', 'alert dialog')] if d else []):
+            txt = ' '.join(text_of(e) for e in walk(dl, 400) if role(e) in ('heading', 'static', 'paragraph', 'label', 'dialog'))
+            if not CU_INTRO_TITLE.search(txt + ' ' + nm(dl)): continue
+            b = find(dl, 'push button', 'Continue')
+            if b:
+                act(b, 'computer-use intro Continue'); log('computer-use intro: pressed Continue')
+                pressed.append('Continue (Background computer use intro)'); return pressed
+        time.sleep(0.5)
+    return pressed
 def thread_address(chan, tid, primary=None):
     """Stable address of an agent/thread: <project chan_>/<thread id> (primary = cse_, child = cmsg_)."""
     t = tid if tid and tid != 'primary' else (primary or 'primary')
@@ -2544,12 +2579,33 @@ def op_permission(project, option, thread=None, card_id=None, dry_run=True, forc
                 return dict(base, dry_run=True, would_press=label, note='read-only: the card was found and nothing was pressed')
             act(card['_objs'][idx], f'permission option {label!r}')
             log(f'permission {p["name"]} {tid or "primary"} {card["card_id"]} {card["type"]} -> {label!r}')
-            time.sleep(1.5)
-            after = detect_permission_cards()
-            still = any(c['card_id'] == card['card_id'] for c in after)
+            follow = []; affirm = bool(PERM.AFFIRM_RE.match(label))
+            if card['type'] == 'computer_use' and affirm:
+                # The app answers the first computer-use Allow on a computer with a "Background computer use (Beta)"
+                # intro dialog [Not now] [Continue]; the grant is only sent on Continue. Press Continue in that dialog
+                # (and nothing else), then wait for the card to go.
+                follow = _finish_computer_use_allow()
+            still, after = True, []
+            for _ in range(12 if card['type'] == 'computer_use' else 1):
+                time.sleep(1.5)
+                after = detect_permission_cards()
+                still = any(c['card_id'] == card['card_id'] for c in after)
+                if not still: break
+            busy = None
+            try: busy = bool(busy_state(tid))
+            except Exception: pass
             if shot: screenshot(shot)
-            return dict(base, dry_run=False, pressed=label, card_gone=not still, cards_now=PERM.public(after) or None,
-                        pressed_at_local=ct(now().isoformat()))
+            out = dict(base, dry_run=False, pressed=label, card_gone=not still, cards_now=PERM.public(after) or None,
+                       pressed_at_local=ct(now().isoformat()), claude_working=busy)
+            if follow: out['also_pressed'] = follow
+            if still:
+                out['diagnostics'] = _press_diagnostics(card['_objs'][idx])
+                try: dl = dialogs()
+                except Exception: dl = []
+                out['warning'] = ('the card is still showing after the press: the app did not take the answer. '
+                                  + ('Open dialogs: ' + json.dumps(dl, ensure_ascii=False)[:400] if dl else 'No dialog is open.'))
+            log(f'permission {card["card_id"]} result card_gone={not still} also={follow} working={busy}')
+            return out
         finally:
             if not stay: go_home()
 
@@ -3202,9 +3258,9 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
         res['reply'] = w
     return res
 # ---- sends as background jobs: the MCP tool answers within its budget; a retry joins the job and never sends twice
-SEND_BUDGET = float(os.environ.get('CPG_SEND_BUDGET', '40'))
-SEND_DEADLINE = float(os.environ.get('CPG_SEND_DEADLINE', '420'))          # a whole send, enforced inside the job
-SEND_DEDUPE_WINDOW = float(os.environ.get('CPG_SEND_DEDUPE_S', '1800'))    # the same send again within this window joins the old job
+SEND_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_SEND_BUDGET', '40'))
+SEND_DEADLINE = float(os.environ.get('CLAUDE_PROJECTS_SEND_DEADLINE', '420'))          # a whole send, enforced inside the job
+SEND_DEDUPE_WINDOW = float(os.environ.get('CLAUDE_PROJECTS_SEND_DEDUPE_S', '1800'))    # the same send again within this window joins the old job
 SEND_FINAL = ('sent', 'failed')
 def send_job_key(chan, thread, message, files, idempotency_key=None):
     if idempotency_key: base = f'key|{chan}|{idempotency_key}'
@@ -3257,7 +3313,7 @@ def op_send_job(project, message, thread=None, force=False, attachments=None, bo
                 'clear_leftovers': bool(clear_leftovers)}
         job_write(SEND_JOBS, key, {'job_id': key, 'state': 'queued', 'project': p['name'], 'thread_id': thread or 'primary', 'started_ts': t_start,
                                    'total': len(files), 'attached': 0, 'spec': spec})
-        how = spawn_job([sys.executable, str(pathlib.Path(__file__).resolve()), '--json'] + (['--force'] if force else []) + ['send-job', key], f'send-{key[:8]}')
+        how = spawn_job([*cfg_mod.module_argv('claude_projects'), '--json'] + (['--force'] if force else []) + ['send-job', key], f'send-{key[:8]}')
         log(f'send job {key} started for {p["name"]} {thread or "primary"} ({len(files)} file(s), {how})')
     while time.time() - t_start < budget:
         st = job_read(SEND_JOBS, key) or {}
@@ -4067,7 +4123,7 @@ def op_probe_projects(force=False):
     with ui_lock('probe-projects', force):
         try:
             d, _ = main_doc()
-            if not d: raise AppError('the Claude app window is not reachable (is cpg-claude-desktop running?)')
+            if not d: raise AppError('the Claude app window is not reachable (is claude-projects-desktop running?)')
             out['route'] = route(); out['signed_in'] = not re.search(r'/login|/oauth', out['route'] or '')
             if out['signed_in']:
                 is_entry = lambda e: nm(e) in ('Projects Beta', 'Projects')
@@ -4219,7 +4275,7 @@ def main(argv=None):
     s = sp.add_parser('screenshot', help='screenshot the app display'); s.add_argument('file')
     a = ap.parse_args(argv); F = dict(force=a.force)  # argv already hoisted
     import signal
-    lim = int(os.environ.get('CPG_MAX_SECONDS', '0')) or ((getattr(a, 'timeout', 0) or 0) + 300 if a.cmd in ('send', 'wait') else 600)
+    lim = int(os.environ.get('CLAUDE_PROJECTS_MAX_SECONDS', '0')) or ((getattr(a, 'timeout', 0) or 0) + 300 if a.cmd in ('send', 'wait') else 600)
     if a.cmd == 'send-job': lim = int(SEND_DEADLINE + 120)        # the job enforces its own deadline; this is the backstop
     def _alarm(*_): raise Interrupted(f'claude-projects watchdog: {a.cmd} exceeded {lim}s')
     def _term(*_): raise Interrupted('stopped by SIGTERM')    # finally blocks run: composer cleanup, lock release, go home
@@ -4279,14 +4335,14 @@ def main(argv=None):
             bn = a.bot_name if a.bot_name is not None else CFG.get('bot_name')
             text = create_thread_message(a.title, a.instructions or '', a.bot_name) if a.title else add_origin(a.message or '', bn)
             res = {'origin_prefix': ORIGIN_PREFIX, 'origin_header': origin_header(bn), 'text': text}
-        elif a.cmd == 'config': res = dict(CFG, config_file=str(__import__('cpg_config').CONFIG_FILE))
+        elif a.cmd == 'config': res = dict(CFG, config_file=str(cfg_mod.CONFIG_FILE))
         elif a.cmd == 'permissions': res = op_permissions(a.project, a.thread, **F, stay=a.stay)
         elif a.cmd == 'permission': res = op_permission(a.project, a.option, a.thread, a.card, dry_run=not a.apply, **F, stay=a.stay, shot=a.shot)
         elif a.cmd == 'forward': res = op_forward(a.source_project, a.target_project, a.source_thread, a.target_thread, a.message, a.role, a.note, a.attachments, not a.cached_source, dry_run=not a.apply, bot_name=a.bot_name, **F, stay=a.stay)
         elif a.cmd == 'staging': res = op_staging(a.action, dry_run=not a.apply, older_than_hours=a.older_than_hours, kinds=a.kind)
         elif a.cmd == 'skill':
-            import cpg_policy, cpg_config as _cc
-            pol = cpg_policy.Policy(CFG['skill_path'], _cc.CONFIG_DIR)
+            from claude_projects import policy as policy_mod, config as _cc
+            pol = policy_mod.Policy(CFG['skill_path'], _cc.CONFIG_DIR)
             res = pol.effective() if a.policy_only else pol.skill_with_policy()
         elif a.cmd == 'home':
             with ui_lock('home', a.force): res = {'home': go_home(), 'route': route()}
