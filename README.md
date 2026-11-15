@@ -1,4 +1,4 @@
-# claude-code-projects-mcp
+# Claude Projects for Grok Bot
 
 <p align="center"><img src="docs/assets/claude-code-projects-plugin-hero.webp" width="100%" alt="The Claude Code mascot linked to the Grok Bot orb by a dotted line on a dark background."></p>
 
@@ -57,7 +57,7 @@ Write, no dry run: `claude_project_create` and `claude_project_pin` act as soon 
 
 Ask your Grok Bot:
 
-> Install claude-projects-mcp from github.com/BenItBuhner/claude-code-projects-mcp
+> Install claude-projects-mcp from github.com/BenItBuhner/Claude-Projects-for-Grok-Bot
 
 It follows [INSTALL.md](INSTALL.md) and handles the setup. You do two things: pick the computer that runs Claude
 Code (Ubuntu or Debian), and sign in to Claude once. Then give your bot the skill in [skill/SKILL.md](skill/SKILL.md)
@@ -78,7 +78,7 @@ Code (Ubuntu or Debian), and sign in to Claude once. Then give your bot the skil
 ### 2. Install (on the Linux computer)
 
 ```bash
-git clone https://github.com/BenItBuhner/claude-code-projects-mcp ~/claude-projects-mcp
+git clone https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot ~/claude-projects-mcp
 cd ~/claude-projects-mcp
 ./install.sh --operator-name "Alex" --bot-name "Scout" --timezone "America/New_York"
 ```

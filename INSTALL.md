@@ -15,7 +15,7 @@ Debian-family or has no user systemd, stop and say so. Nothing else is supported
 ## 1. Install (on that computer)
 
 ```bash
-git clone https://github.com/BenItBuhner/claude-code-projects-mcp ~/claude-projects-mcp
+git clone https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot ~/claude-projects-mcp
 cd ~/claude-projects-mcp
 ./install.sh --bot-name "<your bot name>" --timezone "<user's IANA zone>"
 ```

@@ -32,8 +32,9 @@
 - `CHANGELOG.md`.
 
 ### Changed
-- README: titled `claude-code-projects-mcp`, new hero image and a link to the launch demo (`docs/assets/`), all 23
-  tools listed (adds `claude_refresh`). The old `docs/images/banner.png` is removed.
+- README: titled "Claude Projects for Grok Bot" (repository `BenItBuhner/Claude-Projects-for-Grok-Bot`), new hero
+  image and a link to the launch demo (`docs/assets/`), all 23 tools listed (adds `claude_refresh`).
+  The old `docs/images/banner.png` is removed.
 - Attachments are chosen by typing each absolute path into the GTK file chooser's location bar (Ctrl+L) instead of
   browsing the Places sidebar.
 - Base64 attachments are staged in a unique folder per send (`outgoing/<stamp>-<id>/<filename>`) instead of overwriting
