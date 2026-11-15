@@ -69,6 +69,7 @@ Claude app update can break it. Sends spend your Claude usage. More in [Limits](
 
 - [Hosts](docs/hosts.md): Linux, Mac, Windows and the agent's box
 - [Manual install](docs/manual-install.md): the same setup by hand, configuration, connecting other MCP clients
+- [Updating a running install](docs/deploy.md): the busy check to run before restarting the server
 - [How it works](docs/how-it-works.md): architecture, ids, permission cards, files, transports, all 24 tools
 - [Agent skill and policy](skill/SKILL.md)
 - [The `[sent by Grok Bot]` tag](docs/origin-bracket.md) · [Limits](docs/limits.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)

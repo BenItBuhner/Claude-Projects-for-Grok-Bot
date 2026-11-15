@@ -14,6 +14,20 @@ Not tagged or released yet. Brings the guided setup to the public repo: one copy
 - File names no longer carry the tile's type badge. A failed send removes the chips it attached and clears its text,
   each file has its own attach timeout, nothing that comments or posts is pressed, and `status` lists running jobs.
 
+### Leftover chips, timing and the busy check
+- A send never takes along attachment chips it didn't add. `composer_chips` lists the chips already in the message box
+  (duplicates included), and `composer_empty` is false while any is there. A real send refuses and names them;
+  `clear_leftovers=true` (`--clear-leftovers`) removes them first with their own Remove buttons. Right before Send it
+  looks again and stops without sending if an extra chip shows up.
+- A message whose attachment chips come before the `[sent by Grok Bot]` line in the transcript now counts as
+  `sent_by_bot`.
+- Opening a project or thread is faster, and every fetch and send logs and returns `timing` per step.
+- `attach_test="open"` (`--attach-test=open`) is a dry run that presses Open per file, waits for the chip and removes it
+  again. It never types the message or presses Send.
+- `claude-projects jobs` exits 3 while the UI lock is held or a background job runs and 0 when idle. See
+  [Updating a running install](docs/deploy.md).
+- A repeat send that joins an earlier one says `joined_existing_send`; a new `idempotency_key` sends again on purpose.
+
 ### New names (the old ones keep working)
 - The CLI is `claude-projects` (was `ccp`), the modules are `cpg_*.py` (were `ccp_*.py`), install.sh's services are
   `cpg-*` (were `ccp-*`), and the environment variables are `CPG_*` (were `CCP_*`). On a Mac the VM is

@@ -108,3 +108,11 @@ def test_skill_documents_every_tool():
     text = (pathlib.Path(M.__file__).parent / 'skill' / 'SKILL.md').read_text()
     missing = [n for n in tools() if n not in text]
     assert not missing, missing
+
+
+def test_send_attach_test_open_and_clear_leftovers(monkeypatch):
+    seen = _capture(monkeypatch)
+    asyncio.run(M.claude_thread_send('Demo', 'x', dry_run=True, attach_test='open', attachments=[{'path': '/tmp/a.png'}]))
+    assert '--attach-test=open' in seen['args']
+    asyncio.run(M.claude_thread_send('Demo', 'x', clear_leftovers=True))
+    assert '--clear-leftovers' in seen['args'] and '--budget' in seen['args']

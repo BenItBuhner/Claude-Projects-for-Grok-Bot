@@ -250,7 +250,7 @@ error; the tools never fall back to the primary silently.
 | `claude_thread_read(project, thread)` | transcript, `current_state`, `permission_cards`, `machine`, `address` | yes (refresh=false: cache) |
 | `claude_thread_status(project, thread, refresh=false)` | compact triage from cache; refresh=true for live | only with refresh |
 | `claude_thread_wait(project, thread)` | poll until Claude replies (prefer polling `claude_thread_read`) | yes |
-| `claude_thread_send(project, message, thread, dry_run, attachments, attach_test, idempotency_key, job_id)` | type + Send + verify; answers within ~45 s (`pending` + `job_id` while it still runs: call again, it never sends twice) | yes |
+| `claude_thread_send(project, message, thread, dry_run, attachments, attach_test, idempotency_key, job_id, clear_leftovers)` | type + Send + verify; answers within ~45 s (`pending` + `job_id` while it still runs: call again, it never sends twice; a repeat within 30 min says `joined_existing_send`, a new `idempotency_key` sends again on purpose). Refuses when the box holds attachment chips it didn't add (`composer_chips`); `clear_leftovers=true` removes them first. `attach_test="open"` (dry run) attaches each file and removes it again, never Send | yes |
 | `claude_thread_forward(source_project, target_project, ..., dry_run=true)` | relay one message verbatim (+ files) | yes |
 | `claude_thread_permissions(project, thread)` | READ-ONLY list of permission cards | yes |
 | `claude_thread_permission(project, option, thread, card_id, dry_run=true)` | press a card's button by label | yes |

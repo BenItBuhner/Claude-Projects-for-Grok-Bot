@@ -53,6 +53,28 @@ def log(msg):
         with open(p, 'a', encoding='utf-8') as f: f.write(line + '\n')
     except Exception: pass
     if os.environ.get('CPG_VERBOSE'): print(line, file=sys.stderr)
+class StepTimer:
+    """Wall time per step of one UI operation, logged as one line ("timing attachment X: lock 0.0, deeplink 0.9, ...").
+    A step's time is what passed since the previous mark, so nothing between two marks goes uncounted."""
+    def __init__(self, label): self.label = label; self.t0 = self.last = time.time(); self.steps = {}
+    def mark(self, step):
+        t = time.time(); self.steps[step] = round(self.steps.get(step, 0) + (t - self.last), 2); self.last = t
+    def as_dict(self): return dict(self.steps, total=round(time.time() - self.t0, 2))
+    def log(self):
+        d = self.as_dict(); log(f'timing {self.label}: ' + ', '.join(f'{k} {v:.1f}' for k, v in d.items())); return d
+_TIMER = None
+def _mark(step):
+    if _TIMER is not None: _TIMER.mark(step)
+@contextlib.contextmanager
+def step_timer(label):
+    """with step_timer('send X') as t: ... -> every _mark() inside lands on t; the summary is logged on exit."""
+    global _TIMER
+    prev = _TIMER; _TIMER = t = StepTimer(label)
+    try: yield t
+    finally:
+        _TIMER = prev
+        try: t.log()
+        except Exception: pass
 def _zone(name):
     """Configured IANA zone, or this machine's local zone when unset."""
     if name:
@@ -490,6 +512,20 @@ def _read_ui_holder():
     try: return json.loads((ROOT/'ui.holder').read_text())
     except Exception: return None
 
+def ui_lock_holder():
+    """The live holder of the UI lock, or None (a holder file left by a killed process doesn't count)."""
+    h = _read_ui_holder()
+    if not h: return None
+    try: os.kill(int(h.get('pid')), 0)
+    except ProcessLookupError: return None
+    except Exception: pass
+    return h
+def deploy_busy():
+    """{'busy', 'lock_holder', 'jobs_running'}: busy while the UI lock is held or any background job runs. Deploys wait for busy=false."""
+    h = ui_lock_holder()
+    try: jr = jobs_running()
+    except Exception as ex: jr = []; log(f'jobs_running failed: {ex!r}')
+    return {'busy': bool(h) or bool(jr), 'lock_holder': h, 'jobs_running': jr or []}
 def _busy_detail(wait_s, prefix):
     """Busy message with holder pid/op/since + wait_s so callers can queue/diagnose."""
     h = _read_ui_holder(); bits = [f'{prefix} for >{wait_s:.0f}s']
@@ -678,21 +714,25 @@ def act(e, what=''):
     raise AppError(f'cannot press {role(e)} {nm(e)!r} {what}')
 def deeplink(link):
     if not link.startswith('claude://'): raise ValueError(link)
-    r = subprocess.run([str(LAUNCH), link], capture_output=True, text=True, timeout=90); log(f'deeplink {link} rc={r.returncode}')
+    # the launcher reads the config file through python twice unless these are set; pass them so a deep link costs one exec
+    env = dict(os.environ, CPG_DISPLAY=str(CFG.get('display') or os.environ.get('DISPLAY') or ':99'), CPG_CLAUDE_BINARY=str(CFG.get('claude_binary') or 'claude-desktop'))
+    r = subprocess.run([str(LAUNCH), link], capture_output=True, text=True, timeout=90, env=env); log(f'deeplink {link} rc={r.returncode}')
+    _mark('deeplink')
 def wait_route(pred, secs=25):
     t0 = time.time()
     while time.time() - t0 < secs:
         u = route()
-        if pred(u): return u
-        time.sleep(.5)
-    return route()
+        if pred(u): _mark('route'); return u
+        time.sleep(.2)
+    u = route(); _mark('route'); return u
 def dialogs():
     d, _ = main_doc()
     return [text_of(e)[:120] or nm(e) for e in find_all(d, pred=lambda e: role(e) in ('dialog', 'alert', 'alert dialog'))] if d else []
 def go_home():
     if re.fullmatch(r'/epitaxy/?(\?.*)?', route() or ''): return True
     deeplink('claude://code/new?source=desktop_action')
-    return re.fullmatch(r'/epitaxy/?(\?.*)?', wait_route(lambda u: re.fullmatch(r'/epitaxy/?(\?.*)?', u or '') is not None, 20) or '') is not None
+    ok = re.fullmatch(r'/epitaxy/?(\?.*)?', wait_route(lambda u: re.fullmatch(r'/epitaxy/?(\?.*)?', u or '') is not None, 20) or '') is not None
+    _mark('go_home'); return ok
 def screenshot(path):
     from PIL import ImageGrab
     im = ImageGrab.grab(xdisplay=os.environ['DISPLAY']).convert('RGB'); p = pathlib.Path(path).expanduser(); p.parent.mkdir(parents=True, exist_ok=True)
@@ -719,6 +759,11 @@ def open_target(chan, thread=None):
         # The app keeps ?thread=<id> in the URL even for unknown ids — verify against the sidebar list.
         if str(thread).startswith(('cmsg_', 'session_')):
             known = list((read_cache(chan) or {}).get('threads') or [])
+            if not any(x.get('thread_id') == thread for x in known) and _thread_view_real(thread):
+                # not in the cached sidebar (a new thread), but the pane shows it with a real title: accept it without
+                # toggling and parsing the Threads sidebar, which cost 10-20 s on a cold open
+                log(f'thread {thread} not in the cached sidebar; the open pane shows it, accepted'); _mark('verify_thread')
+                return u
             if not any(x.get('thread_id') == thread for x in known):
                 try:
                     settle(thread, 8); live = parse_threads(chan, True, True) or []; ensure_threads_panel(False)
@@ -735,6 +780,7 @@ def open_target(chan, thread=None):
                 info = pane_info(thread)
                 if (info.get('thread_title') or '').strip() in ('', 'Thread') and not msg_panel(thread):
                     raise NotFound(f'thread {thread!r} did not open a real thread view (title={info.get("thread_title")!r})')
+            _mark('verify_thread')
     else:
         ov = _OVERVIEW.get(chan)
         # the app re-opens the last viewed thread; ?thread=<overview cse_ id> forces the primary thread
@@ -742,26 +788,37 @@ def open_target(chan, thread=None):
         u = wait_route(lambda u: is_primary_route(u, chan), 25); ok = is_primary_route(u, chan)
         if not ok: raise AppError(f'the app did not open primary of {chan} (route is {u!r}; signed out or project removed?)')
     return u
+def _thread_view_real(thread, secs=6):
+    """The child-thread pane is open with a real title and a transcript panel (an unknown id shows neither)."""
+    t0 = time.time()
+    while time.time() - t0 < secs:
+        try:
+            if msg_panel(thread) is not None and (pane_info(thread).get('thread_title') or '').strip() not in ('', 'Thread'): return True
+        except Exception as ex: log(f'thread view check: {ex!r}'); return False
+        time.sleep(.4)
+    return False
 PANEL = {None: 'Chat messages', 'thread': 'Thread messages'}
 def msg_panel(thread):
     d, _ = main_doc()
     want = 'Thread messages' if thread else 'Chat messages'
     return find(d, 'panel', want) if d else None
+SETTLE_POLL_S = float(os.environ.get('CPG_SETTLE_POLL_S', '0.4'))
+SETTLE_STABLE_S = float(os.environ.get('CPG_SETTLE_STABLE_S', '0.8'))
 def settle(thread, maxs=25):
     """wait until the transcript panel exists, 'Loading...' is gone and the message count is stable"""
-    t0 = time.time(); prev = None; stable = 0
+    t0 = time.time(); prev = None; since = t0; seen = 0
     while time.time() - t0 < maxs:
         p = msg_panel(thread)
         if p:
             arts = [a for a in kids_deep_articles(p)]; loading = any(nm(e) == 'Loading...' or text_of(e) == 'Loading...' for e in kids(p))
             sig = (len(arts), nm(arts[-1]) if arts else '')
             if arts and not loading and sig == prev:
-                stable += 1
-                if stable >= 2: return True
-            else: stable = 0
-            prev = sig
-        time.sleep(1)
-    return msg_panel(thread) is not None
+                seen += 1
+                # stable = the same count and last message seen on 2 more polls, at least SETTLE_STABLE_S apart in all
+                if seen >= 2 and time.time() - since >= SETTLE_STABLE_S: _mark('settle'); return True
+            else: prev, since, seen = sig, time.time(), 0
+        time.sleep(SETTLE_POLL_S)
+    ok = msg_panel(thread) is not None; _mark('settle'); return ok
 def kids_deep_articles(p): return [e for e in walk(p, 20000) if role(e) == 'article' and re.match(r'^Message \d+$', nm(e))]
 TIME_RE = re.compile(r'^(\d{1,2}:\d{2}\s?[AP]M|\d+\s?[smhdw]( ago)?|\d+ (sec|min|hour|day|week)s? ago|just now|now|yesterday|[A-Z][a-z]+day, [A-Z][a-z]+ \d{1,2}, \d{4}( at \d{1,2}:\d{2}\s?[AP]M)?)$')
 CHROME = re.compile(r'^(Show message actions for .*|Load the rest of this message|Show more|Show less|Add reaction|Reply|Copy message|Edit message|More options|Retry|Download .*|Use the up and down arrow keys.*|Output list available.*|Quick reply and approval controls.*|Arrow keys move the tile.*|\d+ outputs? added by Claude)$')
@@ -1306,14 +1363,16 @@ def find_article(thread, idx, max_pages=15):
     for _ in range(max_pages + 1):
         arts = kids_deep_articles(msg_panel(thread) or win())
         hit = [a for a in arts if nm(a) == f'Message {idx}']
-        if hit: return hit[0]
+        if hit: _mark('find_article'); return hit[0]
         if not arts: break
         nums = [int(nm(a).split()[1]) for a in arts]
         if idx > max(nums): raise NotFound(f'message {idx} not found (latest rendered is {max(nums)})')
         first = arts[nums.index(min(nums))]
         try: first.get_component_iface().grab_focus()
         except Exception: pass
-        time.sleep(.3); xdo('key', '--repeat', '8', '--delay', '60', 'Up'); time.sleep(1.5)
+        time.sleep(.15); xdo('key', '--repeat', '8', '--delay', '60', 'Up')
+        lo = min(nums)   # wait for older messages to render (up to 1.5 s) instead of always sleeping 1.5 s
+        _wait_until(lambda: min([int(nm(a).split()[1]) for a in kids_deep_articles(msg_panel(thread) or win())] or [lo]) < lo, 1.5, .3)
     raise NotFound(f'message {idx} is not rendered (scrolled {max_pages} pages back)')
 # ---- attachment viewers: the Image preview dialog, the file/output side pane, and the Overview document viewer.
 # Only these controls are ever pressed while fetching: the tile itself, the viewer's "Close", and its "Download file".
@@ -1789,12 +1848,12 @@ def op_attachment_get(project, thread=None, attachment_id=None, message_index=No
 def _attachment_fetch(project, thread, message_index, n, force=False, stay=False, shot=None):
     """Open the attachment in the app and store it. -> metadata (path_on_host, sha256, mime, size, ...), no payload."""
     p = resolve_project(project); chan = p['id']
-    with ui_lock(f'attachment {p["name"]} {thread or "primary"} {message_index}.{n}', force):
+    with step_timer(f'attachment {p["name"]} {thread or "primary"} {message_index}.{n}') as tmr, ui_lock(f'attachment {p["name"]} {thread or "primary"} {message_index}.{n}', force):
         try:
-            tid = _resolve_tid(p, chan, thread)
+            _mark('lock'); tid = _resolve_tid(p, chan, thread); _mark('resolve_thread')
             open_target_settled(chan, tid)
             a = find_article(tid, int(message_index))
-            R, _ = rich_of(a, int(message_index))
+            R, _ = rich_of(a, int(message_index)); _mark('read_message')
             if not R.atts: raise NotFound(f'message {message_index} has no attachments, files or links')
             if not 1 <= int(n) <= len(R.atts): raise NotFound(f'message {message_index} has {len(R.atts)} attachment(s); n must be 1..{len(R.atts)}')
             att = dict(R.atts[int(n) - 1]); el = R.elems[int(n) - 1]
@@ -1820,12 +1879,14 @@ def _attachment_fetch(project, thread, message_index, n, force=False, stay=False
                 else:
                     a = find_article(tid, int(message_index)); R, _ = rich_of(a, int(message_index)); el = R.elems[int(n) - 1]
                     data, name, mime, how, extra = _fetch_pane(att, el); extra['original'] = False
+            _mark('fetch')
             if shot: screenshot(shot)
         finally:
             try: _close_att_overlays()
             except Exception: pass
             if not stay: go_home()
     meta.update({k: v for k, v in extra.items() if v is not None}); meta['source'] = how; meta['fetched_at_local'] = ct(now().isoformat())
+    meta['timing'] = tmr.as_dict()
     if dl:
         path, sha, size = store_file(dl, name, mime, dict(meta, mime=mime))
         meta.update(available=True, mime=mime, size=size, saved_name=name, path_on_host=path, sha256=sha)
@@ -2141,7 +2202,28 @@ def _composer_scope(e=None, levels=8):
         node = par
         if find(node, 'push button', pred=lambda x: nm(x) in ATTACH_BUTTON_NAMES) is not None: return node
     return node
-def _chip_pred(name): return lambda e: nm(e) == name or nm(e).startswith(('Remove ' + name, name))
+def _chip_is(label, name):
+    """label (a chip's text, or its "Remove <x>" button name without "Remove ") is the chip for file `name`.
+    The name must end at a word boundary, so a.js never matches a chip for a.json."""
+    return bool(label) and bool(name) and re.match(re.escape(name) + r'(?![\w.])', label) is not None
+def _chip_pred(name): return lambda e: nm(e) == name or (nm(e).startswith('Remove ') and _chip_is(nm(e)[7:], name)) or _chip_is(nm(e), name)
+CHIP_NAME_RE = re.compile(r'^[^/\\\n]{0,200}[^/\\\s]\.[A-Za-z0-9]{1,10}$')
+def composer_chips(scope=None):
+    """Names of the attachment chips in the unsent message, one entry per chip (duplicates kept), read from each
+    chip's own "Remove <name>" button inside the composer."""
+    root = scope if scope is not None else _composer_scope()
+    if root is None: return []
+    # only file-like names (name.ext): other "Remove ..." controls near the composer are not attachments
+    return [nm(b)[7:].strip() for b in find_all(root, 'push button', lambda e: nm(e).startswith('Remove ') and CHIP_NAME_RE.match(nm(e)[7:].strip()) is not None)]
+def _chip_count(name, scope=None): return sum(1 for c in composer_chips(scope) if _chip_is(c, name))
+def _extra_chips(chips, ours):
+    """-> (chips that are not ours, our names with no chip); each of our names accounts for one chip."""
+    left = list(ours or []); extra = []
+    for c in chips or []:
+        m = next((o for o in left if _chip_is(c, o)), None)
+        if m is None: extra.append(c)
+        else: left.remove(m)
+    return extra, left
 def _composer_has_chip(name, scope=None):
     root = scope if scope is not None else main_doc()[0]
     if root is None: return False
@@ -2149,11 +2231,21 @@ def _composer_has_chip(name, scope=None):
 def _remove_chip(name, scope=None):
     """Press the chip's own "Remove <name>" (it only takes the file out of the unsent message). True when it's gone."""
     root = scope if scope is not None else main_doc()[0]
-    b = find(root, 'push button', pred=lambda e: nm(e).startswith('Remove ' + name)) if root is not None else None
+    b = find(root, 'push button', pred=lambda e: nm(e).startswith('Remove ') and _chip_is(nm(e)[7:], name)) if root is not None else None
     if b is None: return not _composer_has_chip(name)
+    n0 = _chip_count(name, scope)
     try: act(b, f'Remove {name}')
     except Exception: return False
+    if n0 > 1:   # the same file twice: one press takes out one chip, so wait for the count to drop
+        return bool(_wait_until(lambda: _chip_count(name, scope) < n0, 3, .25))
     return bool(_wait_until(lambda: not _composer_has_chip(name, scope) and not _composer_has_chip(name), 3, .25))
+def _clear_leftover_chips(chips, scope=None):
+    """Take chips this send did not add out of the unsent message, each with its own Remove button. -> names still there."""
+    for c in list(chips):
+        try:
+            if not _remove_chip(c, scope): log(f'leftover chip {c!r} did not go away')
+        except Exception as ex: log(f'removing leftover chip {c!r} failed: {ex!r}')
+    return composer_chips(scope)
 # ---- location-bar attach (primary). The GTK chooser is NOT exposed over AT-SPI in this Electron build
 # (Chromium owns the ATK root; the only extra claude-desktop frame is an unnamed hidden window), so
 # browsing by row name can never find a folder/file. Typing the absolute path into the location bar
@@ -2165,7 +2257,7 @@ class AttachCtx:
         if self.item is None:
             info = locate_attach_control()
             if not info.get('attach_item'): raise AppError('attach menu item not found; nothing attached')
-            self.button, self.item = info['attach_button'], info['attach_item']; self.scope = _composer_scope()
+            self.button, self.item = info['attach_button'], info['attach_item']; self.scope = _composer_scope(); _mark('locate_attach_control')
         return self
 def _open_attach_picker(ctx=None, limit=15):
     ctx = (ctx or AttachCtx()).ensure(); t0 = time.time()
@@ -2957,13 +3049,44 @@ def _cleanup_composer(names, scope=None):
     except BaseException as ex: log(f'cleanup: clear failed {ex!r}')
     log(f'send cleanup: {rep}')
     return rep
+def _attach_test_open(p, tid, files, chips0, e, dl, tmr):
+    """Dry run that really attaches: per file press Open, wait for the chip, then take it out with its own
+    "Remove <name>" button. The message is never typed and Send is never pressed. The file does upload to claude.ai
+    with the chip (that is what Open does); removing the chip leaves it out of any message."""
+    if chips0: raise Refused(f'the message box already holds attachment(s) {chips0}; the open test needs an empty box. Nothing was attached.')
+    ctx = AttachCtx(); res = []; attached = []
+    try:
+        for i, f in enumerate(files):
+            dl.check(f"before attaching {f['name']} ({i + 1}/{len(files)})")
+            t0 = time.time()
+            r = _attach_one_via_location(f, test_only=False, ctx=ctx, deadline=dl); attached.append(f['name']); _mark('attach')
+            r['removed'] = bool(_remove_chip(f['name'], ctx.scope)); _mark('remove')
+            if r['removed']: attached.remove(f['name'])
+            r['total_seconds'] = round(time.time() - t0, 1); res.append(r)
+            log(f"attach-test open {f['name']}: chip after {r.get('seconds')} s, removed={r['removed']}")
+    except BaseException as ex:
+        rep = _cleanup_composer(attached)
+        try: ex.cleanup = rep
+        except Exception: pass
+        raise
+    chips = composer_chips(); text_left = norm(composer_text(composer() or e))
+    return {'dry_run': True, 'attach_test': 'open', 'project': p['name'], 'thread_id': tid or 'primary', 'files': res,
+            'all_attached': all(r.get('attached') for r in res), 'all_removed': all(r.get('removed') for r in res),
+            'composer_chips': chips, 'composer_empty': not text_left and not chips, 'open_files_left': len(_open_files_wids()),
+            'timing': tmr.as_dict(),
+            'note': 'Open pressed per file, chip seen, then removed with its own Remove button; the message was not typed and Send was NOT pressed'}
 _PROGRESS = None   # set by a send job's worker: progress(state, **detail)
 def _progress(state, **kw):
     if _PROGRESS:
         try: _PROGRESS(state, **kw)
         except Exception as ex: log(f'progress hook failed: {ex!r}')
-def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, force=False, stay=False, shot=None, dry_run=False, type_test=False, attachments=None, bot_name=None, attach_test=False, deadline_s=None, prepared_files=None):
+def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, force=False, stay=False, shot=None, dry_run=False, type_test=False, attachments=None, bot_name=None, attach_test=False, deadline_s=None, prepared_files=None, clear_leftovers=False):
+    """attach_test (dry runs only): True/'cancel' types each path in the picker and Cancels; 'open' presses Open, waits
+    for the chip, removes it with its own Remove button and checks the box is empty. Neither types the message or Sends.
+    clear_leftovers (real sends): chips already in the box that this send didn't add are removed first (never sent);
+    without it such a send is refused."""
     STAGE.maybe_sweep()
+    attach_mode = 'open' if attach_test == 'open' else ('cancel' if attach_test else None)
     files = prepared_files if prepared_files is not None else (prepare_attachment_files(attachments) if attachments else [])
     dl = Deadline(deadline_s)
     if (not message or not message.strip()) and not files: raise CPGError('message is empty')
@@ -2971,8 +3094,9 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
     message = add_origin(message or '', bot_name if bot_name is not None else CFG.get('bot_name'))
     if len(message) > 20000: raise CPGError('message longer than 20000 characters')
     p = resolve_project(project); chan = p['id']; tid = resolve_thread(chan, thread)
-    with ui_lock(f'send {p["name"]} {thread or "primary"}', force, timeout=max(UI_LOCK_DEFAULT_TIMEOUT, int(timeout or 0))):
+    with step_timer(f'send {p["name"]} {thread or "primary"}') as tmr, ui_lock(f'send {p["name"]} {thread or "primary"}', force, timeout=max(UI_LOCK_DEFAULT_TIMEOUT, int(timeout or 0))):
         try:
+            _mark('lock')
             if tid and str(tid).startswith('LOOKUP:'):
                 open_target(chan, None); settle(None, 15); ths = parse_threads(chan, True, True); ensure_threads_panel(False)
                 tid = resolve_thread(chan, tid[7:], ths)
@@ -2990,27 +3114,43 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
             if not e: raise AppError('composer (message box) not found on this page — the thread may still be loading, or a dialog is covering it; retry')
             draft = composer_text(e)
             if norm(draft): raise Refused(f'the message box already holds an unsent draft (maybe typed by {OPERATOR}); not overwriting it')
+            chips0 = composer_chips()      # attachments already in the box: a real send never sends them along
             d, _ = main_doc()
             sb = [b for b in find_all(d, 'push button', lambda b: nm(b) in ('Send', 'Send message', 'Submit'))]
             att_info = locate_attach_control() if (files and dry_run) else None
-            if dry_run and attach_test:
+            if dry_run and attach_mode == 'open':
+                if not files: raise CPGError('--attach-test=open needs --attach files')
+                return _attach_test_open(p, tid, files, chips0, e, dl, tmr)
+            if dry_run and attach_mode:
                 if not files: raise CPGError('--attach-test needs --attach files')
                 sd = STAGE.new_slot('attach-test')
                 res = attach_files(files, test_only=True, shot_dir=str(sd))
                 leftover = [f['name'] for f in files if _composer_has_chip(f['name'])]
-                return {'dry_run': True, 'attach_test': True, 'project': p['name'], 'thread_id': tid or 'primary', 'files': res,
+                chips = composer_chips()
+                return {'dry_run': True, 'attach_test': 'cancel', 'project': p['name'], 'thread_id': tid or 'primary', 'files': res,
                         'all_found': all(r.get('ocr_saw_filename') for r in res), 'all_cancelled': all(r.get('cancelled') for r in res),
-                        'open_files_left': len(_open_files_wids()), 'composer_chips_left': leftover or None,
-                        'composer_empty': not norm(composer_text(composer() or e)), 'active_window': _active_win_name(), 'ocr_dir': str(sd),
-                        'note': 'picker opened per file, path typed, then Cancelled; Open and Send were NOT pressed'}
+                        'open_files_left': len(_open_files_wids()), 'composer_chips_left': leftover or None, 'composer_chips': chips,
+                        'composer_empty': not norm(composer_text(composer() or e)) and not chips, 'active_window': _active_win_name(), 'ocr_dir': str(sd),
+                        'timing': tmr.as_dict(), 'note': 'picker opened per file, path typed, then Cancelled; Open and Send were NOT pressed'}
             if dry_run and not type_test:
                 if shot: screenshot(shot)
                 r = {'dry_run': True, 'project': p['name'], 'project_id': chan, 'thread_id': tid or 'primary', 'route': route(),
-                     'composer': nm(e), 'composer_empty': not norm(composer_text(composer() or e)), 'send_button_found': bool(sb), 'latest_message_index': bmax,
+                     'composer': nm(e), 'composer_empty': not norm(composer_text(composer() or e)) and not chips0, 'composer_chips': chips0, 'send_button_found': bool(sb), 'latest_message_index': bmax,
                      'would_send_chars': len(message), 'origin_header': message.split(chr(10), 1)[0], 'would_send_preview': message[:200], 'note': 'nothing typed, nothing attached, nothing sent'}
                 if files: r.update(would_attach=files, attach_control=att_info, attach_note='dry run stops at locating the attach control: attaching uploads the file to claude.ai')
+                if chips0: r['leftover_note'] = (f'the box already holds {len(chips0)} attachment(s); a real send refuses unless clear_leftovers=true, '
+                                                 'which removes them first (they are never sent)')
+                r['timing'] = tmr.as_dict()
                 return r
             if dry_run and files: raise CPGError('type_test with attachments is not supported (attaching uploads the file); use plain --dry-run')
+            cleared = None
+            if chips0 and not dry_run:
+                if not clear_leftovers:
+                    raise Refused(f'the message box already holds attachment(s) this send did not add: {chips0}. Nothing was typed or sent. '
+                                  'Pass clear_leftovers=true to remove them first (they are never sent).')
+                still = _clear_leftover_chips(chips0)
+                if still: raise AppError(f'could not remove leftover attachment(s) {still} from the message box; nothing was typed or sent')
+                cleared = chips0; log(f'removed leftover chips before sending: {chips0}'); _mark('clear_leftovers')
             attached = []; send_pressed = False
             try:
                 if files: attach_files(files, done=attached, deadline=dl, progress=_progress); e = composer() or e
@@ -3032,6 +3172,10 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 if not ok_match:
                     _clear_composer_keys()
                     raise AppError('typed text did not match; cleared the box, nothing was sent' + chr(10) + (diff or ''))
+                # last look before Send: exactly our chips, nothing else (a stray chip would go out with the message)
+                extra, missing = _extra_chips(composer_chips(), attached)
+                if extra: raise AppError(f'the message box holds attachment(s) this send did not add: {extra}; stopped before Send, nothing was sent')
+                if missing: raise AppError(f'attached file(s) {missing} are no longer in the message box; stopped before Send, nothing was sent')
                 d, _ = main_doc()
                 sb = [b for b in find_all(d, 'push button', lambda b: nm(b) in ('Send', 'Send message', 'Submit'))]
                 _progress('sending', attached=len(attached), total=len(files)); send_pressed = True
@@ -3048,7 +3192,8 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 log(f'send to {p["name"]} {tid or "primary"} stopped before Send ({type(ex).__name__}: {ex}); cleanup {rep}')
                 raise
             res = {'project': p['name'], 'project_id': chan, 'thread_id': tid or 'primary', 'sent': True, 'verified_in_transcript': bool(m), 'attached': [f['name'] for f in files] or None,
-                   'message_index': m['index'] if m else None, 'origin_header': message.split(chr(10), 1)[0], 'sent_at_local': ct(now().isoformat()), 'route': route()}
+                   'message_index': m['index'] if m else None, 'origin_header': message.split(chr(10), 1)[0], 'sent_at_local': ct(now().isoformat()), 'route': route(),
+                   'cleared_leftovers': cleared, 'timing': tmr.as_dict()}
             if shot: screenshot(shot)
         finally:
             if not (stay or wait): go_home()
@@ -3076,7 +3221,10 @@ def _send_state_public(st):
 def _send_answer(st, joined=False):
     if st.get('state') == 'sent':
         r = dict(st.get('result') or {}); r['job_id'] = st['job_id']
-        if joined: r['joined_existing_send'] = True; r['note'] = 'this send already went out (same message and files, or same idempotency_key); nothing was sent again'
+        if joined:
+            r['joined_existing_send'] = True
+            r['note'] = (f'this send already went out (same message and files within {int(SEND_DEDUPE_WINDOW // 60)} min, or the same idempotency_key); '
+                         'nothing was sent again. To send the same text again on purpose, pass a new idempotency_key.')
         return r
     if st.get('state') == 'failed':
         out = dict(_send_state_public(st), sent=False, failed=True)
@@ -3085,7 +3233,7 @@ def _send_answer(st, joined=False):
     return dict(_send_state_public(st), pending=True, sent=False, retry_after_s=15,
                 note='still sending in the app; call claude_thread_send again with the same arguments (or job_id) for the result. '
                      'It joins this send and never types or sends the message twice.')
-def op_send_job(project, message, thread=None, force=False, attachments=None, bot_name=None, budget=None, idempotency_key=None, job_id=None):
+def op_send_job(project, message, thread=None, force=False, attachments=None, bot_name=None, budget=None, idempotency_key=None, job_id=None, clear_leftovers=False):
     """A send that answers within `budget` seconds: the send itself runs in a detached worker."""
     budget = SEND_BUDGET if budget is None else budget
     if job_id:
@@ -3105,7 +3253,8 @@ def op_send_job(project, message, thread=None, force=False, attachments=None, bo
     elif st and st.get('state') == 'sent' and time.time() - (st.get('finished_ts') or 0) < SEND_DEDUPE_WINDOW: return _send_answer(st, joined=True)
     else:
         joined = False
-        spec = {'project': chan, 'thread': thread, 'message': message, 'bot_name': bot_name, 'force': force, 'files': files, 'deadline_s': SEND_DEADLINE}
+        spec = {'project': chan, 'thread': thread, 'message': message, 'bot_name': bot_name, 'force': force, 'files': files, 'deadline_s': SEND_DEADLINE,
+                'clear_leftovers': bool(clear_leftovers)}
         job_write(SEND_JOBS, key, {'job_id': key, 'state': 'queued', 'project': p['name'], 'thread_id': thread or 'primary', 'started_ts': t_start,
                                    'total': len(files), 'attached': 0, 'spec': spec})
         how = spawn_job([sys.executable, str(pathlib.Path(__file__).resolve()), '--json'] + (['--force'] if force else []) + ['send-job', key], f'send-{key[:8]}')
@@ -3130,7 +3279,7 @@ def run_send_job(key):
         _PROGRESS = prog; prog('starting')
         try:
             r = op_send(spec['project'], spec.get('message') or '', spec.get('thread'), force=spec.get('force', False), bot_name=spec.get('bot_name'),
-                        prepared_files=spec.get('files') or [], deadline_s=spec.get('deadline_s'))
+                        prepared_files=spec.get('files') or [], deadline_s=spec.get('deadline_s'), clear_leftovers=bool(spec.get('clear_leftovers')))
             st.update(state='sent', step='sent', result=r)
         except BaseException as ex:
             rep = getattr(ex, 'cleanup', None)
@@ -3941,9 +4090,7 @@ def op_probe_projects(force=False):
     except CPGError as ex: out['cache_error'] = str(ex)[:200]
     return out
 def op_status():
-    holder = None
-    try: holder = json.loads((ROOT/'ui.holder').read_text())
-    except Exception: pass
+    holder = ui_lock_holder()
     st = {'vnc_viewers': vnc_viewers(), 'x_idle_min': x_idle_min(), 'effective_user_idle_min': effective_user_idle_min(), 'own_input_age_min': last_own_input_age_min(), 'lock_holder': holder}
     try: st['jobs_running'] = jobs_running() or None
     except Exception as ex: st['jobs_running'] = None; log(f'jobs_running failed: {ex!r}')
@@ -4040,11 +4187,11 @@ def main(argv=None):
     s = sp.add_parser('project', help='primary thread + threads of a project'); s.add_argument('project'); s.add_argument('--cached', action='store_true'); s.add_argument('--resolved', action='store_true'); s.add_argument('--all-threads', action='store_true'); s.add_argument('--max', type=int, default=10)
     s = sp.add_parser('threads', help='threads of a project'); s.add_argument('project'); s.add_argument('--resolved', action='store_true'); s.add_argument('--all-threads', action='store_true')
     s = sp.add_parser('read', help='read a thread (primary by default)'); s.add_argument('project'); s.add_argument('--thread'); s.add_argument('--cached', action='store_true'); s.add_argument('--max', type=int, default=20); s.add_argument('--history', type=int, default=0); s.add_argument('--expand', action='store_true'); s.add_argument('--attachments', action='store_true', help='list attachments/blocks per message'); s.add_argument('--images', action='store_true', help='inline image thumbnails (base64, JSON only)'); s.add_argument('--markdown', action='store_true', help='markdown rendering of each message')
-    s = sp.add_parser('send', help='type + send a message'); s.add_argument('project'); s.add_argument('message', nargs='?'); s.add_argument('--file'); s.add_argument('--thread'); s.add_argument('--wait', action='store_true'); s.add_argument('--timeout', type=int, default=600); s.add_argument('--poll', type=int, default=10); s.add_argument('--dry-run', action='store_true', help='check targeting only; never presses Send'); s.add_argument('--type-test', action='store_true', help='with --dry-run: type the text, read it back, clear it'); s.add_argument('--attach-test', action='store_true', help='with --dry-run and --attach: open the picker per file, type the path, OCR it, Cancel (never Open/Send)'); s.add_argument('--attach', action='append', help='file on the Claude Code host to attach (repeatable); --attach-json for base64')
+    s = sp.add_parser('send', help='type + send a message'); s.add_argument('project'); s.add_argument('message', nargs='?'); s.add_argument('--file'); s.add_argument('--thread'); s.add_argument('--wait', action='store_true'); s.add_argument('--timeout', type=int, default=600); s.add_argument('--poll', type=int, default=10); s.add_argument('--dry-run', action='store_true', help='check targeting only; never presses Send'); s.add_argument('--type-test', action='store_true', help='with --dry-run: type the text, read it back, clear it'); s.add_argument('--attach-test', nargs='?', const='cancel', choices=['cancel', 'open'], default=None, help='with --dry-run and --attach: cancel (default) types each path in the picker, OCRs it and Cancels; --attach-test=open presses Open, waits for the chip, removes it again. Never types the message or presses Send'); s.add_argument('--clear-leftovers', action='store_true', help='remove attachment chips already in the message box (never sent) instead of refusing'); s.add_argument('--attach', action='append', help='file on the Claude Code host to attach (repeatable); --attach-json for base64')
     s.add_argument('--attach-json', help='JSON file: [{"path":...} | {"base64":...,"filename":...}]'); s.add_argument('--bot-name', help='name in the origin bracket: [sent by Grok Bot · NAME]')
     s.add_argument('--budget', type=float, help='answer within this many seconds; the send runs as a background job (call again, or --job-id, for the result)'); s.add_argument('--idempotency-key', help='with --budget: calls with the same key are one send'); s.add_argument('--job-id', help='the result of a send job (nothing is sent)')
     s = sp.add_parser('send-job', help=argparse.SUPPRESS); s.add_argument('key')
-    sp.add_parser('jobs', help='running background jobs (attachment fetches, sends); exit 0, busy=true while any runs')
+    sp.add_parser('jobs', help='busy check for deploys: the UI lock holder and running background jobs; exits 3 while busy, 0 when idle')
     s = sp.add_parser('attachment', help='get an attachment / file / image from a message'); s.add_argument('action', choices=['get', 'list']); s.add_argument('project'); s.add_argument('id', nargs='?', help='<message_index>.<n> (from read --attachments)')
     s.add_argument('--thread'); s.add_argument('--message', type=int); s.add_argument('--n', type=int, default=1); s.add_argument('--as', dest='as_', default='auto', choices=['auto', 'image', 'text', 'base64', 'path']); s.add_argument('--full', action='store_true', help='full-size image (default: max 1600 px / ~1 MB)'); s.add_argument('--out', help='also write the returned image/text/bytes to this file')
     s.add_argument('--budget', type=float, help='answer within this many seconds; a fetch still running comes back as pending with a job_id (call again for the file)'); s.add_argument('--refresh', action='store_true', help='fetch again even if this attachment was fetched before'); s.add_argument('--job', action='store_true', help=argparse.SUPPRESS)
@@ -4077,6 +4224,7 @@ def main(argv=None):
     def _alarm(*_): raise Interrupted(f'claude-projects watchdog: {a.cmd} exceeded {lim}s')
     def _term(*_): raise Interrupted('stopped by SIGTERM')    # finally blocks run: composer cleanup, lock release, go home
     signal.signal(signal.SIGALRM, _alarm); signal.alarm(lim); signal.signal(signal.SIGTERM, _term)
+    rc = 0
     try:
         if a.cmd == 'projects': res = op_projects(a.refresh, a.all, **F, stay=a.stay)
         elif a.cmd == 'project': res = op_project_get(a.project, not a.cached, a.resolved, a.all_threads, a.max, **F, stay=a.stay, shot=a.shot)
@@ -4101,16 +4249,17 @@ def main(argv=None):
                 if not a.json:
                     res = {k: (v if k not in ('image', 'base64') else (dict(v, base64=f"<{len(v['base64'])} base64 chars>") if isinstance(v, dict) else f'<{len(v)} base64 chars>')) for k, v in res.items()}
         elif a.cmd == 'send-job': res = run_send_job(a.key)
-        elif a.cmd == 'jobs': jr = jobs_running(); res = {'busy': bool(jr), 'jobs_running': jr}
+        elif a.cmd == 'jobs':
+            res = deploy_busy(); rc = 3 if res['busy'] else 0   # non-zero while busy: `claude-projects jobs && restart` is safe
         elif a.cmd == 'send' and a.job_id: res = op_send_job(a.project, None, job_id=a.job_id)
         elif a.cmd == 'send' and a.budget is not None and not a.dry_run and not a.wait:
             msg = pathlib.Path(a.file).read_text(encoding='utf-8') if a.file else (a.message if a.message not in (None, '-') else sys.stdin.read())
             atts = list(a.attach or []) + (json.loads(pathlib.Path(a.attach_json).read_text()) if a.attach_json else [])
-            res = op_send_job(a.project, msg.rstrip('\n'), a.thread, a.force, atts or None, a.bot_name, a.budget, a.idempotency_key)
+            res = op_send_job(a.project, msg.rstrip('\n'), a.thread, a.force, atts or None, a.bot_name, a.budget, a.idempotency_key, clear_leftovers=a.clear_leftovers)
         elif a.cmd == 'send':
             msg = pathlib.Path(a.file).read_text(encoding='utf-8') if a.file else (a.message if a.message not in (None, '-') else sys.stdin.read())
             atts = list(a.attach or []) + (json.loads(pathlib.Path(a.attach_json).read_text()) if a.attach_json else [])
-            res = op_send(a.project, msg.rstrip('\n'), a.thread, a.wait, a.timeout, a.poll, **F, stay=a.stay, shot=a.shot, dry_run=a.dry_run, type_test=a.type_test, attachments=atts or None, bot_name=a.bot_name, attach_test=getattr(a, 'attach_test', False))
+            res = op_send(a.project, msg.rstrip('\n'), a.thread, a.wait, a.timeout, a.poll, **F, stay=a.stay, shot=a.shot, dry_run=a.dry_run, type_test=a.type_test, attachments=atts or None, bot_name=a.bot_name, attach_test=getattr(a, 'attach_test', None) or False, clear_leftovers=a.clear_leftovers)
         elif a.cmd == 'create-thread': res = op_create_thread(a.project, a.title, a.instructions, a.wait, a.timeout, 15, **F, stay=a.stay, shot=a.shot, dry_run=a.dry_run, bot_name=a.bot_name)
         elif a.cmd == 'wait': res = op_wait(a.project, a.thread, a.after, a.timeout, a.poll, **F, stay=a.stay, shot=a.shot)
         elif a.cmd == 'create-project': res = op_create_project(a.name, a.description, a.repo, a.pin, **F, stay=a.stay, shot=a.shot)
@@ -4156,5 +4305,5 @@ def main(argv=None):
     if CFG.get('legacy_field_aliases'): res = legacy_aliases(res)
     if a.json: print(json.dumps(res, ensure_ascii=False, default=str))
     else: human(res)
-    return 0
+    return rc
 if __name__ == '__main__': sys.exit(main())
