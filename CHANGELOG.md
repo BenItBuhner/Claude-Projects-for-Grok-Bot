@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.4 (2026-11-15)
+
+### The last old name
+- The error class is `ClaudeProjectsError` (was a short-prefixed name, plus an alias for an even older one, both
+  removed). Error results report `"error": "ClaudeProjectsError"`; the subclasses `Busy`, `NotFound`, `Refused` and
+  `AppError` are unchanged.
+- `tests/test_layout.py` now flags the old prefixes in any spelling or case, inside identifiers too, outside the
+  migration code. Everything else in 1.0.3 (one package, 25 tools, threads waiting on you) is unchanged.
+
 ## 1.0.3 (2026-11-15)
 
 ### One package, plain names

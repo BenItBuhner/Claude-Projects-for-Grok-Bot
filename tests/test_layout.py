@@ -6,7 +6,7 @@ import conftest  # noqa: F401
 from claude_projects import config as cfg_mod
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-OLD = re.compile(r'(?<![A-Za-z])(cpg|ccp)(?![A-Za-z])|\b(CPG|CCP)_', re.I)
+OLD = re.compile(r'ccp|cpg', re.I)   # any spelling, any case (class names too)
 # the files allowed to name the old prefixes, each for migration only
 MIGRATION = {'CHANGELOG.md', 'install.sh', 'claude_projects/config.py', 'hosts/macos/setup.sh', 'hosts/macos/claude-projects',
              'hosts/windows/setup.ps1', 'tests/test_layout.py'}

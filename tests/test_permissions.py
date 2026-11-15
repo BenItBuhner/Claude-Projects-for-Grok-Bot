@@ -133,8 +133,8 @@ def test_op_permission_dry_run_and_apply(monkeypatch):
     monkeypatch.setattr(C, 'act', fake_act)
     r = C.op_permission('Demo', 'add folder')
     assert r['dry_run'] and r['would_press'] == 'Add folder' and pressed == [] and r['address'] == 'chan_TEST/cse_TEST'
-    with pytest.raises(C.CPGError): C.op_permission('Demo', 'Allow')
-    with pytest.raises(C.CPGError): C.op_permission('Demo', '')
+    with pytest.raises(C.ClaudeProjectsError): C.op_permission('Demo', 'Allow')
+    with pytest.raises(C.ClaudeProjectsError): C.op_permission('Demo', '')
     r = C.op_permission('Demo', 'Not now', dry_run=False)
     assert pressed == ['Not now'] and r['card_gone'] and r['pressed'] == 'Not now'
     with pytest.raises(C.NotFound): C.op_permission('Demo', 'Add folder')
