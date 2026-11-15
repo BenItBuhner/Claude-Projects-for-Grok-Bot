@@ -66,6 +66,7 @@ def _env(monkeypatch, nodes, take_on_continue):
     monkeypatch.setattr(C, 'go_home', lambda: True)
     monkeypatch.setattr(C, 'ui_lock', FakeLock)
     monkeypatch.setattr(C, 'busy_state', lambda tid: True)
+    monkeypatch.setattr(C, 'dialogs', lambda: [])   # never the real accessibility bus (CI has none)
     monkeypatch.setattr(C, 'log', lambda m: None); monkeypatch.setattr(C.time, 'sleep', lambda s: None)
     monkeypatch.setattr(C, 'detect_permission_cards', lambda: state['cards'])
     def fake_act(e, what=''):
