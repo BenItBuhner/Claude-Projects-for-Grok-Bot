@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Run claude-projects inside the Lima VM that hosts the plugin on this Mac:  hosts/macos/claude-projects setup status
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+LIMACTL="$(command -v limactl || true)"
+[ -n "$LIMACTL" ] || { echo "limactl not found; run hosts/macos/setup.sh first" >&2; exit 3; }
+# the VM is "claude-projects"; a Mac set up before 1.0.2 has it as "ccp" (CPG_LIMA_NAME, or the old CCP_LIMA_NAME, picks one)
+NAME="${CPG_LIMA_NAME:-${CCP_LIMA_NAME:-}}"
+if [ -z "$NAME" ]; then
+  NAME=claude-projects
+  if [ -z "$("$LIMACTL" list --format '{{.Name}}' claude-projects 2>/dev/null)" ] && [ -n "$("$LIMACTL" list --format '{{.Name}}' ccp 2>/dev/null)" ]; then NAME=ccp; fi
+fi
+# the clone may predate the rename too: use whichever CLI it has
+exec "$LIMACTL" shell "$NAME" -- bash -lc 'cd ~/claude-projects-mcp && if [ -x ./claude-projects ]; then exec ./claude-projects "$@"; else exec ./ccp "$@"; fi' claude-projects "$@"

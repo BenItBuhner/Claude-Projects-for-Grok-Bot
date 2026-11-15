@@ -1,7 +1,7 @@
 """Isolate every test: private temp config/state, a fictional environment map, no real display or app."""
 import json, os, pathlib, sys, tempfile
 
-_T = pathlib.Path(tempfile.mkdtemp(prefix='ccp-test-'))
+_T = pathlib.Path(tempfile.mkdtemp(prefix='cpg-test-'))
 _CFG = _T / 'config.json'
 _CFG.write_text(json.dumps({
     'state_dir': str(_T / 'state'),
@@ -20,7 +20,7 @@ _CFG.write_text(json.dumps({
         'env_TEST_LAPTOP_0001': {'resolved': 'the laptop', 'detail': 'relay', 'machine_kind': 'laptop'},
     },
 }))
-os.environ['CCP_CONFIG'] = str(_CFG)
-for k in ('CCP_BOT_NAME', 'CCP_DISPLAY', 'CCP_STATE_DIR', 'CCP_TIMEZONE'):
+os.environ['CPG_CONFIG'] = str(_CFG)
+for k in ('CPG_BOT_NAME', 'CPG_DISPLAY', 'CPG_STATE_DIR', 'CPG_TIMEZONE'):
     os.environ.pop(k, None)
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))

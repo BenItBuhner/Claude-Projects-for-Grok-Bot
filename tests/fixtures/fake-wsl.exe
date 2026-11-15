@@ -1,0 +1,14 @@
+#!/bin/bash
+# fake wsl.exe: log argv one per line, then run whatever follows --exec with NO shell in between (like wsl --exec).
+# With FAKE_WSL_DIR set, a call whose arguments joined by "_" match a file there prints <key>.out (raw bytes, so a
+# fixture can be UTF-16LE like the old inbox wsl.exe) and exits with <key>.code (default 0), e.g. "-l_-q.out".
+printf 'ARG[%s]\n' "$@" >> "${TMPDIR:-/tmp}/fake-wsl-argv.log"
+if [ -n "${FAKE_WSL_DIR:-}" ]; then
+  key="$(printf '%s_' "$@")"; key="${key%_}"
+  if [ -f "$FAKE_WSL_DIR/$key.out" ] || [ -f "$FAKE_WSL_DIR/$key.code" ]; then
+    [ -f "$FAKE_WSL_DIR/$key.out" ] && cat "$FAKE_WSL_DIR/$key.out"
+    exit "$(cat "$FAKE_WSL_DIR/$key.code" 2>/dev/null || echo 0)"
+  fi
+fi
+# FAKE_WSL_NO_EXEC=1: never run anything after --exec (tests that run setup.ps1 for real stop before the distro steps)
+while [ $# -gt 0 ]; do case "$1" in --exec) shift; [ "${FAKE_WSL_NO_EXEC:-0}" = 1 ] && exit 97; exec "$@";; --version) echo "WSL version: 2.4.4.0"; exit 0;; *) shift;; esac; done

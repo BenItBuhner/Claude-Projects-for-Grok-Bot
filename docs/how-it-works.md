@@ -1,7 +1,7 @@
 # How it works
 
 ```
-Grok Bot ──MCP──▶ ccp_mcp.py ──▶ ccp (CLI) ──AT-SPI + xdotool──▶ Claude desktop app on its own display (:99)
+Grok Bot ──MCP──▶ cpg_mcp.py ──▶ claude-projects (CLI) ──AT-SPI + xdotool──▶ Claude desktop app on its own display (:99)
                                        └──── private copy of the app's IndexedDB (project list, sessions)
 ```
 
@@ -35,8 +35,9 @@ Grok Bot ──MCP──▶ ccp_mcp.py ──▶ ccp (CLI) ──AT-SPI + xdotoo
 | `claude_skill_get` / `claude_policy_get` | The canonical agent skill with the user's effective policy / the policy alone |
 | `claude_policy_propose` | Appends a proposed policy change to a user-owned file; never applied automatically |
 | `claude_app_status` | Health: route, dialogs, viewers, lock holder, sign-in |
+| `claude_setup` | Setup state and next step, read-only verify, Projects-beta check, tidy, viewport on/off ([skill Part A](../skill/SKILL.md)) |
 
-The CLI has the same commands: `./ccp --help`. `./ccp origin --message "hi"` previews the bracket without touching the app.
+The CLI has the same commands: `./claude-projects --help`. `./claude-projects origin --message "hi"` previews the bracket without touching the app.
 
 ## Ids
 
@@ -50,7 +51,7 @@ what agents should use to refer to a thread (it is also the source line of a for
 Claude Code Projects run in Auto permission mode, but the app still shows dynamic cards (add this folder to the session,
 add a repository, allow a machine, run a command). The plugin snapshots the open page's accessibility tree into plain
 data and finds cards generically: the nearest container of option buttons whose text reads like a permission prompt
-(see [`ccp_permissions.py`](../ccp_permissions.py)). Cards appear in `permission_cards` on reads and status, and
+(see [`cpg_permissions.py`](../cpg_permissions.py)). Cards appear in `permission_cards` on reads and status, and
 `current_state.waiting_on` becomes `permission`. A reply that stalls in prose ("should I proceed?") sets the same flag
 with `permission_hint`. Whether to press anything is the agent's call under the user's policy.
 
@@ -62,7 +63,7 @@ with the effective policy merged in, so the skill, the policy and the tool list 
 
 ## Files
 
-One managed staging root (`<state_dir>/staging`, see [`ccp_staging.py`](../ccp_staging.py)): `incoming/` for fetched
+One managed staging root (`<state_dir>/staging`, see [`cpg_staging.py`](../cpg_staging.py)): `incoming/` for fetched
 attachments, `outgoing/<stamp>-<id>/<name>` for files staged for a send (unique per send, so names never collide),
 `attach-test/` and `msg/` for scratch. Entries expire per folder (72 h / 24 h / 6 h / 2 h by default) and the oldest are
 trimmed above `staging_max_mb`; a sweep runs at most hourly and never touches anything outside the root.
@@ -71,15 +72,16 @@ trimmed above `staging_max_mb`; a sweep runs at most hourly and never touches an
 
 | Where the client runs | Command / URL |
 |---|---|
-| Same computer, or over SSH | `~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/ccp_mcp.py --stdio` (via `ssh host …`) |
+| Same computer, or over SSH | `~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/cpg_mcp.py --stdio` (via `ssh host …`) |
 | Elsewhere, through your own tunnel or VPN | `http://127.0.0.1:8791/mcp` + `Authorization: Bearer <~/.config/claude-projects-mcp/mcp.token>`; `bin/grok-bot-bridge <url> <token-file>` turns it into stdio |
 
 ## Configuration
 
-`~/.config/claude-projects-mcp/config.json`, or `CCP_*` environment variables (see [`ccp_config.py`](../ccp_config.py)):
+`~/.config/claude-projects-mcp/config.json`, or `CPG_*` environment variables (see [`cpg_config.py`](../cpg_config.py)):
 
 - `display`, `bot_name`, `operator_name`, `timezone`
 - `mcp_host` / `mcp_port`, `allowed_hosts` (add your tunnel hostname here)
+- `viewport_mode`: `on-demand` (new installs: noVNC is only on while someone signs in) or `always`
 - `viewer_ports`: VNC/noVNC ports; UI actions refuse while a viewer is connected. `install.sh` writes `5900+N` and `6080+N`
   for display `:N`, and an empty value falls back to the same ports
 - `environment_labels` / `environment_ids` (optional): map Claude Code's "Running on …" labels to names like "the workstation"
@@ -93,9 +95,26 @@ trimmed above `staging_max_mb`; a sweep runs at most hourly and never touches an
 - Installs the official `claude-desktop` package from Anthropic's apt repository, after checking the signing-key fingerprint.
 - Creates `.venv` and writes the config file.
 - Generates a private MCP token, VNC password and keyring password (chmod 600, never printed).
-- Enables the user services `ccp-*`.
+- Enables the user services `cpg-*`.
 
-Flags: `--display :N`, `--bot-name`, `--operator-name`, `--timezone`, `--no-apt`, `--no-http`, `--claude-md`, `--dry-run`, `--uninstall`.
+Flags: `--display :N`, `--bot-name`, `--operator-name`, `--timezone`, `--no-apt`, `--apt-only`, `--no-http`, `--claude-md`, `--dry-run`, `--uninstall`.
+Agents don't call it directly: `claude-projects setup install` / `reconfigure` / `uninstall` wrap it (see [skill Part A](../skill/SKILL.md)).
+
+## Names before 1.0.2
+
+Older installs, scripts and notes use the old names. All of them still work:
+
+| now | before 1.0.2 | how the old name keeps working |
+|---|---|---|
+| `claude-projects` (CLI) | `ccp` | `ccp` is a shim that runs `claude-projects`, also through a symlink such as `~/.local/bin/ccp` |
+| `cpg_*.py` (modules) | `ccp_*.py` | each `ccp_*.py` imports as the `cpg_*` module and, run as a script, runs it (`python ccp_mcp.py`, `ccp_core.py ...`) |
+| `cpg-*` services | `ccp-*` | recognized by `setup status` and `verify`; the next `install.sh` replaces them with `cpg-*` |
+| `CPG_*` variables | `CCP_*` | read when the `CPG_*` name isn't set |
+| `hosts/macos/claude-projects`, `hosts\windows\claude-projects.cmd` | `hosts/macos/ccp`, `hosts\windows\ccp.cmd` | shims |
+| Mac VM `claude-projects` | `ccp` | an existing `ccp` VM is used when there is no `claude-projects` VM |
+| `AGENTS.md` | `CLAUDE.md` | `CLAUDE.md` imports `AGENTS.md` |
+
+Process checks: `cpg_core.py` is what runs now; match both, e.g. `pgrep -fa -E '(ccp|cpg)_core\.py'`.
 
 ## Development
 

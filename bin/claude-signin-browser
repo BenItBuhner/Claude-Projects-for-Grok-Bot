@@ -1,14 +1,50 @@
 #!/usr/bin/env bash
 # Opens sign-in / OAuth pages inside the Claude app's viewport with a dedicated browser profile
 # (never touches your normal browser profile). Set as BROWSER for the Claude desktop service.
+#   claude-signin-browser --check   prints the browser it would use (exit 127 when there is none)
 set -euo pipefail
-CFG_DIR="${CCP_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp}"
-PROFILE="$CFG_DIR/browser-profile"; mkdir -p "$PROFILE"; chmod 700 "$PROFILE"
-for b in chromium chromium-browser google-chrome-stable google-chrome; do
-  if command -v "$b" >/dev/null 2>&1; then
-    exec "$b" --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check --password-store=gnome-libsecret --start-maximized "$@"
-  fi
-done
-if command -v firefox >/dev/null 2>&1; then exec firefox --profile "$PROFILE" --new-instance "$@"; fi
-if command -v firefox-esr >/dev/null 2>&1; then exec firefox-esr --profile "$PROFILE" --new-instance "$@"; fi
-echo "claude-signin-browser: no chromium/chrome/firefox found; install one (install.sh does)" >&2; exit 127
+CFG_DIR="${CPG_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp}"
+PROFILE="$CFG_DIR/browser-profile"
+# Snaps live in /snap/bin, which services and non-login shells often don't have on PATH (systemd user units, the
+# process supervisor, `wsl -u root` scripts): add it, so a real chromium/firefox snap is found. CPG_SNAP_BIN: tests.
+SNAP_BIN="${CPG_SNAP_BIN:-/snap/bin}"
+case ":$PATH:" in *":$SNAP_BIN:"*) ;; *) [ -d "$SNAP_BIN" ] && PATH="$PATH:$SNAP_BIN";; esac
+# A real snap: $SNAP_BIN/<name> runs, and snapd lists it (when `snap` exists, so a dead snapd isn't a browser).
+real_snap() {
+  [ -n "$1" ] && [ -f "$SNAP_BIN/$1" ] && [ -x "$SNAP_BIN/$1" ] || return 1
+  if command -v snap >/dev/null 2>&1; then snap list "$1" >/dev/null 2>&1 || return 1; fi
+  return 0
+}
+# Ubuntu ships /usr/bin/chromium-browser and /usr/bin/firefox as stubs: small shell scripts that only point at a snap.
+# A stub counts only when the snap it points at is really there (containers and minimal hosts often have no snapd),
+# so the sign-in is never handed to a dead end. Real browser binaries aren't scripts and are never read as stubs.
+usable() {
+  local p; p="$(command -v "$1" 2>/dev/null)" || return 1
+  case "$p" in "$SNAP_BIN"/*) real_snap "${p##*/}"; return;; esac
+  local f; f="$(readlink -f "$p")"
+  case "$f" in */snapd/snapd|*/usr/bin/snap) real_snap "${p##*/}"; return;; esac   # a snap launcher elsewhere on PATH
+  [ "$(head -c 2 "$f" 2>/dev/null)" = '#!' ] || return 0                                   # a binary: a real browser
+  local target; target="$(grep -o '/snap/bin/[a-z0-9-][a-z0-9-]*' "$f" 2>/dev/null | head -n1 || true)"
+  [ -z "$target" ] && return 0                                                             # a script, but not a snap stub
+  real_snap "${target##*/}"
+}
+pick() {
+  for b in chromium chromium-browser google-chrome-stable google-chrome firefox firefox-esr; do
+    if usable "$b"; then echo "$b"; return 0; fi
+  done
+  return 1
+}
+if [ "${1:-}" = "--check" ]; then
+  b="$(pick)" || {
+    if [ -x "$SNAP_BIN/chromium" ]; then why="$SNAP_BIN/chromium is there but \`snap list chromium\` doesn't list it (is snapd running?)"
+    elif command -v chromium-browser >/dev/null 2>&1; then why="only the chromium-browser deb stub (its snap isn't installed)"
+    else why="no browser installed"; fi
+    echo "claude-signin-browser: no usable browser: $why (install chromium or firefox-esr; on Ubuntu: sudo snap install chromium)" >&2; exit 127; }
+  command -v "$b"; exit 0
+fi
+mkdir -p "$PROFILE"; chmod 700 "$PROFILE"
+b="$(pick)" || { echo "claude-signin-browser: no usable browser found; install chromium or firefox-esr (install.sh does)" >&2; exit 127; }
+case "$b" in
+  firefox|firefox-esr) exec "$b" --profile "$PROFILE" --new-instance "$@";;
+  *) exec "$b" --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check --password-store=gnome-libsecret --start-maximized "$@";;
+esac

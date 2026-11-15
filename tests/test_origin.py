@@ -2,8 +2,8 @@
 import json, pathlib, re, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import ccp_origin as O
-import ccp_core as C
+import cpg_origin as O
+import cpg_core as C
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -95,7 +95,7 @@ def test_op_send_applies_bracket_before_anything(monkeypatch):
 
 
 def test_cli_origin_preview_no_app():
-    r = subprocess.run([sys.executable, str(REPO / 'ccp_core.py'), '--json', 'origin', '--message', 'hello', '--bot-name', 'Scout'],
+    r = subprocess.run([sys.executable, str(REPO / 'cpg_core.py'), '--json', 'origin', '--message', 'hello', '--bot-name', 'Scout'],
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     d = json.loads(r.stdout)
@@ -109,4 +109,4 @@ def test_single_constant_in_code():
     for f in REPO.glob('*.py'):
         for n, line in enumerate(f.read_text().splitlines(), 1):
             if "'[sent by Grok Bot'" in line or '"[sent by Grok Bot"' in line: hits.append((f.name, n))
-    assert hits == [('ccp_origin.py', hits[0][1])], hits
+    assert hits == [('cpg_origin.py', hits[0][1])], hits

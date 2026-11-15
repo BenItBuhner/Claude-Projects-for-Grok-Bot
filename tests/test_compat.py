@@ -4,8 +4,8 @@ import pathlib, sys
 import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import ccp_core as C
-import ccp_origin as O
+import cpg_core as C
+import cpg_origin as O
 
 
 # ---------------------------------------------------------------- origin bracket in summaries

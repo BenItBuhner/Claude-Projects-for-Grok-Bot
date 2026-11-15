@@ -1,4 +1,4 @@
-# Python deps for ccp + the MCP server. System packages (python3-gi, gir1.2-atspi-2.0) come from apt; the venv
+# Python deps for claude-projects + the MCP server. System packages (python3-gi, gir1.2-atspi-2.0) come from apt; the venv
 # is created with --system-site-packages so `gi` is importable.
 mcp==1.30.0
 uvicorn==0.54.0

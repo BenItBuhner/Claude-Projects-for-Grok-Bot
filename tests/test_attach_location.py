@@ -3,7 +3,7 @@ import sys, pathlib, pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401  (isolated config)
-import ccp_core as c
+import cpg_core as c
 
 @pytest.fixture(autouse=True)
 def quiet(monkeypatch):
@@ -76,8 +76,8 @@ def test_ocr_fuzzy():
     assert not c._ocr_contains('Recent Home Desktop Other Locations', 'rec4-feedback-sheet-morph.mp4')
 
 def test_base64_staged_to_outgoing_and_uses_same_path(monkeypatch, tmp_path):
-    import base64, ccp_staging
-    monkeypatch.setattr(c, 'STAGE', ccp_staging.Staging(tmp_path/'stage'))
+    import base64, cpg_staging
+    monkeypatch.setattr(c, 'STAGE', cpg_staging.Staging(tmp_path/'stage'))
     fs = c.prepare_attachment_files([{'base64': base64.b64encode(b'abc').decode(), 'filename': 'clip.mp4'}])
     p = pathlib.Path(fs[0]['path'])
     assert p.parent.parent == (tmp_path/'stage'/'outgoing').resolve() and p.name == 'clip.mp4' and fs[0]['name'] == 'clip.mp4'
@@ -86,5 +86,5 @@ def test_base64_staged_to_outgoing_and_uses_same_path(monkeypatch, tmp_path):
     assert ui.typed == [str(p.resolve())]
 
 def test_cli_has_attach_test_flag():
-    src = (pathlib.Path(__file__).resolve().parent.parent/"ccp_core.py").read_text()
+    src = (pathlib.Path(__file__).resolve().parent.parent/"cpg_core.py").read_text()
     assert "'--attach-test'" in src and 'attach_test=getattr(a' in src

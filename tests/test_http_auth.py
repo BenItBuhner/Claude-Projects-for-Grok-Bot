@@ -22,8 +22,8 @@ def _server(tmp_path, mode=0o600):
     tok = tmp_path / 'tok'; tok.write_text(secrets.token_urlsafe(32)); tok.chmod(mode)
     port = _port(); cfg = tmp_path / 'c.json'
     cfg.write_text(json.dumps({'token_file': str(tok), 'mcp_port': port, 'state_dir': str(tmp_path / 'st')}))
-    env = dict(os.environ, CCP_CONFIG=str(cfg))
-    p = subprocess.Popen([sys.executable, str(REPO / 'ccp_mcp.py')], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    env = dict(os.environ, CPG_CONFIG=str(cfg))
+    p = subprocess.Popen([sys.executable, str(REPO / 'cpg_mcp.py')], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return p, port, tok.read_text()
 
 

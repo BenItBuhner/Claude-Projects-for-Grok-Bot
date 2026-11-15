@@ -1,0 +1,16 @@
+[Unit]
+Description=claude-projects-mcp: MCP server (Streamable HTTP on @MCP_HOST@:@MCP_PORT@/mcp, bearer auth)
+After=cpg-claude-desktop.service
+[Service]
+Environment=DISPLAY=@DISPLAY@
+Environment=CPG_CONFIG=@CONFIG_FILE@
+# /snap/bin: a user manager often lacks it, and the sign-in browser can be the chromium snap
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+Environment=PYTHONWARNINGS=ignore
+ExecStart=@REPO@/.venv/bin/python @REPO@/cpg_mcp.py
+Restart=on-failure
+RestartSec=5
+Nice=5
+MemoryMax=400M
+[Install]
+WantedBy=default.target

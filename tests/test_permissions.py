@@ -3,12 +3,12 @@ import pathlib, sys
 import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import ccp_permissions as P
-import ccp_core as C
+import cpg_permissions as P
+import cpg_core as C
 
 
 class Tree:
-    """Build {id, parent, role, name, text} snapshots the way ccp_core._snapshot_subtree does."""
+    """Build {id, parent, role, name, text} snapshots the way cpg_core._snapshot_subtree does."""
     def __init__(self): self.nodes = []
     def add(self, role, name='', text='', parent=None):
         nid = len(self.nodes); self.nodes.append({'id': nid, 'parent': parent, 'role': role, 'name': name, 'text': text}); return nid
@@ -132,8 +132,8 @@ def test_op_permission_dry_run_and_apply(monkeypatch):
     monkeypatch.setattr(C, 'act', fake_act)
     r = C.op_permission('Demo', 'add folder')
     assert r['dry_run'] and r['would_press'] == 'Add folder' and pressed == [] and r['address'] == 'chan_TEST/cse_TEST'
-    with pytest.raises(C.CCPError): C.op_permission('Demo', 'Allow')
-    with pytest.raises(C.CCPError): C.op_permission('Demo', '')
+    with pytest.raises(C.CPGError): C.op_permission('Demo', 'Allow')
+    with pytest.raises(C.CPGError): C.op_permission('Demo', '')
     r = C.op_permission('Demo', 'Not now', dry_run=False)
     assert pressed == ['Not now'] and r['card_gone'] and r['pressed'] == 'Not now'
     with pytest.raises(C.NotFound): C.op_permission('Demo', 'Add folder')

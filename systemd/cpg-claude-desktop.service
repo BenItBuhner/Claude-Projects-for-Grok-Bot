@@ -1,0 +1,17 @@
+[Unit]
+Description=claude-projects-mcp: Claude desktop app on @DISPLAY@
+After=cpg-xvfb.service cpg-wm.service cpg-keyring.service dbus.socket
+Wants=cpg-wm.service cpg-keyring.service
+Requires=cpg-xvfb.service
+[Service]
+Environment=DISPLAY=@DISPLAY@
+Environment=BROWSER=@REPO@/bin/claude-signin-browser
+Environment=CPG_CONFIG=@CONFIG_FILE@
+# /snap/bin: a user manager often lacks it, and the sign-in browser can be the chromium snap
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+ExecStartPre=/bin/sleep 2
+ExecStart=@REPO@/bin/claude-desktop-launch
+Restart=on-failure
+RestartSec=10
+[Install]
+WantedBy=default.target
