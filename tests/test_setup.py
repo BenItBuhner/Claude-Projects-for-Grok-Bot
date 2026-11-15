@@ -294,7 +294,7 @@ def test_claude_setup_tool(monkeypatch):
     monkeypatch.setattr(M, 'run', fake_run)
     asyncio.run(M.claude_setup('verify', live=True)); asyncio.run(M.claude_setup('tidy'))
     assert seen == [['setup', '--via-mcp', 'verify', '--live'], ['setup', '--via-mcp', 'tidy']]
-    assert asyncio.run(M.claude_setup('uninstall'))['error'] == 'CPGError'
+    assert asyncio.run(M.claude_setup('uninstall'))['error'] == 'ClaudeProjectsError'
 
 
 def test_readme_has_one_prompt_with_public_url():

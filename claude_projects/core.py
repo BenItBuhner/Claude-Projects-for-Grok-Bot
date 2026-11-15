@@ -38,13 +38,12 @@ def _tool_env():
     if EXTRA_LIB: env['LD_LIBRARY_PATH'] = EXTRA_LIB + ((':' + env['LD_LIBRARY_PATH']) if env.get('LD_LIBRARY_PATH') else '')
     return env
 
-class CPGError(Exception):
+class ClaudeProjectsError(Exception):
     code = 2
-class Refused(CPGError): code = 5
-class Busy(CPGError): code = 3
-class NotFound(CPGError): code = 2
-class AppError(CPGError): code = 6
-CCPError = CPGError   # the old name, for code that imports it
+class Refused(ClaudeProjectsError): code = 5
+class Busy(ClaudeProjectsError): code = 3
+class NotFound(ClaudeProjectsError): code = 2
+class AppError(ClaudeProjectsError): code = 6
 
 def now(): return datetime.datetime.now(datetime.timezone.utc)
 def log(msg):
@@ -1759,9 +1758,9 @@ ATT_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_BUDGET', '40'))   # se
 def _att_parse(attachment_id, message_index, n):
     if attachment_id:
         mm = re.match(r'^(\d+)[.:/a-z]+(\d+)$', str(attachment_id).strip())
-        if not mm: raise CPGError('attachment_id looks like "<message_index>.<n>" (from the attachments list of claude_thread_read)')
+        if not mm: raise ClaudeProjectsError('attachment_id looks like "<message_index>.<n>" (from the attachments list of claude_thread_read)')
         message_index, n = int(mm.group(1)), int(mm.group(2))
-    if message_index is None: raise CPGError('pass attachment_id or message_index (+ n)')
+    if message_index is None: raise ClaudeProjectsError('pass attachment_id or message_index (+ n)')
     return int(message_index), int(n)
 def att_job_key(chan, thread, message_index, n):
     """One fetch per project / thread / message / attachment: retries and concurrent calls share it."""
@@ -1802,7 +1801,7 @@ def _att_run_job(key, job):
         if r: return r                                 # finished while this one waited for the lock
         t0 = time.time()
         try: r = {'status': 'done', 'meta': _attachment_fetch(**{k: job[k] for k in ('project', 'thread', 'message_index', 'n', 'force', 'stay', 'shot')})}
-        except CPGError as ex: r = {'status': 'failed', 'error': str(ex), 'error_type': type(ex).__name__, 'code': getattr(ex, 'code', 1)}
+        except ClaudeProjectsError as ex: r = {'status': 'failed', 'error': str(ex), 'error_type': type(ex).__name__, 'code': getattr(ex, 'code', 1)}
         except Exception as ex: r = {'status': 'failed', 'error': repr(ex), 'error_type': 'AppError', 'code': 6}
         except Interrupted as ex: r = {'status': 'failed', 'error': f'interrupted ({ex})', 'error_type': 'AppError', 'code': 6}
         r.update(job_id=key, finished_ts=time.time(), seconds=round(time.time() - t0, 1))
@@ -1818,7 +1817,7 @@ def _att_spawn_worker(key, job):
     log(f'attachment job {key} started in the background ({job["message_index"]}.{job["n"]}, {how})')
 def _att_answer(r, as_, full, cached=False):
     if r.get('status') == 'failed':
-        cls = {c.__name__: c for c in (NotFound, AppError, CPGError)}.get(r.get('error_type'), AppError)
+        cls = {c.__name__: c for c in (NotFound, AppError, ClaudeProjectsError)}.get(r.get('error_type'), AppError)
         raise cls(r.get('error') or 'attachment fetch failed')
     out = present_attachment(r['meta'], as_, full); out['job_id'] = r.get('job_id')
     if cached: out['cached'] = True
@@ -1830,7 +1829,7 @@ def op_attachment_get(project, thread=None, attachment_id=None, message_index=No
     finished file is answered from the cache, and a fetch already running for the same attachment is joined, never repeated."""
     message_index, n = _att_parse(attachment_id, message_index, n)
     as_ = (as_ or 'auto').lower()
-    if as_ not in ('auto', 'image', 'text', 'base64', 'path'): raise CPGError('as must be auto | image | text | base64 | path')
+    if as_ not in ('auto', 'image', 'text', 'base64', 'path'): raise ClaudeProjectsError('as must be auto | image | text | base64 | path')
     p = resolve_project(project); chan = p['id']; key = att_job_key(chan, thread, message_index, n); t_start = time.time()
     if not refresh:
         r = _att_cached(key)
@@ -1961,12 +1960,12 @@ def prepare_attachment_files(attachments):
         if isinstance(a, str): a = {'path': a}
         if a.get('path'):
             pth = pathlib.Path(a['path']).expanduser()
-            if not pth.is_file(): raise CPGError(f'attachment {i + 1}: {a["path"]} is not a file on the Claude Code host (pass base64 + filename for files that live elsewhere)')
+            if not pth.is_file(): raise ClaudeProjectsError(f'attachment {i + 1}: {a["path"]} is not a file on the Claude Code host (pass base64 + filename for files that live elsewhere)')
         elif a.get('base64'):
             fn = STAGE.safe_name(a.get('filename'), f'attachment-{i + 1}.bin')
             pth = STAGE.write_bytes('outgoing', fn, base64.b64decode(a['base64']))   # unique slot per call, original name kept
-        else: raise CPGError(f'attachment {i + 1}: needs path or base64 + filename')
-        if pth.stat().st_size > 30 * 2**20: raise CPGError(f'attachment {i + 1}: larger than 30 MB')
+        else: raise ClaudeProjectsError(f'attachment {i + 1}: needs path or base64 + filename')
+        if pth.stat().st_size > 30 * 2**20: raise ClaudeProjectsError(f'attachment {i + 1}: larger than 30 MB')
         out.append({'path': str(pth.resolve()), 'name': pth.name, 'size': pth.stat().st_size, 'mime': guess_mime(pth.name), 'staged': STAGE.contains(pth)})
     return out
 def _screen_wh():
@@ -2568,7 +2567,7 @@ def thread_address(chan, tid, primary=None):
     return f'{chan}/{t}'
 def op_permission(project, option, thread=None, card_id=None, dry_run=True, force=False, stay=False, shot=None):
     """Approve / deny a permission card by option label. dry_run=True (default) only reads the card and the button it would press."""
-    if not option or not str(option).strip(): raise CPGError('option is required (the exact button label, e.g. "Add folder" or "Not now")')
+    if not option or not str(option).strip(): raise ClaudeProjectsError('option is required (the exact button label, e.g. "Add folder" or "Not now")')
     p = resolve_project(project); chan = p['id']
     with ui_lock(f'permission {p["name"]} {thread or "primary"}', force):
         try:
@@ -2580,9 +2579,9 @@ def op_permission(project, option, thread=None, card_id=None, dry_run=True, forc
                 card = next((c for c in cards if c['card_id'] == card_id), None)
                 if not card: raise NotFound(f'card {card_id!r} is not showing (cards now: {[c["card_id"] for c in cards]}); re-read and retry')
             elif len(cards) == 1: card = cards[0]
-            else: raise CPGError(f'{len(cards)} cards are showing; pass card_id. Cards: ' + json.dumps(PERM.public(cards), ensure_ascii=False)[:1500])
+            else: raise ClaudeProjectsError(f'{len(cards)} cards are showing; pass card_id. Cards: ' + json.dumps(PERM.public(cards), ensure_ascii=False)[:1500])
             try: label, idx = PERM.match_option(card, option)
-            except ValueError as ex: raise CPGError(str(ex))
+            except ValueError as ex: raise ClaudeProjectsError(str(ex))
             base = {'project': p['name'], 'project_id': chan, 'thread_id': tid or 'primary', 'address': thread_address(chan, tid, p.get('primary_thread_id')),
                     'card': PERM.public([card])[0], 'option': label}
             if dry_run:
@@ -2685,7 +2684,7 @@ def op_forward(source_project, target_project, source_thread=None, target_thread
 def op_staging(action='info', dry_run=True, older_than_hours=None, kinds=None):
     if action == 'info': return dict(STAGE.info(), attachments_dir=str(ATT_DIR))
     if action in ('sweep', 'cleanup'): return STAGE.sweep(dry_run=dry_run, older_than_hours=older_than_hours, kinds=kinds)
-    raise CPGError("action is 'info' or 'sweep'")
+    raise ClaudeProjectsError("action is 'info' or 'sweep'")
 def op_projects(refresh=False, include_archived=False, force=False, stay=False):
     before = None
     if refresh:
@@ -3161,10 +3160,10 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
     attach_mode = 'open' if attach_test == 'open' else ('cancel' if attach_test else None)
     files = prepared_files if prepared_files is not None else (prepare_attachment_files(attachments) if attachments else [])
     dl = Deadline(deadline_s)
-    if (not message or not message.strip()) and not files: raise CPGError('message is empty')
+    if (not message or not message.strip()) and not files: raise ClaudeProjectsError('message is empty')
     # Origin bracket: every message this plugin types starts with "[sent by Grok Bot]" (never doubled).
     message = add_origin(message or '', bot_name if bot_name is not None else CFG.get('bot_name'))
-    if len(message) > 20000: raise CPGError('message longer than 20000 characters')
+    if len(message) > 20000: raise ClaudeProjectsError('message longer than 20000 characters')
     p = resolve_project(project); chan = p['id']; tid = resolve_thread(chan, thread)
     with step_timer(f'send {p["name"]} {thread or "primary"}') as tmr, ui_lock(f'send {p["name"]} {thread or "primary"}', force, timeout=max(UI_LOCK_DEFAULT_TIMEOUT, int(timeout or 0))):
         try:
@@ -3191,10 +3190,10 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
             sb = [b for b in find_all(d, 'push button', lambda b: nm(b) in ('Send', 'Send message', 'Submit'))]
             att_info = locate_attach_control() if (files and dry_run) else None
             if dry_run and attach_mode == 'open':
-                if not files: raise CPGError('--attach-test=open needs --attach files')
+                if not files: raise ClaudeProjectsError('--attach-test=open needs --attach files')
                 return _attach_test_open(p, tid, files, chips0, e, dl, tmr)
             if dry_run and attach_mode:
-                if not files: raise CPGError('--attach-test needs --attach files')
+                if not files: raise ClaudeProjectsError('--attach-test needs --attach files')
                 sd = STAGE.new_slot('attach-test')
                 res = attach_files(files, test_only=True, shot_dir=str(sd))
                 leftover = [f['name'] for f in files if _composer_has_chip(f['name'])]
@@ -3214,7 +3213,7 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                                                  'which removes them first (they are never sent)')
                 r['timing'] = tmr.as_dict()
                 return r
-            if dry_run and files: raise CPGError('type_test with attachments is not supported (attaching uploads the file); use plain --dry-run')
+            if dry_run and files: raise ClaudeProjectsError('type_test with attachments is not supported (attaching uploads the file); use plain --dry-run')
             cleared = None
             if chips0 and not dry_run:
                 if not clear_leftovers:
@@ -3316,9 +3315,9 @@ def op_send_job(project, message, thread=None, force=False, attachments=None, bo
         return _send_answer(st)
     STAGE.maybe_sweep()
     files = prepare_attachment_files(attachments) if attachments else []
-    if (not message or not message.strip()) and not files: raise CPGError('message is empty')
+    if (not message or not message.strip()) and not files: raise ClaudeProjectsError('message is empty')
     full = add_origin(message or '', bot_name if bot_name is not None else CFG.get('bot_name'))
-    if len(full) > 20000: raise CPGError('message longer than 20000 characters')
+    if len(full) > 20000: raise ClaudeProjectsError('message longer than 20000 characters')
     p = resolve_project(project); chan = p['id']; key = send_job_key(chan, thread, full, files, idempotency_key)
     st = job_read(SEND_JOBS, key); t_start = time.time()
     if st and job_running(SEND_JOBS, key): joined = True                     # a retry while the send runs: join it
@@ -3362,7 +3361,7 @@ def run_send_job(key):
                 return _send_answer(st)
             st.update(state='failed', error=str(ex) or type(ex).__name__, error_type=type(ex).__name__, cleanup=rep,
                       cleanup_note=(None if not rep else ('chips still in the composer: ' + ', '.join(rep['chips_left']) if rep.get('chips_left') else 'the composer was left clean')))
-            if isinstance(ex, (CPGError, Interrupted)): pass
+            if isinstance(ex, (ClaudeProjectsError, Interrupted)): pass
             else: log(f'send job {key} crashed: {ex!r}')
         st['finished_ts'] = time.time(); st.pop('spec', None) if st.get('state') == 'sent' else None
         job_write(SEND_JOBS, key, st); log(f"send job {key}: {st['state']} ({st.get('error') or ''})")
@@ -3420,7 +3419,7 @@ def _norm_repo(repo):
     r = re.sub(r'^(https?://)?(www\.)?github\.com/', '', r, flags=re.I)
     r = re.sub(r'\.git$', '', r.split('?')[0].split('#')[0]).strip('/')
     parts = r.split('/')
-    if len(parts) < 2 or not parts[0] or not parts[1]: raise CPGError(f'repo {repo!r} is not owner/name or a github.com URL')
+    if len(parts) < 2 or not parts[0] or not parts[1]: raise ClaudeProjectsError(f'repo {repo!r} is not owner/name or a github.com URL')
     return f'{parts[0]}/{parts[1]}'
 def _dialog_open(title='New project'):
     d, _ = main_doc()
@@ -3514,7 +3513,7 @@ def op_create_project(name, description=None, repo=None, pin=True, force=False, 
     (Context -> Add repository) and pinning it on the Projects page. If a project with that name already exists it is
     not duplicated: its ids are returned and pin is ensured (repo cannot be added after create from here; reported)."""
     name = (name or '').strip()
-    if not name: raise CPGError('name is empty')
+    if not name: raise ClaudeProjectsError('name is empty')
     repo_n = _norm_repo(repo) if repo else None
     snap = idb_snapshot()
     existing = next((r for r in project_rows(snap, True) if norm(r['name']).casefold() == norm(name).casefold()), None)
@@ -3586,7 +3585,7 @@ def op_create_project(name, description=None, repo=None, pin=True, force=False, 
             if pin is not None:
                 try:
                     pinned, changed = _set_pin(name, bool(pin)); res['pinned'] = pinned; res['pin_changed'] = changed
-                except CPGError as ex:
+                except ClaudeProjectsError as ex:
                     res['pinned'] = None; notes.append(f'pin failed: {ex}')
             row = _wait_primary(chan, 75 if not res.get('primary_thread_id') else 1)
             if row:
@@ -3912,7 +3911,7 @@ def _read_secret_file(path):
     st = p.stat()
     if st.st_mode & 0o077: raise Refused(f'secret file {p} must be chmod 600 (owner only)')
     v = p.read_text(encoding='utf-8').strip()
-    if not v or '\n' in v: raise CPGError(f'secret file {p} must hold one non-empty line')
+    if not v or '\n' in v: raise ClaudeProjectsError(f'secret file {p} must hold one non-empty line')
     return v
 def op_project_set_env(project, values=None, secret_files=None, env_name=None, copy_from_current=True, allow_shared=False,
                        dry_run=False, force=False, stay=False):
@@ -3925,8 +3924,8 @@ def op_project_set_env(project, values=None, secret_files=None, env_name=None, c
     new = dict(values or {})
     for k, path in (secret_files or {}).items(): new[k] = _read_secret_file(path)
     bad = [k for k in new if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', k)]
-    if bad: raise CPGError(f'bad variable names: {bad}')
-    if not new: raise CPGError('nothing to set')
+    if bad: raise ClaudeProjectsError(f'bad variable names: {bad}')
+    if not new: raise ClaudeProjectsError('nothing to set')
     out = {'project': p['name'], 'project_id': p['id'], 'names_requested': list(new), 'lengths': {k: len(v) for k, v in new.items()}, 'dry_run': dry_run}
     with ui_lock(f'set-env {p["name"]} {list(new)}', force):
         try:
@@ -4218,7 +4217,7 @@ def op_probe_projects(force=False):
         snap = idb_snapshot()
         out['project_list_cached'] = bool(snap.get('channels_updated')); out['project_list_query_status'] = snap.get('channels_query_status')
         out['project_count'] = len(project_rows(snap)) if out['project_list_cached'] else None
-    except CPGError as ex: out['cache_error'] = str(ex)[:200]
+    except ClaudeProjectsError as ex: out['cache_error'] = str(ex)[:200]
     return out
 def op_status():
     holder = ui_lock_holder()
@@ -4428,7 +4427,7 @@ def main(argv=None):
         out = {'error': 'Interrupted', 'message': str(ex), 'code': 6}
         if getattr(ex, 'cleanup', None): out['cleanup'] = ex.cleanup
         print(json.dumps(out, ensure_ascii=False) if a.json else f'claude-projects: {ex}', file=sys.stdout if a.json else sys.stderr); log(f'{a.cmd} interrupted: {ex}'); return 6
-    except CPGError as ex:
+    except ClaudeProjectsError as ex:
         out = {'error': type(ex).__name__, 'message': str(ex), 'code': ex.code}
         if getattr(ex, 'cleanup', None): out['cleanup'] = ex.cleanup
         if isinstance(ex, Busy):

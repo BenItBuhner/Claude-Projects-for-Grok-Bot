@@ -421,7 +421,7 @@ async def claude_setup(action: str = 'status', live: bool = False, apply: bool =
     app. 'connect': connector options. 'viewport_on' / 'viewport_off': the noVNC viewport (off refuses while someone watches).
     Install, sign-in, reconfigure and uninstall need a shell on the host: run `claude-projects setup ...` there."""
     if action not in SETUP_ACTIONS:
-        return {'error': 'CPGError', 'message': f'action must be one of {", ".join(SETUP_ACTIONS)}', 'code': 2}
+        return {'error': 'ClaudeProjectsError', 'message': f'action must be one of {", ".join(SETUP_ACTIONS)}', 'code': 2}
     a = {'status': ['status'], 'verify': ['verify'] + (['--live'] if live else []), 'check_beta': ['check-beta'],
          'tidy': ['tidy'] + (['--apply'] if apply else []), 'connect': ['connect'], 'viewport_on': ['viewport', 'on'],
          'viewport_off': ['viewport', 'off']}[action]
@@ -448,7 +448,7 @@ async def claude_policy_propose(change: str, rationale: str = '', proposed_by: s
     user-owned policy-proposals.md next to the policy file; it never takes effect until the user copies it into policy.md.
     Tell the user you proposed it. Returns proposal_id and the file path."""
     try: return POLICY.propose(change, rationale, proposed_by)
-    except ValueError as ex: return {'error': 'CPGError', 'message': str(ex), 'code': 2}
+    except ValueError as ex: return {'error': 'ClaudeProjectsError', 'message': str(ex), 'code': 2}
 
 @mcp.tool()
 async def claude_app_status() -> dict:
