@@ -10,6 +10,9 @@
 you, pick up results, and unblock threads stuck on a permission card. It runs on your own Claude subscription, through
 the real Claude app on an always-on computer of yours.
 
+An MCP server with 24 tools. Works with Grok Bot or any agent that speaks MCP and can run shell commands.
+Latest release: [v1.0.2](https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot/releases/latest).
+
 ## Set it up
 
 Paste this to your Grok Bot (or any agent that can run commands):
@@ -32,7 +35,9 @@ Never send test messages into my Projects, and never show me tokens or passwords
 You'll be asked at most three things:
 
 1. **Which computer runs it.** Best is an always-on Linux machine (Ubuntu 22.04+ or Debian 12+). An always-on Mac or
-   Windows PC works too: the agent sets up a small Linux runtime on it. Your agent's own box is the fallback.
+   Windows PC works too: the agent sets up a small Linux runtime on it (a Lima VM or a WSL2 distro). Your agent's own
+   box is the fallback. The Windows script is tested on GitHub's Windows runners; the Mac script hasn't been run on a
+   real Mac yet, so expect rough edges there.
 2. **One sudo command**, only if installing packages needs your password.
 3. **Signing in to Claude once**, in a browser tab the agent gives you (a noVNC viewport of the app).
 

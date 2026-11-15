@@ -1,6 +1,6 @@
 # Limits and known friction
 
-- **Platform.** The app it drives runs on Ubuntu 22.04+ / Debian 12+, where the Claude desktop app for Linux ships. Macs and Windows PCs host that Linux in a small VM or WSL2 ([Hosts](hosts.md)). One Claude account per install.
+- **Platform.** The app it drives runs on Ubuntu 22.04+ / Debian 12+, where the Claude desktop app for Linux ships. Macs and Windows PCs host that Linux in a small VM or WSL2 ([Hosts](hosts.md)). The Windows script is tested on GitHub's Windows runners; the Mac script hasn't been run on a real Mac yet. One Claude account per install.
 - **Projects beta.** The account needs Claude Code Projects. `claude-projects setup check-beta` tells you; without it the plugin stays idle.
 - **Fragile by nature.** It depends on the app's accessibility names and local cache layout. Any app update can change them.
 - **Speed.** Calls take 5–30 s, and one UI action runs at a time.

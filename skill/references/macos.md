@@ -2,8 +2,12 @@
 
 Use this when the plugin should run on an always-on Mac and `hosts/macos/setup.sh` isn't used (you only have a shell
 on the Mac, the script failed halfway, or the user wants to see each step). The script does exactly these steps; if
-it's there, prefer `bash hosts/macos/setup.sh [--bot-name NAME] [--ref REF] [--no-sleep] [--dry-run]`. For a pre-release, add
-`--ref release-1.0.2` (a branch, a tag or a full commit sha; `CPG_REPO_REF=release-1.0.2` works too, and the flag wins).
+it's there, prefer `bash hosts/macos/setup.sh [--bot-name NAME] [--ref REF] [--no-sleep] [--dry-run]`. To pin a release or try
+a branch, add `--ref v1.0.2` or `--ref release-1.0.2` (a tag, a branch or a full commit sha; `CPG_REPO_REF` works too,
+and the flag wins).
+
+Status: this script and these steps haven't been run on a real Mac yet (only checked with ShellCheck and tests on
+Linux). Tell the user, check each step's output, and report anything that differs.
 
 ## Why a VM
 
@@ -61,7 +65,7 @@ cpvm setup status
 
 The single quotes matter: `$@` must expand inside the VM's bash, not on the Mac.
 
-**A pre-release branch, tag or commit** (what `--ref` / `CPG_REPO_REF` do). Only use a ref made of letters, digits and
+**A release, branch or commit** (what `--ref` / `CPG_REPO_REF` do). Only use a ref made of letters, digits and
 `. _ / -` (no leading `-`, no `..`), so it can sit inside the single quotes safely. Check the clone is clean first; if
 `git status --porcelain --untracked-files=no` prints anything, stop and ask the user instead of overwriting their changes:
 
@@ -70,7 +74,7 @@ limactl shell claude-projects -- bash -lc 'cd ~/claude-projects-mcp && git statu
 # a branch:
 limactl shell claude-projects -- bash -lc 'cd ~/claude-projects-mcp && git fetch origin +refs/heads/release-1.0.2:refs/remotes/origin/release-1.0.2 && git checkout -B release-1.0.2 origin/release-1.0.2'
 # or a tag:
-limactl shell claude-projects -- bash -lc 'cd ~/claude-projects-mcp && git fetch --force origin refs/tags/v1.0.1:refs/tags/v1.0.1 && git checkout --detach v1.0.1'
+limactl shell claude-projects -- bash -lc 'cd ~/claude-projects-mcp && git fetch --force origin refs/tags/v1.0.2:refs/tags/v1.0.2 && git checkout --detach v1.0.2'
 ```
 
 Then run `cpvm setup install ...` again (re-running `bash hosts/macos/setup.sh --ref release-1.0.2` does all of this).

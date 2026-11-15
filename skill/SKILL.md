@@ -41,7 +41,7 @@ Ask, and recommend:
 | choice | how it runs | notes |
 |---|---|---|
 | Always-on Linux (Ubuntu 22.04+ / Debian 12+) | natively, headless display | **recommended** |
-| Always-on Mac (macOS 13+) | a small Ubuntu VM (Lima) that starts at login: `bash hosts/macos/setup.sh` | the Mac's own Claude app is not touched |
+| Always-on Mac (macOS 13+) | a small Ubuntu VM (Lima) that starts at login: `bash hosts/macos/setup.sh` | the Mac's own Claude app is not touched; the script hasn't been run on a real Mac yet, so tell the user and check each step |
 | Always-on Windows PC | a dedicated WSL2 distro kept running from login: `hosts\windows\setup.ps1` | first run may need an admin PowerShell and a reboot |
 | A laptop (any of the above) | same as its OS | warn: works only while it's awake and plugged in |
 | Your own (Grok Bot) box | natively, stdio on the same machine, the plugin's own process supervisor (no systemd there) | **fallback**: say clearly that it only works while the box is up |
@@ -112,8 +112,8 @@ the box, pass the warning on to the user before you install.
   8791; `--mcp-port N` moves it and `--no-http` turns it off.
 - Without systemd, nothing restarts the services after the box restarts until the MCP server starts (it brings the
   supervisor up) or you run `./claude-projects setup start`. `status` does it too.
-- Old names (before 1.0.2) still work: `ccp` is `claude-projects`, `ccp-*` services are `cpg-*`, `CCP_*` variables
-  are `CPG_*`. An install with `ccp-*` services is a normal install; the next `install.sh` renames them.
+- Installs from before 1.0.2 use older names for the CLI, services and variables. They still work and count as a normal
+  install; the next `install.sh` renames them (table: "Names before 1.0.2" in `docs/how-it-works.md`).
 - An older hand-built install (`claude-projects-mcp.service` with `venv/`) is recognized as installed. `install` leaves
   it alone (`legacy_layout`); migrating needs `--migrate` and the user's OK.
 
@@ -266,10 +266,10 @@ error; the tools never fall back to the primary silently.
 **Stale tool list.** Some MCP clients keep the tool list they saw when the connector was first added; Grok Bot's tool
 discovery (`GetDynamicTools`) can still show an older, shorter tool list with old descriptions even after the server
 was updated and the connector re-added. The server serves all 24 tools regardless: call any of them by name (in Grok Bot,
-`CallDynamicTool` on the connector's namespace) with the arguments in the table above. The tools added in this release are
+`CallDynamicTool` on the connector's namespace) with the arguments in the table above. Tools that older connector lists often miss:
 `claude_thread_permissions`, `claude_thread_permission`, `claude_thread_forward`, `claude_staging`, `claude_skill_get`,
-`claude_policy_get`, `claude_policy_propose`, `claude_project_add_repo` and `claude_project_remove_repo`, plus
-`claude_setup` in 1.1. A missing tool in
+`claude_policy_get`, `claude_policy_propose`, `claude_project_add_repo` and `claude_project_remove_repo` (1.0.0), and
+`claude_setup` (1.0.2). A missing tool in
 discovery is not a missing tool on the server; `claude_skill_get` returning this file proves the connection is current.
 
 ## Reading and reporting
@@ -317,7 +317,8 @@ You are the overseer. Unblock what is clearly inside the task the user gave; sur
 - Every typed message starts with the origin bracket `[sent by Grok Bot]` (or `[sent by Grok Bot · <bot name>]`), added
   by the tool. Never type it yourself, never strip it.
 - `dry_run=true` first when you are unsure about the target; `dry_run=true, attach_test=true` checks attachments by
-  opening the picker, typing each path, and cancelling (nothing uploaded, nothing sent).
+  opening the picker, typing each path, and cancelling (nothing uploaded, nothing sent). `attach_test="open"` goes one
+  step further: it attaches each file and removes it again, and still never types or sends.
 - Prefer full Unicode; spell names as they are written.
 - **Forward** (`claude_thread_forward`): relays one message verbatim. The target sees the bracket, then
   `Forwarded from Project "<name>" > thread "<title>" (<chan_>/<cse_|cmsg_>), message #N by Claude, <time>:`, a rule,

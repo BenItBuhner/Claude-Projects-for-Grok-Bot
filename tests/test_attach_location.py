@@ -12,7 +12,7 @@ def quiet(monkeypatch):
 @pytest.fixture
 def files(tmp_path):
     out = []
-    for n in ['rec4-feedback-sheet-morph.mp4', 'rec-0531-notes-menus-sharesheet.mp4', 'rec-0533-weather-units-menus.mp4', 'rec-0538-photos-expand-zoom-menu.mp4']:
+    for n in ['rec-0001-sample-sheet.mp4', 'rec-0002-sample-share.mp4', 'rec-0003-sample-units.mp4', 'rec-0004-sample-zoom-menu.mp4']:
         p = tmp_path/n; p.write_bytes(b'x' * 10); out.append({'path': str(p), 'name': n})
     return out
 
@@ -73,8 +73,8 @@ def test_unreadable_file_rejected(monkeypatch, files):
         c._attach_one_via_location({'path': '/nonexistent/x.mp4', 'name': 'x.mp4'}, test_only=True)
 
 def test_ocr_fuzzy():
-    assert c._ocr_contains('Location: /home/user/clips/rec-0538-photos-expand-zoorn-menu.mp4', 'rec-0538-photos-expand-zoom-menu.mp4')
-    assert not c._ocr_contains('Recent Home Desktop Other Locations', 'rec4-feedback-sheet-morph.mp4')
+    assert c._ocr_contains('Location: /home/user/clips/rec-0004-sample-zoorn-menu.mp4', 'rec-0004-sample-zoom-menu.mp4')
+    assert not c._ocr_contains('Recent Home Desktop Other Locations', 'rec-0001-sample-sheet.mp4')
 
 def test_base64_staged_to_outgoing_and_uses_same_path(monkeypatch, tmp_path):
     import base64, cpg_staging

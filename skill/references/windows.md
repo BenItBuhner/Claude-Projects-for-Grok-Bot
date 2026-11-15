@@ -3,8 +3,8 @@
 Use this when the plugin should run on an always-on Windows PC and `hosts\windows\setup.ps1` isn't used (you only have
 a shell on the PC, the script failed halfway, or the user wants to see each step). The script does exactly these
 steps; if it's there, prefer `powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1 [-BotName NAME] [-Ref REF] [-AtStartup] [-WebDownload] [-NoSleep] [-DryRun]`.
-For a pre-release, add `-Ref release-1.0.2` (a branch, a tag or a full commit sha; `$env:CPG_REPO_REF = 'release-1.0.2'`
-works too, and the parameter wins).
+To pin a release or try a branch, add `-Ref v1.0.2` or `-Ref release-1.0.2` (a tag, a branch or a full commit sha;
+`$env:CPG_REPO_REF` works too, and the parameter wins).
 
 ## Why WSL
 
@@ -73,7 +73,7 @@ Invoke-Distro cpg 'cd ~/claude-projects-mcp && ./claude-projects setup install -
 Invoke-Distro cpg 'cd ~/claude-projects-mcp && ./claude-projects setup status'
 ```
 
-**A pre-release branch, tag or commit** (what `-Ref` / `CPG_REPO_REF` do). Only use a ref made of letters, digits and
+**A release, branch or commit** (what `-Ref` / `CPG_REPO_REF` do). Only use a ref made of letters, digits and
 `. _ / -` (no leading `-`, no `..`). `Invoke-Distro` carries the script as base64, so quoting is safe, but a strict ref
 keeps the git commands unambiguous. Check the clone is clean first; if the first line prints anything, stop and ask the
 user instead of overwriting their changes:
@@ -83,7 +83,7 @@ Invoke-Distro cpg 'cd ~/claude-projects-mcp && git status --porcelain --untracke
 # a branch:
 Invoke-Distro cpg 'cd ~/claude-projects-mcp && git fetch origin +refs/heads/release-1.0.2:refs/remotes/origin/release-1.0.2 && git checkout -B release-1.0.2 origin/release-1.0.2'
 # or a tag:
-Invoke-Distro cpg 'cd ~/claude-projects-mcp && git fetch --force origin refs/tags/v1.0.1:refs/tags/v1.0.1 && git checkout --detach v1.0.1'
+Invoke-Distro cpg 'cd ~/claude-projects-mcp && git fetch --force origin refs/tags/v1.0.2:refs/tags/v1.0.2 && git checkout --detach v1.0.2'
 ```
 
 Then run the `install.sh --apt-only` and `./claude-projects setup install --no-apt` lines again (re-running `setup.ps1 -Ref

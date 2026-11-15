@@ -7,7 +7,7 @@ on, because your agent reaches your Projects through it.
 | host | how | setup | always-on notes |
 |---|---|---|---|
 | **Always-on Linux** (recommended) | natively | `./claude-projects setup preflight`, then `./claude-projects setup install` | `preflight` warns if the machine can still suspend |
-| **Always-on Mac** (macOS 13+) | a small Ubuntu 24.04 VM (Lima, instance `claude-projects`, 2 CPUs, 4 GB, no access to your files) | `bash hosts/macos/setup.sh` | a LaunchAgent starts the VM at login; keep the user logged in (or turn on automatic login); `--no-sleep` sets `pmset -c sleep 0` |
+| **Always-on Mac** (macOS 13+, not yet tried on a real Mac) | a small Ubuntu 24.04 VM (Lima, instance `claude-projects`, 2 CPUs, 4 GB, no access to your files) | `bash hosts/macos/setup.sh` | a LaunchAgent starts the VM at login; keep the user logged in (or turn on automatic login); `--no-sleep` sets `pmset -c sleep 0` |
 | **Always-on Windows PC** | a dedicated WSL2 distro `ClaudeProjects` (Ubuntu 24.04, user `cpg` without sudo, systemd on); needs WSL 2.4.4+ (the script updates it) | `powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1` | a scheduled task keeps the distro running from sign-in, so turn on automatic sign-in, or add `-AtStartup` to also start it at boot; `-WebDownload` for PCs without the Microsoft Store; `-NoSleep` turns off sleep on AC |
 | Laptop (any OS) | as above | as above | works only while it's awake and plugged in |
 | Your agent's own box | natively, stdio on the same machine | as Linux | **fallback**: works only while the box is up |
@@ -24,21 +24,21 @@ Setting it up by hand instead of with the scripts (or finishing a run that stopp
 with verify commands and common failures, in [skill/references/macos.md](../skill/references/macos.md) and
 [skill/references/windows.md](../skill/references/windows.md).
 
-### Installing a branch, tag or commit (pre-releases)
+### Installing a release, branch or commit
 
-The scripts install the repository's default branch. To test a pre-release, give them a branch, a tag or a full
-40-character commit sha:
+The scripts install the repository's default branch. To pin a release or try a branch, give them a tag, a branch or
+a full 40-character commit sha:
 
 ```bash
-bash hosts/macos/setup.sh --ref release-1.0.2                                            # Mac
-powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1 -Ref release-1.0.2     # Windows
+bash hosts/macos/setup.sh --ref v1.0.2                                            # Mac
+powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1 -Ref v1.0.2     # Windows
 ```
 
 Both scripts also read `CPG_REPO_REF` (the flag wins). On a fresh install they clone and check out that ref; on a
 re-run, where `~/claude-projects-mcp` already exists in the VM or distro, they fetch the ref from origin and check it
 out, and they refuse (leaving the clone as it is) when it has uncommitted changes or local commits that origin doesn't
 have. Without a ref nothing changes: a missing clone gets the default branch and an existing one is left alone, so to go
-back from a pre-release run the script again with `--ref main` / `-Ref main`. The ref is checked before anything runs:
+back to the default branch run the script again with `--ref main` / `-Ref main`. The ref is checked before anything runs:
 letters, digits and `. _ / -` only, at most 200 characters, no leading `-`, no `..`, `//`, `@{`, trailing `/` or `.`,
 no part starting with `.` or ending in `.lock`, and `git check-ref-format` where git is installed.
 
