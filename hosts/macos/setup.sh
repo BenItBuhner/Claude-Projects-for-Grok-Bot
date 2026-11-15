@@ -2,23 +2,24 @@
 # claude-projects-mcp on an always-on Mac.
 #
 # The plugin drives the Claude desktop app through the Linux accessibility tree, so on a Mac it runs inside a small
-# Ubuntu VM (Lima, instance "ccp") with its own headless display. Your Mac's own Claude app is not touched. The VM starts
+# Ubuntu VM (Lima, instance "claude-projects") with its own headless display. Your Mac's own Claude app is not touched. The VM starts
 # at login (a LaunchAgent), Lima forwards the VM's localhost ports to the Mac, so the sign-in viewport opens in your
 # normal browser at http://127.0.0.1:6179/vnc.html.
 #
 #   bash hosts/macos/setup.sh [--bot-name NAME] [--operator-name NAME] [--timezone Area/City] [--ref REF] [--no-sleep] [--dry-run]
-#   --ref REF    install this branch, tag or full commit sha instead of the default branch (also: CCP_REPO_REF=REF;
+#   --ref REF    install this branch, tag or full commit sha instead of the default branch (also: CPG_REPO_REF=REF;
 #                the flag wins). On a re-run the existing clone fetches REF and checks it out, unless it has local
 #                changes. Example: bash hosts/macos/setup.sh --ref release-1.0.2
 #   --no-sleep   also stop the Mac sleeping while on power (sudo pmset -c sleep 0; asks for your password)
 #
-# Afterwards drive everything from the Mac with hosts/macos/ccp (it runs ccp inside the VM), e.g.
-#   hosts/macos/ccp setup status
+# Afterwards drive everything from the Mac with hosts/macos/claude-projects (it runs claude-projects inside the VM), e.g.
+#   hosts/macos/claude-projects setup status
 set -euo pipefail
-NAME="${CCP_LIMA_NAME:-ccp}"
-REPO_URL="${CCP_REPO_URL:-https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot}"
+# CCP_* are the old names of these variables (before 1.0.2) and still work; the CPG_* name wins
+NAME="${CPG_LIMA_NAME:-${CCP_LIMA_NAME:-}}"
+REPO_URL="${CPG_REPO_URL:-${CCP_REPO_URL:-https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot}}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-INSTALL_ARGS=(); NO_SLEEP=0; DRY=0; HAVE_TZ=0; REF="${CCP_REPO_REF:-}"
+INSTALL_ARGS=(); NO_SLEEP=0; DRY=0; HAVE_TZ=0; REF="${CPG_REPO_REF:-${CCP_REPO_REF:-}}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --bot-name|--operator-name|--timezone)
@@ -63,7 +64,7 @@ fi
 # Fetch the plugin inside the VM: clone it when it isn't there, then (only with a ref) fetch that ref from origin and
 # check it out. The same text is in hosts/windows/setup.ps1; tests/test_setup.py checks they match and runs it.
 read -r -d '' CHECKOUT <<'SH' || true
-# ccp-ref-checkout: begin
+# cpg-ref-checkout: begin
 D="$HOME/claude-projects-mcp"
 [ -d "$D" ] || git clone --quiet "$URL" "$D"
 if [ -n "$REF" ]; then
@@ -94,13 +95,13 @@ if [ -n "$REF" ]; then
   fi
   echo "claude-projects-mcp is at $REF ($(git rev-parse --short HEAD))"
 fi
-# ccp-ref-checkout: end
+# cpg-ref-checkout: end
 SH
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    note: %s\n' "$*"; }
 run() { if [ "$DRY" = 1 ]; then echo "    [dry-run] $*"; else "$@"; fi; }
 
-[ "$(uname -s)" = Darwin ] || { echo "This script is for macOS. On Linux run ./install.sh (or ccp setup) directly." >&2; exit 2; }
+[ "$(uname -s)" = Darwin ] || { echo "This script is for macOS. On Linux run ./install.sh (or claude-projects setup) directly." >&2; exit 2; }
 MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
 [ "$MAJOR" -ge 13 ] || { echo "macOS 13 or newer is needed (found $(sw_vers -productVersion))." >&2; exit 2; }
 if [ "$HAVE_TZ" = 0 ]; then
@@ -121,6 +122,13 @@ if ! LIMACTL="$(find_limactl)"; then
   else LIMACTL="$(find_limactl)" || { echo "brew installed lima but limactl is not on PATH; open a new terminal and re-run" >&2; exit 3; }; fi
 fi
 
+# the VM is "claude-projects"; a Mac set up before 1.0.2 has it as "ccp", which is kept rather than making a second VM
+if [ -z "$NAME" ]; then
+  NAME=claude-projects
+  if [ -z "$("$LIMACTL" list --format '{{.Name}}' claude-projects 2>/dev/null || true)" ] && [ -n "$("$LIMACTL" list --format '{{.Name}}' ccp 2>/dev/null || true)" ]; then
+    NAME=ccp; note "using the existing VM \"ccp\" (its name from before 1.0.2)"
+  fi
+fi
 vm_status() { "$LIMACTL" list --format '{{.Status}}' "$NAME" 2>/dev/null || true; }
 if [ -z "$(vm_status)" ]; then
   say "Creating the Ubuntu 24.04 VM \"$NAME\" (2 CPUs, 4 GB RAM, 20 GB disk, no access to your Mac's files)"
@@ -146,9 +154,10 @@ run "$LIMACTL" shell "$NAME" -- bash -lc "set -e
   REF=$(printf '%q' "$REF")
 $CHECKOUT
   cd ~/claude-projects-mcp
-  ./ccp setup choose macos_runtime --label $(printf '%q' "VM on $MAC_NAME")
-  ./ccp setup preflight --host-kind macos-vm || true
-  ./ccp setup install$Q"
+  C=./claude-projects; [ -x \$C ] || C=./ccp   # a ref from before 1.0.2 has the CLI under its old name
+  \$C setup choose macos_runtime --label $(printf '%q' "VM on $MAC_NAME")
+  \$C setup preflight --host-kind macos-vm || true
+  \$C setup install$Q"
 
 # Start the VM at login. The helper exits quietly when the VM is already running, so the 10-minute re-check doesn't
 # fill the log; logs go to ~/Library/Logs, not world-readable /tmp.
@@ -195,6 +204,6 @@ if pmset -g batt 2>/dev/null | grep -q InternalBattery; then note "this Mac is a
 cat <<MSG
 
 Done. The VM "$NAME" runs the plugin and starts at login (keep this user logged in, or turn on automatic login).
-Next, from this Mac:   $HERE/ccp setup status
-Sign-in opens in your browser at http://127.0.0.1:6179/vnc.html once you run:   $HERE/ccp setup signin start
+Next, from this Mac:   $HERE/claude-projects setup status
+Sign-in opens in your browser at http://127.0.0.1:6179/vnc.html once you run:   $HERE/claude-projects setup signin start
 MSG

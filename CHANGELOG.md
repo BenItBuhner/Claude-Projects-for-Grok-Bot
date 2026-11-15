@@ -3,14 +3,29 @@
 ## 1.0.2 (unreleased)
 
 Not tagged or released yet. Brings the guided setup to the public repo: one copy-paste prompt, an agent-driven
-`ccp setup` flow, Mac and Windows hosts, the 24th tool `claude_setup`, and hosts without systemd.
+`claude-projects setup` flow, Mac and Windows hosts, the 24th tool `claude_setup`, and hosts without systemd.
+
+### New names (the old ones keep working)
+- The CLI is `claude-projects` (was `ccp`), the modules are `cpg_*.py` (were `ccp_*.py`), install.sh's services are
+  `cpg-*` (were `ccp-*`), and the environment variables are `CPG_*` (were `CCP_*`). On a Mac the VM is
+  `claude-projects` (was `ccp`), the wrappers are `hosts/macos/claude-projects` and `hosts\windows\claude-projects.cmd`,
+  and the Windows distro's user is `cpg`.
+- Shims keep every old name working: `ccp` runs `claude-projects`; each `ccp_*.py` is the `cpg_*` module when imported
+  and runs it when started as a script (so `python ccp_mcp.py` and `ccp refresh` in existing units still work);
+  `hosts/macos/ccp` and `hosts\windows\ccp.cmd` run the new wrappers; every `CCP_*` variable is read when its `CPG_*`
+  name isn't set; a Mac VM called `ccp` is used when there is no `claude-projects` VM.
+- Installs from before the rename keep running with their `ccp-*` services; `setup status` and `verify` recognize them,
+  and the next `install.sh` run stops and removes them and starts the same services as `cpg-*`. The older hand-built
+  layout (`claude-projects-mcp.service` and `venv/`) is recognized as before.
+- `AGENTS.md` replaces `CLAUDE.md` as the origin-bracket note (same content); `CLAUDE.md` now only imports it
+  (`@AGENTS.md`) for Claude Code. `install.sh --claude-md` copies `AGENTS.md`.
 
 ### Guided setup
-- New `ccp setup` flow that an agent drives end to end. `status` prints the state, the next action, and `ask_user` (the
+- New `claude-projects setup` flow that an agent drives end to end. `status` prints the state, the next action, and `ask_user` (the
   exact question for the user, or null). The other commands are `preflight`, `choose`, `install`, `signin start|wait`,
   `check-beta`, `connect`, `verify [--live]`, `viewport on|off`, `tidy [--apply]`, `reconfigure`, `mark`, `move` and
   `uninstall [--purge]`. Progress is kept in `<state_dir>/setup.json` (no secrets), so an interrupted setup resumes.
-- Projects-beta detection (`ccp probe-projects`, read-only): the sidebar entry, the Projects route, and the app's cached
+- Projects-beta detection (`claude-projects probe-projects`, read-only): the sidebar entry, the Projects route, and the app's cached
   project-list query, plus the app's apt version, so an outdated app isn't mistaken for a missing beta. When the
   account has no Projects, setup flags it plainly and stays idle, with the background refresh off.
 - noVNC sign-in as a step: `signin start` turns the viewport on and gives the user the link and the password-file path
@@ -37,12 +52,12 @@ Not tagged or released yet. Brings the guided setup to the public repo: one copy
   - It checks for WSL 2.4.4+ and updates WSL if needed. `-WebDownload`, and an automatic retry, cover PCs without the
     Microsoft Store.
   - It waits for systemd and retries `enable-linger`.
-  - The distro user `ccp` has no sudo. Root steps run from Windows with `wsl -u root`.
+  - The distro user `cpg` has no sudo. Root steps run from Windows with `wsl -u root`.
   - The keep-alive task is a hidden PowerShell instead of `conhost --headless`. The at-sign-in trigger is documented,
     and `-AtStartup` adds an S4U at-boot task.
   - Sleep and battery checks warn instead of aborting.
   - The time-zone lookup uses .NET's Windows-to-IANA mapping.
-  - `ccp.cmd` uses CRLF line endings.
+  - `claude-projects.cmd` uses CRLF line endings.
   - Bash scripts reach the distro as base64 through `wsl.exe --exec` (`Invoke-WslScript`). Passed as plain text after
     `wsl.exe --`, wsl expanded `$name` against the guest environment, and Windows PowerShell 5.1 split embedded double
     quotes.
@@ -61,8 +76,8 @@ Not tagged or released yet. Brings the guided setup to the public repo: one copy
 ### Grok Bot box and other hosts without systemd
 
 - Process mode: on a host without user systemd (a container whose PID 1 is tini, like the Grok Bot box) the installer
-  runs the same unit files with `ccp_proc.py`, a small supervisor with its own D-Bus session bus, restarts on failure
-  and the 10-minute refresh. The MCP server, `ccp setup status` and `ccp setup start` bring it up. The preflight no
+  runs the same unit files with `cpg_proc.py`, a small supervisor with its own D-Bus session bus, restarts on failure
+  and the 10-minute refresh. The MCP server, `claude-projects setup status` and `claude-projects setup start` bring it up. The preflight no
   longer suggests `enable-linger` there.
 - The supervisor holds its lock for its whole life and retries for a few seconds when a status probe is in the way,
   so a probe can't make a starting supervisor give up (it occasionally failed at start-up).
@@ -86,11 +101,11 @@ Not tagged or released yet. Brings the guided setup to the public repo: one copy
   boundary, the runtime stopping after a restart).
 - New `skill/references/macos.md` and `skill/references/windows.md`: every step the host scripts do, by hand, for an
   agent that only has a shell on the Mac or PC: install, VM/distro, systemd and linger, start at login, ports, running
-  ccp inside, viewer link and password file, sleep, connecting, verify commands and common failures.
+  claude-projects inside, viewer link and password file, sleep, connecting, verify commands and common failures.
 - Mac and Windows connect lines keep `~` and `$` for the Linux side (`bash -lc '...'`, `wsl.exe --exec`).
 
 ### Installing a pre-release from the host scripts
-- `hosts/macos/setup.sh --ref REF` and `hosts/windows/setup.ps1 -Ref REF` (or `CCP_REPO_REF`; the flag wins) install a
+- `hosts/macos/setup.sh --ref REF` and `hosts/windows/setup.ps1 -Ref REF` (or `CPG_REPO_REF`; the flag wins) install a
   branch, a tag or a full commit sha instead of the default branch, e.g. `--ref release-1.0.2`. A fresh install clones
   and checks it out; a re-run fetches it from origin and checks it out, and refuses when the existing clone has local
   changes or local commits. The ref is validated strictly in the outer script before anything runs. Without a ref,
@@ -107,7 +122,12 @@ Not tagged or released yet. Brings the guided setup to the public repo: one copy
   whatever `WSL_UTF8` says) or UTF-8, with NULs and BOMs dropped, for `--version`, `-l -q`, `-l -v` and `--status`.
 - `install.sh` installs a sign-in browser deb only when apt has a candidate for it (`firefox-esr` or `chromium` on
   Debian). On Ubuntu, which has neither, it goes straight to the chromium snap with no apt error.
-- Preflight on a Windows distro no longer warns that sudo needs a password: the `ccp` user has no sudo by design, and
+- `setup verify` failed `signin_browser` ("no usable browser") with the chromium snap installed, because /snap/bin
+  wasn't on PATH. `bin/claude-signin-browser` now adds /snap/bin itself and counts a snap as a browser when
+  `/snap/bin/<name>` runs and `snap list <name>` lists it; the Ubuntu `chromium-browser` deb stub counts only when its
+  snap is there. The CLI, the process supervisor and the desktop, MCP and refresh units put /snap/bin on PATH, and a
+  failed check now says why (deb stub only, a snap snapd doesn't list, or no browser).
+- Preflight on a Windows distro no longer warns that sudo needs a password: the `cpg` user has no sudo by design, and
   the check now says root steps run from Windows with `wsl -u root`.
 
 ## 1.0.1 (2026-11-14)

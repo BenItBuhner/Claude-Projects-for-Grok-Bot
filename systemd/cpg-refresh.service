@@ -1,0 +1,13 @@
+[Unit]
+Description=claude-projects-mcp: background cache refresh (skips while a viewer is connected or the display was used <5 min ago)
+[Service]
+Type=oneshot
+Environment=CPG_CONFIG=@CONFIG_FILE@
+# /snap/bin: a user manager often lacks it, and the sign-in browser can be the chromium snap
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+ExecStart=@REPO@/claude-projects refresh --background --max 3
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=300M
+TimeoutStartSec=900
+SuccessExitStatus=3 5

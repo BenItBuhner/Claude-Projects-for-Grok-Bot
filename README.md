@@ -18,7 +18,7 @@ Paste this to your Grok Bot (or any agent that can run commands):
 Set up Claude Projects for Grok Bot for me, end to end, from
 https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot
 
-Clone it, read skill/SKILL.md, and follow its Part A (Setup) from the top until `ccp setup status` says ready.
+Clone it, read skill/SKILL.md, and follow its Part A (Setup) from the top until `claude-projects setup status` says ready.
 Do everything you can yourself. Only stop to ask me when you need:
 - which always-on computer to use (recommend one; offer your own box if I don't have one),
 - me to paste one sudo command, if apt needs a password,
@@ -57,7 +57,7 @@ Everything it types starts with `[sent by Grok Bot]`, so you and Claude can alwa
 ## How it works
 
 ```
-Grok Bot ──MCP──▶ ccp_mcp.py ──▶ ccp (CLI) ──AT-SPI + xdotool──▶ Claude desktop app on a headless display
+Grok Bot ──MCP──▶ cpg_mcp.py ──▶ claude-projects (CLI) ──AT-SPI + xdotool──▶ Claude desktop app on a headless display
                                        └──── private copy of the app's IndexedDB (project list, sessions)
 ```
 

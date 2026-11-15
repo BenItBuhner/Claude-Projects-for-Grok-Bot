@@ -8,7 +8,7 @@ guided setup for you (skill Part A). This is the same flow by hand, for people w
 - A computer that stays on: **Ubuntu 22.04+ or Debian 12+** (x86_64 or arm64) with user-level systemd and `sudo` for apt.
   On an always-on Mac or Windows PC, run [`hosts/macos/setup.sh`](../hosts/macos/setup.sh) or
   [`hosts/windows/setup.ps1`](../hosts/windows/setup.ps1) instead of steps 2 and 3's install (see [Hosts](hosts.md)).
-- A Claude account with Claude Code Projects (a beta). `./ccp setup check-beta` tells you after sign-in.
+- A Claude account with Claude Code Projects (a beta). `./claude-projects setup check-beta` tells you after sign-in.
 - `git` and `python3` (3.10 or newer). The installer adds the rest: Xvfb, openbox, xdotool, AT-SPI, a VNC/noVNC
   viewport and the official Claude desktop app.
 - An MCP client: Grok Bot, Cursor, Claude Desktop, or anything that speaks MCP over stdio or Streamable HTTP.
@@ -29,9 +29,9 @@ cd ~/claude-projects-mcp
 ## 3. Sign in to Claude once
 
 ```bash
-./ccp setup signin start       # prints the noVNC link, an `ssh -L ...` line for another computer, and the password file path
-./ccp setup signin wait        # waits until you're signed in and have closed the tab, then turns the viewport off
-./ccp setup check-beta         # does this account have Claude Code Projects?
+./claude-projects setup signin start       # prints the noVNC link, an `ssh -L ...` line for another computer, and the password file path
+./claude-projects setup signin wait        # waits until you're signed in and have closed the tab, then turns the viewport off
+./claude-projects setup check-beta         # does this account have Claude Code Projects?
 ```
 
 Open the link, enter the password from that file, click "Get started" (older versions say "Sign in") in the app window
@@ -39,7 +39,7 @@ and log in in the browser that opens inside it. If it stops on a `claude://...` 
 
 ## 4. Configure
 
-Settings live in `~/.config/claude-projects-mcp/config.json` (every key also has a `CCP_*` environment variable):
+Settings live in `~/.config/claude-projects-mcp/config.json` (every key also has a `CPG_*` environment variable):
 
 | key | default | what |
 |---|---|---|
@@ -48,7 +48,7 @@ Settings live in `~/.config/claude-projects-mcp/config.json` (every key also has
 | `timezone` | machine zone | zone for `*_local` timestamps |
 | `mcp_host` / `mcp_port` | `127.0.0.1` / `8791` | HTTP listener (`install.sh --mcp-port N`) |
 | `mcp_http` | `true` | `false` = no HTTP server, stdio only (`install.sh --no-http`; the box default) |
-| `service_mode` | picked by install.sh | `systemd` (user units) or `process` (the plugin's own supervisor, `ccp_proc.py`, on hosts without user systemd) |
+| `service_mode` | picked by install.sh | `systemd` (user units) or `process` (the plugin's own supervisor, `cpg_proc.py`, on hosts without user systemd) |
 | `keyring_data_dir` | private dir (new installs) | where the plugin's own gnome-keyring keeps its keyring, apart from a desktop login keyring |
 | `allowed_hosts` | `[]` | extra Host headers (your tunnel hostname) |
 | `viewer_ports` | `5900+N`, `6080+N` | VNC/noVNC ports; UI actions refuse while a viewer is connected |
@@ -59,22 +59,22 @@ Your rules for agents go in `~/.config/claude-projects-mcp/policy.md` (see [Safe
 
 ## 5. Run as a service
 
-The installer enables user services (and `loginctl enable-linger`, so they survive logout). The MCP server is `ccp-mcp`:
+The installer enables user services (and `loginctl enable-linger`, so they survive logout). The MCP server is `cpg-mcp`:
 
 ```bash
-systemctl --user status ccp-mcp
-systemctl --user restart ccp-mcp            # after a config change or `git pull`
-journalctl --user -u ccp-mcp -n 50
+systemctl --user status cpg-mcp
+systemctl --user restart cpg-mcp            # after a config change or `git pull`
+journalctl --user -u cpg-mcp -n 50
 curl -s http://127.0.0.1:8791/healthz       # -> ok
 ```
 
 On a host without user systemd (for example a container whose PID 1 is tini) the installer picks process mode: the same
-unit files, run by `ccp_proc.py`, with its own D-Bus session bus. Logs are in `~/.local/state/claude-projects-mcp/proc/logs/`.
+unit files, run by `cpg_proc.py`, with its own D-Bus session bus. Logs are in `~/.local/state/claude-projects-mcp/proc/logs/`.
 
 ```bash
-python3 ccp_proc.py status                  # what runs
-./ccp setup start                           # start everything (also after the host restarted)
-python3 ccp_proc.py restart ccp-mcp
+python3 cpg_proc.py status                  # what runs
+./claude-projects setup start                           # start everything (also after the host restarted)
+python3 cpg_proc.py restart cpg-mcp
 ```
 
 The MCP server starts the supervisor when it isn't running, so an agent that connects over stdio brings the services
@@ -85,12 +85,12 @@ back by itself.
 **Same computer or over SSH (stdio, no token needed):**
 
 ```bash
-~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/ccp_mcp.py --stdio
-ssh you@your-host ~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/ccp_mcp.py --stdio
+~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/cpg_mcp.py --stdio
+ssh you@your-host ~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/cpg_mcp.py --stdio
 ```
 
 **Over HTTP with `mcp-remote`** (point your own tunnel or VPN at `127.0.0.1:8791`, add its hostname to
-`allowed_hosts`, restart `ccp-mcp`, and copy `~/.config/claude-projects-mcp/mcp.token` privately to the client).
+`allowed_hosts`, restart `cpg-mcp`, and copy `~/.config/claude-projects-mcp/mcp.token` privately to the client).
 For example in Cursor's `~/.cursor/mcp.json`:
 
 ```json
@@ -99,8 +99,8 @@ For example in Cursor's `~/.cursor/mcp.json`:
     "claude-projects": {
       "command": "npx",
       "args": ["-y", "mcp-remote", "https://your-host.example/mcp", "--transport", "http-only",
-               "--header", "Authorization:${CCP_AUTH}"],
-      "env": { "CCP_AUTH": "Bearer <contents of mcp.token>" }
+               "--header", "Authorization:${CPG_AUTH}"],
+      "env": { "CPG_AUTH": "Bearer <contents of mcp.token>" }
     }
   }
 }
@@ -111,18 +111,18 @@ For example in Cursor's `~/.cursor/mcp.json`:
 `mcp-remote` call and reads the token from the file, so the token never appears in the command line. Then give the bot
 [skill/SKILL.md](../skill/SKILL.md), or let it read the live copy with `claude_skill_get`.
 
-Check it read-only: `./ccp setup verify --live` on the host, or `claude_setup(action="verify", live=true)` from the
+Check it read-only: `./claude-projects setup verify --live` on the host, or `claude_setup(action="verify", live=true)` from the
 client. Nothing is typed or sent.
 Some MCP clients keep the tool list they saw first; every tool can still be called by name.
 
 ## Keep it healthy
 
 ```bash
-./ccp setup status              # where things stand and what to do next
-./ccp setup verify --live       # read-only end-to-end checks (a send dry run types nothing)
-./ccp setup tidy [--apply]      # leftovers: staging, stale lock record, cache copies, file pickers, viewport
-./ccp setup reconfigure --bot-name NEW   # re-renders config and services; restarts only what changed
-./ccp setup uninstall [--purge]
+./claude-projects setup status              # where things stand and what to do next
+./claude-projects setup verify --live       # read-only end-to-end checks (a send dry run types nothing)
+./claude-projects setup tidy [--apply]      # leftovers: staging, stale lock record, cache copies, file pickers, viewport
+./claude-projects setup reconfigure --bot-name NEW   # re-renders config and services; restarts only what changed
+./claude-projects setup uninstall [--purge]
 ```
 
 ## Safety and policy

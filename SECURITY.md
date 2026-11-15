@@ -8,7 +8,7 @@ spend usage, create projects and change cloud environment variables. Treat acces
   all-or-nothing, not a per-tool permission model.
 - **The viewport is the account.** x11vnc listens on localhost only and needs a password. noVNC binds `127.0.0.1` unless you pass
   `--viewport-bind`. Reach it with an SSH tunnel.
-- **Local data.** ccp reads a temporary private copy of the app's IndexedDB and HTTP cache (in the state dir, chmod 700) and deletes it
+- **Local data.** claude-projects reads a temporary private copy of the app's IndexedDB and HTTP cache (in the state dir, chmod 700) and deletes it
   after each read. Field names that look like credentials are dropped, but transcripts and attachments are returned as they are.
   They are the user's private content.
 - **Clipboard.** Non-ASCII sends go through the display's clipboard (saved and restored). Use a display nothing else shares.

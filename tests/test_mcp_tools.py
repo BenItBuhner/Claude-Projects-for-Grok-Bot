@@ -5,7 +5,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
 
 mcp_mod = pytest.importorskip('mcp')
-import ccp_mcp as M
+import cpg_mcp as M
 
 EXPECTED = {
     'claude_projects_list', 'claude_project_get', 'claude_thread_read', 'claude_thread_attachment_get', 'claude_thread_send',
@@ -45,7 +45,7 @@ def test_send_passes_bot_name(monkeypatch):
     monkeypatch.setattr(M, 'run', fake_run)
     asyncio.run(M.claude_thread_send('Demo Project', 'hello', bot_name='Scout', dry_run=True))
     assert seen['args'][:2] == ['send', 'Demo Project'] and '--bot-name' in seen['args'] and 'Scout' in seen['args']
-    assert '--dry-run' in seen['args'] and seen['msg'] == 'hello'   # the bracket is added once, in ccp_core
+    assert '--dry-run' in seen['args'] and seen['msg'] == 'hello'   # the bracket is added once, in cpg_core
     asyncio.run(M.claude_thread_create('Demo Project', 'T', 'do it', dry_run=True, bot_name='Scout'))
     assert seen['args'][0] == 'create-thread' and 'Scout' in seen['args']
 

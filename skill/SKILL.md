@@ -11,23 +11,23 @@ anything other than `ready`. **Part B** is how to use it once it works.
 
 # Part A: Setup and maintenance
 
-You drive this yourself. `ccp setup status` (or `claude_setup(action="status")` once connected) prints the `state`, the
+You drive this yourself. `claude-projects setup status` (or `claude_setup(action="status")` once connected) prints the `state`, the
 `next_action` to run, and `ask_user`: the exact question to put to the user, or null. Loop until `state` is `ready`:
 
 1. Run `next_action`.
 2. If a result has `ask_user` (or `tell_user`), say exactly that to the user in your own chat, then wait for their answer.
-3. Run `ccp setup status` again.
+3. Run `claude-projects setup status` again.
 
 Ask the user only where the flow says so. Everything else is yours. Progress is saved on the host
-(`~/.local/state/claude-projects-mcp/setup.json`), so if anything stops halfway, `ccp setup status` picks up from there.
+(`~/.local/state/claude-projects-mcp/setup.json`), so if anything stops halfway, `claude-projects setup status` picks up from there.
 
 Rules for the whole setup:
 - Never print, paste or upload the MCP token, the viewport password or the keyring password. Say where they are saved
   (a path), never what they are.
 - No test messages, threads or Projects. Verification is read-only plus dry runs.
 - Ask before anything that changes the user's machine beyond the plugin: sudo commands, sleep settings, uninstalling.
-- Shell commands below run on the host, in the checkout: `cd ~/claude-projects-mcp && ./ccp setup ...` (add `--json`
-  for machine-readable output). On a Mac host run `hosts/macos/ccp setup ...`; on Windows, `hosts\windows\ccp.cmd setup ...`.
+- Shell commands below run on the host, in the checkout: `cd ~/claude-projects-mcp && ./claude-projects setup ...` (add `--json`
+  for machine-readable output). On a Mac host run `hosts/macos/claude-projects setup ...`; on Windows, `hosts\windows\claude-projects.cmd setup ...`.
 
 ## A1. Choose the host (ask once)
 
@@ -57,14 +57,14 @@ Linux runtime, with its own copy of the app signed in separately; the user's own
 
 | | macOS 13+ | Windows 10 22H2 / 11 |
 |---|---|---|
-| runtime | Lima VM `ccp`: Ubuntu 24.04, 2 CPUs, 4 GB, 20 GB, `--mount-none` | WSL2 distro `ClaudeProjects`: Ubuntu 24.04, user `ccp` without sudo, systemd on in `/etc/wsl.conf` |
+| runtime | Lima VM `claude-projects`: Ubuntu 24.04, 2 CPUs, 4 GB, 20 GB, `--mount-none` | WSL2 distro `ClaudeProjects`: Ubuntu 24.04, user `cpg` without sudo, systemd on in `/etc/wsl.conf` |
 | one-shot script | `bash hosts/macos/setup.sh` | `powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1` |
-| run ccp | `limactl shell ccp -- bash -lc 'cd ~/claude-projects-mcp && ./ccp setup status'` (or `hosts/macos/ccp`) | base64 script via `wsl.exe -d ClaudeProjects -u ccp --exec /bin/bash -c ...` (or `hosts\windows\ccp.cmd` from cmd) |
+| run claude-projects | `limactl shell claude-projects -- bash -lc 'cd ~/claude-projects-mcp && ./claude-projects setup status'` (or `hosts/macos/claude-projects`) | base64 script via `wsl.exe -d ClaudeProjects -u cpg --exec /bin/bash -c ...` (or `hosts\windows\claude-projects.cmd` from cmd) |
 | root steps | `sudo` inside the VM (Lima's user has it) | from Windows: `wsl.exe -d ClaudeProjects -u root ...` |
 | stays running | LaunchAgent starts the VM at login; linger inside | hidden scheduled task keeps `sleep infinity` running in the distro; optional at-startup task |
 | ports | Lima forwards the guest's localhost to the Mac's `127.0.0.1` | WSL `localhostForwarding` to Windows `127.0.0.1` |
 | viewer link | `http://127.0.0.1:6179/vnc.html` in the Mac browser | `http://127.0.0.1:6179/vnc.html` in the Windows browser |
-| password file | in the VM: `~/.config/claude-projects-mcp/vncpass.txt` | in the distro: `/home/ccp/.config/claude-projects-mcp/vncpass.txt` |
+| password file | in the VM: `~/.config/claude-projects-mcp/vncpass.txt` | in the distro: `/home/cpg/.config/claude-projects-mcp/vncpass.txt` |
 | always-on | `pmset -c sleep 0` (ask), auto login | `powercfg /change standby-timeout-ac 0` (ask), auto sign-in or `-AtStartup` |
 
 Prefer the script. When it isn't available or stops halfway, do the same steps by hand: they're spelled out, with
@@ -79,14 +79,14 @@ Two pitfalls that cost the most time:
   `$vars`, PowerShell 5.1 breaks embedded double quotes, PowerShell 7 rewrites a bare `~`): send the script as base64
   through `--exec`, as shown in the Windows reference.
 - **The runtime stopping.** A Lima VM doesn't come back after a Mac restart without the LaunchAgent; a WSL distro shuts
-  down minutes after its last Windows process exits without the keep-alive task. `ccp setup verify` passing once
+  down minutes after its last Windows process exits without the keep-alive task. `claude-projects setup verify` passing once
   doesn't prove either: check after a restart (`limactl list` / `wsl -l -v`).
 
 ## A2. Preflight
 
 ```bash
 git clone https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot ~/claude-projects-mcp   # if not cloned yet
-cd ~/claude-projects-mcp && ./ccp setup preflight            # Linux; on Mac/Windows it says which script to run
+cd ~/claude-projects-mcp && ./claude-projects setup preflight            # Linux; on Mac/Windows it says which script to run
 # a container without systemd (how the Grok Bot box runs) is detected as the box; --host-kind box says so outright
 ```
 
@@ -99,11 +99,11 @@ the box, pass the warning on to the user before you install.
 ## A3. Install
 
 ```bash
-./ccp setup install --bot-name "<your bot name>" [--operator-name "<user's first name>"] [--timezone Area/City]
+./claude-projects setup install --bot-name "<your bot name>" [--operator-name "<user's first name>"] [--timezone Area/City]
 ```
 
 - If sudo needs a password, the result is `needs_sudo` with `ask_user`: the user pastes **one line**
-  (`sudo ~/claude-projects-mcp/install.sh --apt-only`). Then run `./ccp setup install --no-apt`.
+  (`sudo ~/claude-projects-mcp/install.sh --apt-only`). Then run `./claude-projects setup install --no-apt`.
 - Mac and Windows: the host script runs this step inside the VM or distro for you.
 - It is idempotent. Re-running keeps the token and the sign-in.
 - It runs the preflight first and stops at `preflight_failed` (with the failed checks) instead of installing on a host
@@ -111,15 +111,17 @@ the box, pass the warning on to the user before you install.
 - On the box it installs stdio only (no HTTP server, so no port to collide with). Elsewhere the HTTP server listens on
   8791; `--mcp-port N` moves it and `--no-http` turns it off.
 - Without systemd, nothing restarts the services after the box restarts until the MCP server starts (it brings the
-  supervisor up) or you run `./ccp setup start`. `status` does it too.
+  supervisor up) or you run `./claude-projects setup start`. `status` does it too.
+- Old names (before 1.0.2) still work: `ccp` is `claude-projects`, `ccp-*` services are `cpg-*`, `CCP_*` variables
+  are `CPG_*`. An install with `ccp-*` services is a normal install; the next `install.sh` renames them.
 - An older hand-built install (`claude-projects-mcp.service` with `venv/`) is recognized as installed. `install` leaves
   it alone (`legacy_layout`); migrating needs `--migrate` and the user's OK.
 
 ## A4. Sign in (noVNC)
 
 ```bash
-./ccp setup signin start        # turns the viewport on, prints the link, the password-file path and ask_user
-./ccp setup signin wait         # polls every 30 s for up to 15 min, then waits for the viewer to close
+./claude-projects setup signin start        # turns the viewport on, prints the link, the password-file path and ask_user
+./claude-projects setup signin wait         # polls every 30 s for up to 15 min, then waits for the viewer to close
 ```
 
 Give the user `ask_user` as it is: open the link (on the host itself, the `ssh -L` line from another computer, or
@@ -129,18 +131,18 @@ same window.
 
 On the box, the user has no shell there and can't reach its localhost. `signin start` first returns
 `needs_viewer_route` with an `ask_user`: ask whether you may open a temporary, password-protected link (a Cloudflare
-quick tunnel; needs `cloudflared` on the box). After a yes, run `./ccp setup signin start --tunnel`; with the user's
+quick tunnel; needs `cloudflared` on the box). After a yes, run `./claude-projects setup signin start --tunnel`; with the user's
 own URL, `--public-url <url>`. On the box the link carries a **one-time** viewport password, so send it only to the
 user. `signin wait` replaces that password and closes the tunnel when the sign-in is done. If that browser stops on a
 `claude://...` link instead of returning to the app, run `bin/claude-open-url 'claude://...'` with that link.
 When `wait` sees the sign-in it closes the sign-in browser and turns the viewport off again (on-demand viewport).
 If `wait` times out, run it again; `signin start` resends the link. To use a different account later:
-`./ccp setup signin start --switch`.
+`./claude-projects setup signin start --switch`.
 
 ## A5. Check for Claude Code Projects (beta)
 
 ```bash
-./ccp setup check-beta
+./claude-projects setup check-beta
 ```
 
 Read-only: it looks for the Projects entry in the app's sidebar, opens the Projects view, and reads whether the app
@@ -155,10 +157,10 @@ has a project list. Verdicts:
 
 ## A6. Connect yourself
 
-`./ccp setup connect` lists the options and recommends one:
+`./claude-projects setup connect` lists the options and recommends one:
 
-- **same host** (the box): stdio, `<repo>/.venv/bin/python <repo>/ccp_mcp.py --stdio`. No token involved.
-- **ssh**: the same command over `ssh user@host ...` (Mac: `limactl shell ccp -- bash -lc '...'`; Windows: `wsl.exe -d ClaudeProjects -u ccp --exec ...`; `ccp setup connect` prints the exact line).
+- **same host** (the box): stdio, `<repo>/.venv/bin/python <repo>/cpg_mcp.py --stdio`. No token involved.
+- **ssh**: the same command over `ssh user@host ...` (Mac: `limactl shell claude-projects -- bash -lc '...'`; Windows: `wsl.exe -d ClaudeProjects -u cpg --exec ...`; `claude-projects setup connect` prints the exact line).
 - **tunnel**: the user's own tunnel or VPN to `127.0.0.1:8791`, `allowed_hosts` in config, a private copy of the
   token file, and `bin/grok-bot-bridge <url> <token-file>`. Nothing here sets up a tunnel for them.
 
@@ -167,7 +169,7 @@ If your tool discovery shows fewer tools than the server has, call them by name 
 
 ## A7. Verify
 
-`claude_setup(action="verify", live=true)` (or `./ccp setup verify --live`). It checks that:
+`claude_setup(action="verify", live=true)` (or `./claude-projects setup verify --live`). It checks that:
 - the services are running and start at boot, with linger on and no sleep expected (process mode: the supervisor runs);
 - `/healthz` answers (when the HTTP server is on) and the secret files are chmod 600;
 - `viewer_ports` is set;
@@ -191,15 +193,15 @@ uses a cloud environment). Never invent one.
 
 | need | run |
 |---|---|
-| Where things stand | `claude_setup(action="status")` / `ccp setup status` |
-| Health check | `claude_setup(action="verify", live=true)` / `ccp setup verify --live` |
-| Did the account get Projects yet? | `claude_setup(action="check_beta")` / `ccp setup check-beta` |
-| Clean up leftovers | `claude_setup(action="tidy")` (dry run), then `apply=true` / `ccp setup tidy [--apply]` |
-| Rename the bot, change the time zone, display or screen size | `ccp setup reconfigure --bot-name ... --timezone ...` |
-| Sign in again or switch account | `ccp setup signin start [--switch]`, then `ccp setup signin wait` |
-| Open or close the viewport | `claude_setup(action="viewport_on")` or `"viewport_off"` / `ccp setup viewport on` or `off` |
-| Move to another computer | `ccp setup move` (prints the steps) |
-| Remove it | `ccp setup uninstall` (keeps config and sign-in); `--purge` after the user confirms |
+| Where things stand | `claude_setup(action="status")` / `claude-projects setup status` |
+| Health check | `claude_setup(action="verify", live=true)` / `claude-projects setup verify --live` |
+| Did the account get Projects yet? | `claude_setup(action="check_beta")` / `claude-projects setup check-beta` |
+| Clean up leftovers | `claude_setup(action="tidy")` (dry run), then `apply=true` / `claude-projects setup tidy [--apply]` |
+| Rename the bot, change the time zone, display or screen size | `claude-projects setup reconfigure --bot-name ... --timezone ...` |
+| Sign in again or switch account | `claude-projects setup signin start [--switch]`, then `claude-projects setup signin wait` |
+| Open or close the viewport | `claude_setup(action="viewport_on")` or `"viewport_off"` / `claude-projects setup viewport on` or `off` |
+| Move to another computer | `claude-projects setup move` (prints the steps) |
+| Remove it | `claude-projects setup uninstall` (keeps config and sign-in); `--purge` after the user confirms |
 
 `tidy` only touches the plugin's own leftovers: the staging sweep, a stale lock record, old cache copies, stray file
 pickers, the sign-in browser, and a viewport left on. `reconfigure` restarts only the services whose settings changed.

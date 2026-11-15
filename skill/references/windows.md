@@ -3,7 +3,7 @@
 Use this when the plugin should run on an always-on Windows PC and `hosts\windows\setup.ps1` isn't used (you only have
 a shell on the PC, the script failed halfway, or the user wants to see each step). The script does exactly these
 steps; if it's there, prefer `powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1 [-BotName NAME] [-Ref REF] [-AtStartup] [-WebDownload] [-NoSleep] [-DryRun]`.
-For a pre-release, add `-Ref release-1.0.2` (a branch, a tag or a full commit sha; `$env:CCP_REPO_REF = 'release-1.0.2'`
+For a pre-release, add `-Ref release-1.0.2` (a branch, a tag or a full commit sha; `$env:CPG_REPO_REF = 'release-1.0.2'`
 works too, and the parameter wins).
 
 ## Why WSL
@@ -31,8 +31,8 @@ wsl --update                        # or: wsl --update --web-download
 wsl --install Ubuntu-24.04 --name ClaudeProjects --no-launch      # add --web-download if the Store is blocked
 ```
 
-Give it an unprivileged user `ccp` (no sudo on purpose: root steps run from Windows with `-u root`, so nothing inside
-the distro can become root on its own), turn systemd on, and make `ccp` the default user.
+Give it an unprivileged user `cpg` (no sudo on purpose: root steps run from Windows with `-u root`, so nothing inside
+the distro can become root on its own), turn systemd on, and make `claude-projects` the default user.
 
 **Passing scripts to WSL safely.** Don't send a bash command with quotes or `$` through `wsl.exe -- ...`: `wsl.exe`
 expands `$name` against the Linux environment before bash runs, Windows PowerShell 5.1 mangles embedded double
@@ -47,8 +47,8 @@ function Invoke-Distro([string]$User, [string]$Script) {
 }
 
 Invoke-Distro root @'
-id ccp >/dev/null 2>&1 || useradd -m -s /bin/bash ccp
-printf '[boot]\nsystemd=true\n[user]\ndefault=ccp\n' > /etc/wsl.conf
+id cpg >/dev/null 2>&1 || useradd -m -s /bin/bash cpg
+printf '[boot]\nsystemd=true\n[user]\ndefault=cpg\n' > /etc/wsl.conf
 '@
 wsl --terminate ClaudeProjects       # the next start boots with systemd
 ```
@@ -58,7 +58,7 @@ wsl --terminate ClaudeProjects       # the next start boots with systemd
 ```powershell
 Invoke-Distro root @'
 for i in $(seq 1 30); do case "$(systemctl is-system-running 2>/dev/null)" in running|degraded) break;; esac; sleep 2; done
-for i in $(seq 1 15); do loginctl enable-linger ccp && break; sleep 2; done
+for i in $(seq 1 15); do loginctl enable-linger cpg && break; sleep 2; done
 apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ca-certificates
 '@
 ```
@@ -66,32 +66,32 @@ apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git 
 ## 4. The plugin (same guided steps as Linux)
 
 ```powershell
-Invoke-Distro ccp 'git clone https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot ~/claude-projects-mcp'
-Invoke-Distro ccp "cd ~/claude-projects-mcp && ./ccp setup choose windows_runtime --label 'WSL on $env:COMPUTERNAME' && ./ccp setup preflight --host-kind windows-wsl"
-Invoke-Distro root '/home/ccp/claude-projects-mcp/install.sh --apt-only'          # packages + the Claude app, as root
-Invoke-Distro ccp 'cd ~/claude-projects-mcp && ./ccp setup install --no-apt --bot-name "<bot name>"'
-Invoke-Distro ccp 'cd ~/claude-projects-mcp && ./ccp setup status'
+Invoke-Distro cpg 'git clone https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot ~/claude-projects-mcp'
+Invoke-Distro cpg "cd ~/claude-projects-mcp && ./claude-projects setup choose windows_runtime --label 'WSL on $env:COMPUTERNAME' && ./claude-projects setup preflight --host-kind windows-wsl"
+Invoke-Distro root '/home/cpg/claude-projects-mcp/install.sh --apt-only'          # packages + the Claude app, as root
+Invoke-Distro cpg 'cd ~/claude-projects-mcp && ./claude-projects setup install --no-apt --bot-name "<bot name>"'
+Invoke-Distro cpg 'cd ~/claude-projects-mcp && ./claude-projects setup status'
 ```
 
-**A pre-release branch, tag or commit** (what `-Ref` / `CCP_REPO_REF` do). Only use a ref made of letters, digits and
+**A pre-release branch, tag or commit** (what `-Ref` / `CPG_REPO_REF` do). Only use a ref made of letters, digits and
 `. _ / -` (no leading `-`, no `..`). `Invoke-Distro` carries the script as base64, so quoting is safe, but a strict ref
 keeps the git commands unambiguous. Check the clone is clean first; if the first line prints anything, stop and ask the
 user instead of overwriting their changes:
 
 ```powershell
-Invoke-Distro ccp 'cd ~/claude-projects-mcp && git status --porcelain --untracked-files=no'   # must print nothing
+Invoke-Distro cpg 'cd ~/claude-projects-mcp && git status --porcelain --untracked-files=no'   # must print nothing
 # a branch:
-Invoke-Distro ccp 'cd ~/claude-projects-mcp && git fetch origin +refs/heads/release-1.0.2:refs/remotes/origin/release-1.0.2 && git checkout -B release-1.0.2 origin/release-1.0.2'
+Invoke-Distro cpg 'cd ~/claude-projects-mcp && git fetch origin +refs/heads/release-1.0.2:refs/remotes/origin/release-1.0.2 && git checkout -B release-1.0.2 origin/release-1.0.2'
 # or a tag:
-Invoke-Distro ccp 'cd ~/claude-projects-mcp && git fetch --force origin refs/tags/v1.0.1:refs/tags/v1.0.1 && git checkout --detach v1.0.1'
+Invoke-Distro cpg 'cd ~/claude-projects-mcp && git fetch --force origin refs/tags/v1.0.1:refs/tags/v1.0.1 && git checkout --detach v1.0.1'
 ```
 
-Then run the `install.sh --apt-only` and `./ccp setup install --no-apt` lines again (re-running `setup.ps1 -Ref
+Then run the `install.sh --apt-only` and `./claude-projects setup install --no-apt` lines again (re-running `setup.ps1 -Ref
 release-1.0.2` does all of this).
 
 When a result says `needs_sudo` or gives an `as_root` line, run that line through `Invoke-Distro root` from Windows:
-`ccp` itself has no sudo. Afterwards `hosts\windows\ccp.cmd setup <command>` (from cmd) does the same as
-`Invoke-Distro ccp 'cd ~/claude-projects-mcp && ./ccp setup <command>'`.
+`claude-projects` itself has no sudo. Afterwards `hosts\windows\claude-projects.cmd setup <command>` (from cmd) does the same as
+`Invoke-Distro cpg 'cd ~/claude-projects-mcp && ./claude-projects setup <command>'`.
 
 ## 5. Keep the distro running
 
@@ -99,7 +99,7 @@ WSL shuts a distro down soon after its last Windows-side process exits, which st
 task keeps one `sleep` running in it from sign-in (and, optionally, from boot):
 
 ```powershell
-$keep = "-NoProfile -NonInteractive -WindowStyle Hidden -Command `"& wsl.exe -d ClaudeProjects -u ccp --exec /bin/sleep infinity`""
+$keep = "-NoProfile -NonInteractive -WindowStyle Hidden -Command `"& wsl.exe -d ClaudeProjects -u cpg --exec /bin/sleep infinity`""
 $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
        -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
 $act = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $keep
@@ -126,22 +126,22 @@ A sleeping PC pauses the plugin. A laptop works only while it's awake and plugge
 ## 7. Sign-in, viewer link and password file
 
 WSL forwards ports the distro binds on its localhost to Windows `127.0.0.1` (the default `localhostForwarding`), so
-after `./ccp setup signin start` the user opens `http://127.0.0.1:6179/vnc.html?autoconnect=1&resize=scale` (display
+after `./claude-projects setup signin start` the user opens `http://127.0.0.1:6179/vnc.html?autoconnect=1&resize=scale` (display
 `:99`) in their normal Windows browser. The viewer password is saved **inside the distro** at
-`/home/ccp/.config/claude-projects-mcp/vncpass.txt`; the user reads it with
-`wsl.exe -d ClaudeProjects -u ccp --exec cat /home/ccp/.config/claude-projects-mcp/vncpass.txt` (never paste it into
+`/home/cpg/.config/claude-projects-mcp/vncpass.txt`; the user reads it with
+`wsl.exe -d ClaudeProjects -u cpg --exec cat /home/cpg/.config/claude-projects-mcp/vncpass.txt` (never paste it into
 chat yourself). In the app they click "Get started" (older versions: "Sign in"). Then `signin wait` and `check-beta`.
 
 ## 8. Connect the agent and verify
 
 | agent runs | command |
 |---|---|
-| on the PC | `wsl.exe -d ClaudeProjects -u ccp --exec /home/ccp/claude-projects-mcp/.venv/bin/python /home/ccp/claude-projects-mcp/ccp_mcp.py --stdio` |
-| elsewhere, SSH to the PC (OpenSSH Server on) | `ssh <user>@<pc> wsl.exe -d ClaudeProjects -u ccp --exec /home/ccp/claude-projects-mcp/.venv/bin/python /home/ccp/claude-projects-mcp/ccp_mcp.py --stdio` |
-| HTTP | `http://127.0.0.1:8791/mcp` on the PC, bearer token from `/home/ccp/.config/claude-projects-mcp/mcp.token` in the distro |
+| on the PC | `wsl.exe -d ClaudeProjects -u cpg --exec /home/cpg/claude-projects-mcp/.venv/bin/python /home/cpg/claude-projects-mcp/cpg_mcp.py --stdio` |
+| elsewhere, SSH to the PC (OpenSSH Server on) | `ssh <user>@<pc> wsl.exe -d ClaudeProjects -u cpg --exec /home/cpg/claude-projects-mcp/.venv/bin/python /home/cpg/claude-projects-mcp/cpg_mcp.py --stdio` |
+| HTTP | `http://127.0.0.1:8791/mcp` on the PC, bearer token from `/home/cpg/.config/claude-projects-mcp/mcp.token` in the distro |
 
 ```powershell
-Invoke-Distro ccp 'cd ~/claude-projects-mcp && ./ccp setup verify --live'
+Invoke-Distro cpg 'cd ~/claude-projects-mcp && ./claude-projects setup verify --live'
 wsl -l -v                                            # ClaudeProjects  Running  2
 Get-ScheduledTask -TaskName "Claude Projects for Grok Bot" | Select-Object State
 curl.exe -s http://127.0.0.1:8791/healthz            # ok (when the HTTP server is on)
@@ -161,9 +161,9 @@ curl.exe -s http://127.0.0.1:8791/healthz            # ok (when the HTTP server 
 | `$HOME`, `$USER` or quotes arrive empty or broken | the command went through `wsl.exe -- ...` or PowerShell 5.1 quoting: use the base64 `Invoke-Distro` above |
 | a path like `C:\Users\...` shows up inside the distro | PowerShell 7 expanded a bare `~`: don't use `--cd ~`; put `cd ~` inside the script |
 | plugin stops a few minutes after the window closes | the keep-alive task isn't running: `Start-ScheduledTask -TaskName "Claude Projects for Grok Bot"` |
-| `127.0.0.1:6179` doesn't load in Windows | the service isn't up (`./ccp setup status`), or `localhostForwarding=false` / a custom `networkingMode` in `%UserProfile%\.wslconfig` |
-| `needs_sudo` loops | `ccp` has no sudo by design: run the printed line with `Invoke-Distro root` |
+| `127.0.0.1:6179` doesn't load in Windows | the service isn't up (`./claude-projects setup status`), or `localhostForwarding=false` / a custom `networkingMode` in `%UserProfile%\.wslconfig` |
+| `needs_sudo` loops | `claude-projects` has no sudo by design: run the printed line with `Invoke-Distro root` |
 
-Remove: `./ccp setup uninstall` inside the distro, then
+Remove: `./claude-projects setup uninstall` inside the distro, then
 `Get-ScheduledTask -TaskName "Claude Projects for Grok Bot*" | Unregister-ScheduledTask -Confirm:$false` and
 `wsl --unregister ClaudeProjects` (ask the user first; it deletes the distro and its sign-in).

@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # Start the Claude desktop app on the configured display, or hand a claude:// URL to the running instance
-# (Electron's single-instance lock forwards argv and exits). Used by the claude-desktop service and by ccp deep links.
+# (Electron's single-instance lock forwards argv and exits). Used by the claude-desktop service and by claude-projects deep links.
 set -euo pipefail
-CFG_FILE="${CCP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp/config.json}"
+CFG_FILE="${CPG_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp/config.json}"
 cfg() { python3 - "$CFG_FILE" "$1" "$2" <<'PY'
 import json, sys
 try: print(json.load(open(sys.argv[1])).get(sys.argv[2]) or sys.argv[3])
 except Exception: print(sys.argv[3])
 PY
 }
-export DISPLAY="${CCP_DISPLAY:-$(cfg display :99)}"
+export DISPLAY="${CPG_DISPLAY:-$(cfg display :99)}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
 export XDG_SESSION_TYPE=x11 XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-GNOME}"
 export ACCESSIBILITY_ENABLED=1 GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0
 export GNOME_KEYRING_CONTROL="${GNOME_KEYRING_CONTROL:-$XDG_RUNTIME_DIR/keyring}"
-BIN="${CCP_CLAUDE_BINARY:-$(cfg claude_binary claude-desktop)}"
+BIN="${CPG_CLAUDE_BINARY:-$(cfg claude_binary claude-desktop)}"
 command -v "$BIN" >/dev/null 2>&1 || { echo "claude-desktop-launch: Claude desktop binary '$BIN' not found (install claude-desktop)" >&2; exit 127; }
 exec "$BIN" --no-sandbox --password-store=gnome-libsecret --force-renderer-accessibility --disable-gpu "$@"

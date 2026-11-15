@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import conftest  # noqa: F401  (isolated config when run as a plain script)
 
-import ccp_core as C
+import cpg_core as C
 
 def approx(a, b, tol=1.0):
     return abs(a - b) <= tol
@@ -138,7 +138,7 @@ if __name__ == "__main__":
 
 def test_wait_composer_match_polls_until_text_lands():
     """Paste can report success before AT-SPI exposes the text; wait until it appears."""
-    import ccp_core as c
+    import cpg_core as c
     calls = {'n': 0}
     sequence = ['', '', 'hello from typetest']
 
@@ -158,7 +158,7 @@ def test_wait_composer_match_polls_until_text_lands():
 
 
 def test_wait_composer_match_times_out_empty():
-    import ccp_core as c
+    import cpg_core as c
     c.composer = lambda: object()
     c.composer_text = lambda _e=None: ''
     ok, got = c._wait_composer_match('never lands', timeout_s=0.2, poll_s=0.05)

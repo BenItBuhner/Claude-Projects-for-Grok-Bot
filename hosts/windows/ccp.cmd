@@ -1,4 +1,3 @@
 @echo off
-rem Run ccp inside the WSL distro that hosts the plugin on this PC:  hosts\windows\ccp.cmd setup status
-if "%CCP_WSL_DISTRO%"=="" set CCP_WSL_DISTRO=ClaudeProjects
-wsl.exe -d %CCP_WSL_DISTRO% -u ccp --cd ~ -- ./claude-projects-mcp/ccp %*
+rem ccp.cmd: the old name of claude-projects.cmd (renamed in 1.0.2); runs it with the same arguments.
+call "%~dp0claude-projects.cmd" %*

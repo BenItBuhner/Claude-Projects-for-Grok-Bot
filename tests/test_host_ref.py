@@ -1,4 +1,4 @@
-"""--ref / -Ref / CCP_REPO_REF in the one-shot host scripts (hosts/macos/setup.sh, hosts/windows/setup.ps1).
+"""--ref / -Ref / CPG_REPO_REF in the one-shot host scripts (hosts/macos/setup.sh, hosts/windows/setup.ps1).
 
 Nothing here touches a real VM, WSL or the network: the macOS script runs against stub commands, the Windows script
 against tests/fixtures/fake-wsl.exe (pwsh only), and the in-VM checkout runs against local git repositories."""
@@ -8,7 +8,7 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parents[1]
 MAC = REPO / 'hosts' / 'macos' / 'setup.sh'
 WIN = REPO / 'hosts' / 'windows' / 'setup.ps1'
-BEGIN, END = '# ccp-ref-checkout: begin', '# ccp-ref-checkout: end'
+BEGIN, END = '# cpg-ref-checkout: begin', '# cpg-ref-checkout: end'
 
 GOOD = ['release-1.0.2', 'v1.0.1', 'main', 'feature/x.y_z', 'a' * 200, '0123456789abcdef0123456789abcdef01234567']
 BAD = ['-x', '--upload-pack=touch /tmp/p', 'a..b', 'a b', "a'b", 'a"b', 'a$b', '$(id)', 'a`id`', 'a;id', 'a|b', 'a&b',
@@ -153,7 +153,7 @@ def mac_stubs(tmp_path):
 
 def run_mac(tmp_path, *args, extra_env=None):
     b, log = mac_stubs(tmp_path)
-    env = {k: v for k, v in os.environ.items() if k != 'CCP_REPO_REF'}
+    env = {k: v for k, v in os.environ.items() if k != 'CPG_REPO_REF'}
     env.update(PATH=f"{b}:{os.environ['PATH']}", HOME=str(tmp_path), **(extra_env or {}))
     r = subprocess.run(['bash', str(MAC), '--dry-run', *args], capture_output=True, text=True, env=env)
     return r, log
@@ -167,7 +167,7 @@ def test_macos_rejects_unsafe_refs_before_anything_runs(tmp_path, ref):
 
 
 def test_macos_rejects_unsafe_env_ref_and_an_empty_flag(tmp_path):
-    r, log = run_mac(tmp_path, extra_env={'CCP_REPO_REF': 'x;touch /tmp/p'})
+    r, log = run_mac(tmp_path, extra_env={'CPG_REPO_REF': 'x;touch /tmp/p'})
     assert r.returncode == 2 and '--ref:' in r.stderr and not log.exists()
     r, _ = run_mac(tmp_path, '--ref', '')
     assert r.returncode == 2 and 'needs a value' in r.stderr
@@ -181,9 +181,9 @@ def test_macos_dry_run_fetches_the_ref(tmp_path, ref):
 
 
 def test_macos_env_fallback_and_the_flag_wins(tmp_path):
-    r, _ = run_mac(tmp_path, extra_env={'CCP_REPO_REF': 'v1.0.1'})
+    r, _ = run_mac(tmp_path, extra_env={'CPG_REPO_REF': 'v1.0.1'})
     assert r.returncode == 0 and '\n  REF=v1.0.1\n' in r.stdout
-    r, _ = run_mac(tmp_path, '--ref', 'release-1.0.2', extra_env={'CCP_REPO_REF': 'v1.0.1'})
+    r, _ = run_mac(tmp_path, '--ref', 'release-1.0.2', extra_env={'CPG_REPO_REF': 'v1.0.1'})
     assert r.returncode == 0 and '\n  REF=release-1.0.2\n' in r.stdout and 'v1.0.1' not in r.stdout
     r, _ = run_mac(tmp_path)
     assert r.returncode == 0 and "\n  REF=''\n" in r.stdout, 'no ref: the default branch, as before'
@@ -203,7 +203,7 @@ def fake_wsl(tmp_path):
 
 def run_win(tmp_path, *args, extra_env=None):
     b, log = fake_wsl(tmp_path)
-    env = {k: v for k, v in os.environ.items() if k != 'CCP_REPO_REF'}
+    env = {k: v for k, v in os.environ.items() if k != 'CPG_REPO_REF'}
     env.update(PATH=f"{b}:{os.environ['PATH']}", TMPDIR=str(tmp_path), **(extra_env or {}))
     r = subprocess.run([PWSH, '-NoProfile', '-File', str(WIN), '-DryRun', *args], capture_output=True, text=True,
                        env=env, timeout=180)
@@ -217,15 +217,15 @@ def test_windows_rejects_unsafe_refs_before_anything_runs(tmp_path):
         r, log = run_win(d, '-Ref', ref)
         assert r.returncode == 2 and '-Ref:' in r.stdout, (ref, r.stdout, r.stderr)
         assert not log.exists(), (ref, 'wsl.exe was called')
-    r, log = run_win(tmp_path / '0', extra_env={'CCP_REPO_REF': 'x;touch /tmp/p'})
+    r, log = run_win(tmp_path / '0', extra_env={'CPG_REPO_REF': 'x;touch /tmp/p'})
     assert r.returncode == 2 and '-Ref:' in r.stdout
 
 
 @needs_pwsh
 def test_windows_dry_run_env_fallback_and_the_parameter_wins(tmp_path):
     for i, (args, env, want) in enumerate([(['-Ref', 'release-1.0.2'], {}, "REF='release-1.0.2'"),
-                                           ([], {'CCP_REPO_REF': 'v1.0.1'}, "REF='v1.0.1'"),
-                                           (['-Ref', 'release-1.0.2'], {'CCP_REPO_REF': 'v1.0.1'}, "REF='release-1.0.2'"),
+                                           ([], {'CPG_REPO_REF': 'v1.0.1'}, "REF='v1.0.1'"),
+                                           (['-Ref', 'release-1.0.2'], {'CPG_REPO_REF': 'v1.0.1'}, "REF='release-1.0.2'"),
                                            ([], {}, "REF=''")]):
         d = tmp_path / str(i); d.mkdir()
         r, _ = run_win(d, *args, extra_env=env)
@@ -249,7 +249,7 @@ $funcs = $src.Substring($src.IndexOf('function Say'), $src.IndexOf('# 0. The ref
 $Distro = "ClaudeProjects"; $DryRun = $false
 Invoke-Expression $funcs
 if (Get-RefProblem $Ref) { throw "rejected $Ref" }
-Invoke-WslScript ccp (Get-FetchScript $Url $Ref) -Login
+Invoke-WslScript cpg (Get-FetchScript $Url $Ref) -Login
 ''' % WIN)
     env = {**os.environ, **GIT_ENV, 'PATH': f"{b}:{os.environ['PATH']}", 'HOME': str(home), 'TMPDIR': str(tmp_path)}
     for ref, want in (('release-1.0.2', shas['release']), ('v1.0.1', shas['main1']), (shas['main0'], shas['main0'])):
@@ -264,7 +264,7 @@ Invoke-WslScript ccp (Get-FetchScript $Url $Ref) -Login
 def test_docs_explain_the_ref():
     for f in ('docs/hosts.md', 'skill/references/macos.md', 'skill/references/windows.md'):
         t = (REPO / f).read_text()
-        assert 'release-1.0.2' in t and 'CCP_REPO_REF' in t, f
+        assert 'release-1.0.2' in t and 'CPG_REPO_REF' in t, f
     assert '--ref release-1.0.2' in (REPO / 'skill/references/macos.md').read_text()
     assert '-Ref release-1.0.2' in (REPO / 'skill/references/windows.md').read_text()
     assert '--ref' in MAC.read_text().split('set -euo pipefail')[0] and '-Ref REF' in WIN.read_text().split('#>')[0]

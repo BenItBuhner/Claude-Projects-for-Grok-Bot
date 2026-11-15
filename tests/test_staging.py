@@ -2,8 +2,8 @@
 import base64, os, pathlib, sys, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import ccp_staging as S
-import ccp_core as C
+import cpg_staging as S
+import cpg_core as C
 
 
 def test_unique_slots_keep_name(tmp_path):

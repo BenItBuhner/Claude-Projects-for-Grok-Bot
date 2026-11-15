@@ -3,7 +3,7 @@
 # process supervisor on hosts without it, such as a container whose PID 1 is tini).
 #
 # Run it ON THE COMPUTER THAT WILL RUN CLAUDE CODE. It sets up a private headless display (the app's own
-# "viewport"), the official Claude desktop app, the ccp CLI and the MCP server. Idempotent: re-run any time.
+# "viewport"), the official Claude desktop app, the claude-projects CLI and the MCP server. Idempotent: re-run any time.
 #
 # Only two things need a person:
 #   1. choosing this computer (you are running the script here), and
@@ -14,21 +14,24 @@
 #                [--service-mode auto|systemd|process] [--claude-md] [--dry-run] [--uninstall] [--apt-only]
 #   --no-http    no HTTP MCP server (agents connect over stdio); remembered in the config until --http
 #   --mcp-port   port for the HTTP MCP server (default 8791; remembered in the config)
-#   --service-mode  auto (default): user systemd when it is running, else the process supervisor (ccp_proc.py)
-#   --claude-md  also add the origin-bracket note (CLAUDE.md) to ~/.claude/CLAUDE.md for local Claude Code sessions
+#   --service-mode  auto (default): user systemd when it is running, else the process supervisor (cpg_proc.py)
+#   --claude-md  also add the origin-bracket note (AGENTS.md) to ~/.claude/CLAUDE.md for local Claude Code sessions
 #   --apt-only   only install the system packages and the Claude app, then stop (run it with sudo when sudo needs a
 #                password the agent can't type: sudo ./install.sh --apt-only; then the agent runs ./install.sh --no-apt)
-# The agent-driven setup flow wraps this script: ccp setup status (see skill/SKILL.md, Part A).
+# The agent-driven setup flow wraps this script: claude-projects setup status (see skill/SKILL.md, Part A).
 set -euo pipefail
 USER="${USER:-$(id -un)}"   # unset in some containers (docker exec)
 
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-CONFIG_DIR="${CCP_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp}"
-CONFIG_FILE="${CCP_CONFIG:-$CONFIG_DIR/config.json}"
+# CCP_* are the old names of the CPG_* variables (before 1.0.2) and still work; the CPG_* name wins
+for k in $(compgen -e); do case "$k" in CCP_*) n="CPG_${k#CCP_}"; [ -n "${!n+x}" ] || export "$n=${!k}";; esac; done
+CONFIG_DIR="${CPG_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp}"
+CONFIG_FILE="${CPG_CONFIG:-$CONFIG_DIR/config.json}"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 DISPLAY_ID=":99"; BOT_NAME=""; OPERATOR=""; TZ_NAME=""; SCREEN="540x1170"; VIEWPORT_BIND="127.0.0.1"
 DO_APT=1; HTTP_OPT=""; MCP_PORT_OPT=""; MODE_OPT=auto; DRY=0; UNINSTALL=0; CLAUDE_MD=0; APT_ONLY=0
-UNITS=(ccp-xvfb ccp-wm ccp-keyring ccp-claude-desktop ccp-vnc ccp-novnc ccp-mcp)
+UNITS=(cpg-xvfb cpg-wm cpg-keyring cpg-claude-desktop cpg-vnc cpg-novnc cpg-mcp)
+OLD_UNITS=(ccp-xvfb ccp-wm ccp-keyring ccp-claude-desktop ccp-vnc ccp-novnc ccp-mcp ccp-refresh)   # the names before 1.0.2
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -61,7 +64,7 @@ say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 run() { if [ "$DRY" = 1 ]; then echo "    [dry-run] $*"; else "$@"; fi; }
 cfg_get() { python3 -c "import json,sys;v=json.load(open(sys.argv[1])).get(sys.argv[2]);print('' if v is None else (str(v).lower() if isinstance(v,bool) else v))" "$CONFIG_FILE" "$1" 2>/dev/null || true; }
 
-# How the services run: user systemd when its manager answers, else the plugin's own supervisor (ccp_proc.py).
+# How the services run: user systemd when its manager answers, else the plugin's own supervisor (cpg_proc.py).
 # A machine that boots with systemd but whose user manager isn't up yet is fixed by logging in once (or linger),
 # not by switching modes.
 pid1="$(cat /proc/1/comm 2>/dev/null || echo unknown)"
@@ -74,13 +77,29 @@ if [ "$MODE" = auto ]; then
     else MODE=process; fi
   fi
 fi
-SVC() { if [ "$MODE" = process ]; then python3 "$REPO/ccp_proc.py" "$@"; else systemctl --user "$@"; fi; }
-unit_log_hint() { if [ "$MODE" = process ]; then echo "tail -n 50 ${CCP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-projects-mcp}/proc/logs/$1.log"; else echo "journalctl --user -u $1 -n 50"; fi; }
+SVC() { if [ "$MODE" = process ]; then python3 "$REPO/cpg_proc.py" "$@"; else systemctl --user "$@"; fi; }
+# An install from before 1.0.2 has the same services as ccp-*: stop and remove those before the cpg-* ones start, so
+# the two sets never run side by side (same display and ports). Config, sign-in and state are shared and kept.
+remove_old_units() {
+  local u found=0
+  for u in "${OLD_UNITS[@]}"; do [ -f "$UNIT_DIR/$u.service" ] && found=1; done
+  [ "$found" = 1 ] || return 0
+  say "Moving the services to their new names (ccp-* -> cpg-*)"
+  run SVC disable --now ccp-refresh.timer 2>/dev/null || true
+  for u in "${OLD_UNITS[@]}"; do
+    [ -f "$UNIT_DIR/$u.service" ] || continue
+    run SVC disable --now "$u.service" 2>/dev/null || true; run rm -f "$UNIT_DIR/$u.service"
+  done
+  run rm -f "$UNIT_DIR/ccp-refresh.timer"
+  if [ "$MODE" = systemd ]; then run SVC daemon-reload || true; fi
+}
+unit_log_hint() { if [ "$MODE" = process ]; then echo "tail -n 50 ${CPG_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-projects-mcp}/proc/logs/$1.log"; else echo "journalctl --user -u $1 -n 50"; fi; }
 
 if [ "$UNINSTALL" = 1 ]; then
   say "Stopping and removing user services (config, sign-in and state are kept)"
   for u in "${UNITS[@]}"; do run SVC disable --now "$u.service" 2>/dev/null || true; run rm -f "$UNIT_DIR/$u.service"; done
-  run SVC disable --now ccp-refresh.timer 2>/dev/null || true; run rm -f "$UNIT_DIR/ccp-refresh.service" "$UNIT_DIR/ccp-refresh.timer"
+  run SVC disable --now cpg-refresh.timer 2>/dev/null || true; run rm -f "$UNIT_DIR/cpg-refresh.service" "$UNIT_DIR/cpg-refresh.timer"
+  remove_old_units
   if [ "$MODE" = process ]; then run SVC down || true; else run SVC daemon-reload || true; fi
   echo "Remove $CONFIG_DIR and ~/.local/state/claude-projects-mcp yourself if you also want the config and cache gone."
   exit 0
@@ -96,10 +115,10 @@ PKGS=(xvfb xauth xfonts-base fonts-dejavu-core fonts-liberation openbox x11vnc n
       poppler-utils curl gnupg git ca-certificates)
 APT_INSTALL=(apt-get install -y -qq --no-install-recommends)
 # The first of firefox-esr / chromium that apt can really install here (a candidate other than "(none)"), or nothing.
-# CCP_BROWSER_CANDIDATES overrides the list (tests).
+# CPG_BROWSER_CANDIDATES overrides the list (tests).
 apt_browser_pkg() {
   local p c
-  for p in ${CCP_BROWSER_CANDIDATES:-firefox-esr chromium}; do
+  for p in ${CPG_BROWSER_CANDIDATES:-firefox-esr chromium}; do
     c="$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
     if [ -n "$c" ] && [ "$c" != "(none)" ]; then echo "$p"; return 0; fi
   done
@@ -122,7 +141,7 @@ if [ "$DO_APT" = 1 ]; then
     if ! "$REPO/bin/claude-signin-browser" --check >/dev/null 2>&1 && command -v snap >/dev/null && snap version >/dev/null 2>&1; then
       run $SUDO snap install chromium || true
     fi
-    "$REPO/bin/claude-signin-browser" --check >/dev/null 2>&1 || echo "    warning: no usable sign-in browser yet; ccp setup signin start will say how to add one" >&2
+    "$REPO/bin/claude-signin-browser" --check >/dev/null 2>&1 || echo "    warning: no usable sign-in browser yet; claude-projects setup signin start will say how to add one" >&2
   fi
   if ! command -v claude-desktop >/dev/null 2>&1; then
     say "Installing the official Claude desktop app from Anthropic's apt repository"
@@ -152,7 +171,7 @@ if [ "$MODE" = systemd-unreachable ]; then
   exit 3
 fi
 if [ "$MODE" = process ]; then
-  say "Service mode: process (no user systemd here; PID 1 is $pid1). ccp_proc.py runs the services."
+  say "Service mode: process (no user systemd here; PID 1 is $pid1). cpg_proc.py runs the services."
   command -v dbus-daemon >/dev/null 2>&1 || [ "$DRY" = 1 ] || { echo "dbus-daemon is missing (apt package dbus)" >&2; exit 3; }
 else
   say "Service mode: systemd (user units)"
@@ -170,13 +189,13 @@ say "Writing $CONFIG_FILE"
 run mkdir -p "$CONFIG_DIR"; run chmod 700 "$CONFIG_DIR"
 if [ "$DRY" = 0 ]; then
   [ -z "$TZ_NAME" ] && TZ_NAME="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
-  CCP_REPO="$REPO" CCP_CFG="$CONFIG_FILE" CCP_DISP="$DISPLAY_ID" CCP_BN="$BOT_NAME" CCP_OP="$OPERATOR" CCP_TZ="$TZ_NAME" \
-  CCP_VNC_PORT="$VNC_PORT" CCP_NOVNC_PORT="$NOVNC_PORT" CCP_SCREEN="$SCREEN" CCP_VBIND="$VIEWPORT_BIND" \
-  CCP_HTTP="$HTTP_OPT" CCP_MCPPORT="$MCP_PORT_OPT" CCP_MODE="$MODE" \
+  CPG_REPO="$REPO" CPG_CFG="$CONFIG_FILE" CPG_DISP="$DISPLAY_ID" CPG_BN="$BOT_NAME" CPG_OP="$OPERATOR" CPG_TZ="$TZ_NAME" \
+  CPG_VNC_PORT="$VNC_PORT" CPG_NOVNC_PORT="$NOVNC_PORT" CPG_SCREEN="$SCREEN" CPG_VBIND="$VIEWPORT_BIND" \
+  CPG_HTTP="$HTTP_OPT" CPG_MCPPORT="$MCP_PORT_OPT" CPG_MODE="$MODE" \
   "$REPO/.venv/bin/python" - <<'PY'
 import json, os, pathlib
-p = pathlib.Path(os.environ['CCP_CFG']); cfg = json.loads(p.read_text()) if p.is_file() else {}
-repo = os.environ['CCP_REPO']
+p = pathlib.Path(os.environ['CPG_CFG']); cfg = json.loads(p.read_text()) if p.is_file() else {}
+repo = os.environ['CPG_REPO']
 # viewer_ports: the ports this installer gives x11vnc and noVNC, so the "pause while someone watches" check is explicit in
 # the config. Ports set by hand are kept; ports that were the old display's defaults follow a --display change.
 def _defaults(disp):
@@ -185,18 +204,18 @@ def _defaults(disp):
     return [5900 + n, 6080 + n]
 old_ports = [int(x) for x in (cfg.get('viewer_ports') or [])]
 if not old_ports or old_ports == _defaults(cfg.get('display')):
-    cfg['viewer_ports'] = [int(os.environ['CCP_VNC_PORT']), int(os.environ['CCP_NOVNC_PORT'])]
-cfg.update({'display': os.environ['CCP_DISP'], 'launcher': f'{repo}/bin/claude-desktop-launch', 'idb_python': f'{repo}/.venv/bin/python'})
-cfg.update({'screen': os.environ.get('CCP_SCREEN') or '540x1170', 'viewport_bind': os.environ.get('CCP_VBIND') or '127.0.0.1'})
-# new installs keep the noVNC viewport off except while someone signs in (ccp setup signin); existing ones keep theirs
+    cfg['viewer_ports'] = [int(os.environ['CPG_VNC_PORT']), int(os.environ['CPG_NOVNC_PORT'])]
+cfg.update({'display': os.environ['CPG_DISP'], 'launcher': f'{repo}/bin/claude-desktop-launch', 'idb_python': f'{repo}/.venv/bin/python'})
+cfg.update({'screen': os.environ.get('CPG_SCREEN') or '540x1170', 'viewport_bind': os.environ.get('CPG_VBIND') or '127.0.0.1'})
+# new installs keep the noVNC viewport off except while someone signs in (claude-projects setup signin); existing ones keep theirs
 cfg.setdefault('viewport_mode', 'on-demand' if not p.is_file() else 'always')
 # new installs get their own keyring folder, so an existing desktop login.keyring is never asked to unlock; existing
 # installs keep theirs (the app's sign-in is stored in it)
 cfg.setdefault('keyring_data_dir', str(pathlib.Path.home() / '.local/share/claude-projects-mcp/keyring') if not p.is_file() else '')
-if os.environ.get('CCP_MODE'): cfg['service_mode'] = os.environ['CCP_MODE']
-if os.environ.get('CCP_HTTP'): cfg['mcp_http'] = os.environ['CCP_HTTP'] == '1'
-if os.environ.get('CCP_MCPPORT'): cfg['mcp_port'] = int(os.environ['CCP_MCPPORT'])
-for env, key in (('CCP_BN', 'bot_name'), ('CCP_OP', 'operator_name'), ('CCP_TZ', 'timezone')):
+if os.environ.get('CPG_MODE'): cfg['service_mode'] = os.environ['CPG_MODE']
+if os.environ.get('CPG_HTTP'): cfg['mcp_http'] = os.environ['CPG_HTTP'] == '1'
+if os.environ.get('CPG_MCPPORT'): cfg['mcp_port'] = int(os.environ['CPG_MCPPORT'])
+for env, key in (('CPG_BN', 'bot_name'), ('CPG_OP', 'operator_name'), ('CPG_TZ', 'timezone')):
     if os.environ.get(env): cfg[key] = os.environ[env]
 cfg.setdefault('environment_labels', {}); cfg.setdefault('environment_ids', {})
 p.write_text(json.dumps(cfg, indent=2) + '\n'); os.chmod(p, 0o600)
@@ -221,6 +240,7 @@ KEYRING_DIR="$(cfg_get keyring_data_dir)"
 if [ -n "$KEYRING_DIR" ]; then KEYRING_ENV="Environment=XDG_DATA_HOME=$KEYRING_DIR"; run mkdir -p "$KEYRING_DIR"; run chmod 700 "$KEYRING_DIR"
 else KEYRING_ENV="; keyring: the default data dir (an install from before private keyrings)"; fi
 run mkdir -p "$UNIT_DIR"
+remove_old_units
 for f in "$REPO"/systemd/*; do
   out="$UNIT_DIR/$(basename "$f")"
   if [ "$DRY" = 1 ]; then echo "    [dry-run] render $(basename "$f") -> $out"; continue; fi
@@ -232,22 +252,22 @@ for f in "$REPO"/systemd/*; do
 done
 [ "$MODE" = process ] && { run SVC up || { echo "the process supervisor did not start; see its log under the state dir (proc/supervisor.log)" >&2; exit 4; }; }
 run SVC daemon-reload
-START=(ccp-xvfb ccp-wm ccp-keyring ccp-vnc ccp-novnc ccp-claude-desktop); [ "$DO_HTTP" = 1 ] && START+=(ccp-mcp)
+START=(cpg-xvfb cpg-wm cpg-keyring cpg-vnc cpg-novnc cpg-claude-desktop); [ "$DO_HTTP" = 1 ] && START+=(cpg-mcp)
 FAILED=()
 for u in "${START[@]}"; do run SVC enable --now "$u.service" || FAILED+=("$u"); done
-if [ "$DO_HTTP" = 0 ]; then run SVC disable --now ccp-mcp.service >/dev/null 2>&1 || true; fi   # stdio only: no HTTP server
-run SVC enable --now ccp-refresh.timer || FAILED+=(ccp-refresh.timer)
+if [ "$DO_HTTP" = 0 ]; then run SVC disable --now cpg-mcp.service >/dev/null 2>&1 || true; fi   # stdio only: no HTTP server
+run SVC enable --now cpg-refresh.timer || FAILED+=(cpg-refresh.timer)
 if [ "$MODE" = systemd ]; then
   command -v loginctl >/dev/null && run loginctl enable-linger "$USER" 2>/dev/null || true   # keep services up without a login session
 fi
 
 # ---------------------------------------------------------------- 4b. optional: bracket note for local Claude Code sessions
 if [ "$CLAUDE_MD" = 1 ]; then
-  say "Adding the origin-bracket note to ~/.claude/CLAUDE.md"
+  say "Adding the origin-bracket note (AGENTS.md) to ~/.claude/CLAUDE.md"
   if [ "$DRY" = 0 ]; then
     mkdir -p "$HOME/.claude"; touch "$HOME/.claude/CLAUDE.md"
     if ! grep -q 'BEGIN claude-projects-mcp origin' "$HOME/.claude/CLAUDE.md"; then
-      { printf '\n<!-- BEGIN claude-projects-mcp origin -->\n'; cat "$REPO/CLAUDE.md"; printf '<!-- END claude-projects-mcp origin -->\n'; } >> "$HOME/.claude/CLAUDE.md"
+      { printf '\n<!-- BEGIN claude-projects-mcp origin -->\n'; cat "$REPO/AGENTS.md"; printf '<!-- END claude-projects-mcp origin -->\n'; } >> "$HOME/.claude/CLAUDE.md"
     fi
   fi
 fi
@@ -257,9 +277,9 @@ if [ "$DRY" = 0 ]; then
   sleep 8
   say "Self-check"
   for u in "${START[@]}"; do printf '    %-22s %s\n' "$u" "$(SVC is-active "$u.service" 2>/dev/null || true)"; done
-  "$REPO/ccp" --json origin --message "self-check" >/dev/null && echo "    origin bracket          ok"
+  "$REPO/claude-projects" --json origin --message "self-check" >/dev/null && echo "    origin bracket          ok"
   if [ "$DO_HTTP" = 1 ]; then
-    curl -fsS "http://127.0.0.1:$MCP_PORT/healthz" >/dev/null 2>&1 && echo "    mcp /healthz            ok" || echo "    mcp /healthz            not up yet (check: $(unit_log_hint ccp-mcp))"
+    curl -fsS "http://127.0.0.1:$MCP_PORT/healthz" >/dev/null 2>&1 && echo "    mcp /healthz            ok" || echo "    mcp /healthz            not up yet (check: $(unit_log_hint cpg-mcp))"
   fi
 fi
 if [ ${#FAILED[@]} -gt 0 ] && [ "$DRY" = 0 ]; then
@@ -274,7 +294,7 @@ cat <<MSG
 Installed (services: $MODE). Two steps need you:
 
   1. This computer is now the one that runs Claude Code (display $DISPLAY_ID). Nothing else to choose.
-  2. Sign in to Claude once inside the viewport (the guided way: $REPO/ccp setup signin start):
+  2. Sign in to Claude once inside the viewport (the guided way: $REPO/claude-projects setup signin start):
        - on this computer, open   http://$VIEWPORT_BIND:$NOVNC_PORT/vnc.html
          or from another one:     ssh -L $NOVNC_PORT:127.0.0.1:$NOVNC_PORT $USER@$(hostname)   then open http://127.0.0.1:$NOVNC_PORT/vnc.html
        - VNC password: in $CONFIG_DIR/vncpass.txt (read it there; it is never printed)
@@ -282,9 +302,9 @@ Installed (services: $MODE). Two steps need you:
          same viewport. If it shows a claude:// link instead of returning to the app:  $REPO/bin/claude-open-url 'claude://...'
        - close the viewer tab when done (UI actions pause while a viewer is connected).
 
-Then check:  $REPO/ccp status       (signed_in: true)
+Then check:  $REPO/claude-projects status       (signed_in: true)
 
 Connect an MCP client:
-  stdio (same machine or over SSH):  $REPO/.venv/bin/python $REPO/ccp_mcp.py --stdio
+  stdio (same machine or over SSH):  $REPO/.venv/bin/python $REPO/cpg_mcp.py --stdio
 $HTTP_LINE
 MSG

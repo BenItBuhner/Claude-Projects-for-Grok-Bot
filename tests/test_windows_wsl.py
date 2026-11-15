@@ -25,7 +25,7 @@ def fake(tmp_path, replies):
         (d / f'{key}.code').write_text(str(code))
     env = {**os.environ, 'PATH': f"{b}:{os.environ['PATH']}", 'FAKE_WSL_DIR': str(d), 'FAKE_WSL_NO_EXEC': '1',
            'TMPDIR': str(tmp_path)}
-    env.pop('CCP_REPO_REF', None)
+    env.pop('CPG_REPO_REF', None)
     return env, tmp_path / 'fake-wsl-argv.log'
 
 

@@ -20,7 +20,7 @@ jobs:
       - name: pytest
         run: .venv/bin/python -m pytest -q
       - name: ShellCheck
-        run: shellcheck -S warning install.sh ccp bin/* hosts/macos/setup.sh hosts/macos/ccp
+        run: shellcheck -S warning install.sh claude-projects ccp bin/* hosts/macos/setup.sh hosts/macos/claude-projects hosts/macos/ccp tests/fixtures/fake-wsl.exe
   powershell:
     runs-on: ubuntu-24.04
     steps:

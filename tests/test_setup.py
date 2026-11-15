@@ -1,25 +1,25 @@
-"""Guided setup flow (ccp_setup.py): beta verdicts, host classes, the status state machine, sign-in, tidy, MCP tool.
-No app, display, systemd or network: RUN (shell) and CCP (`ccp --json ...`) are replaced with fakes."""
+"""Guided setup flow (cpg_setup.py): beta verdicts, host classes, the status state machine, sign-in, tidy, MCP tool.
+No app, display, systemd or network: RUN (shell) and CLI (`claude-projects --json ...`) are replaced with fakes."""
 import asyncio, json, os, pathlib, re, sys, time
 import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import ccp_setup as S
+import cpg_setup as S
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
 class Fake:
-    """Records shell calls; answers ccp --json calls from a dict of command -> result (or list of results, in order)."""
-    def __init__(self, ccp=None, run=None):
-        self.ccp = dict(ccp or {}); self.runs = []; self.ccp_calls = []; self.run_map = run or {}
+    """Records shell calls; answers claude-projects --json calls from a dict of command -> result (or list of results, in order)."""
+    def __init__(self, cli=None, run=None):
+        self.cli = dict(cli or {}); self.runs = []; self.cli_calls = []; self.run_map = run or {}
     def RUN(self, cmd, timeout=60, env=None, input=None):
         self.runs.append(list(cmd))
         for k, v in self.run_map.items():
             if k in ' '.join(cmd): return v
         return 0, '', ''
-    def CCP(self, args, timeout=180):
-        self.ccp_calls.append(list(args)); r = self.ccp.get(args[0], {})
+    def CLI(self, args, timeout=180):
+        self.cli_calls.append(list(args)); r = self.cli.get(args[0], {})
         if isinstance(r, list): return r.pop(0) if len(r) > 1 else r[0]
         return r
 
@@ -31,7 +31,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(S, 'STATE_DIR', st); monkeypatch.setattr(S, 'STATE_FILE', st / 'setup.json')
     monkeypatch.setattr(S, 'CONFIG_DIR', cfgd); monkeypatch.setattr(S, 'UNIT_DIR', units)
     monkeypatch.setattr(S.time, 'sleep', lambda s: None)
-    f = Fake(); monkeypatch.setattr(S, 'RUN', f.RUN); monkeypatch.setattr(S, 'CCP', f.CCP)
+    f = Fake(); monkeypatch.setattr(S, 'RUN', f.RUN); monkeypatch.setattr(S, 'CLI', f.CLI)
     monkeypatch.setattr(S, 'CFG', dict(S.CFG, viewport_mode='on-demand'))
     return f
 
@@ -59,24 +59,24 @@ def test_beta_verdict(probe, verdict):
 
 
 def test_check_beta_no_projects_stays_idle(env):
-    env.ccp['probe-projects'] = {'signed_in': True, 'sidebar_entry': None, 'browse_route_ok': False, 'project_list_cached': False}
+    env.cli['probe-projects'] = {'signed_in': True, 'sidebar_entry': None, 'browse_route_ok': False, 'project_list_cached': False}
     r = S.cmd_check_beta(args(force=False))
     assert r['verdict'] == 'no_projects' and r['has_projects'] is False
     assert "doesn't have Claude Code Projects" in r['tell_user'] and 'uninstall' not in r['tell_user'].lower()
-    assert ['systemctl', '--user', 'disable', '--now', 'ccp-refresh.timer'] in env.runs
+    assert ['systemctl', '--user', 'disable', '--now', 'cpg-refresh.timer'] in env.runs
     assert S.load_state()['beta']['verdict'] == 'no_projects'
 
 
 def test_check_beta_has_projects_turns_refresh_on(env):
-    env.ccp['probe-projects'] = {'signed_in': True, 'sidebar_entry': 'Projects Beta', 'browse_route_ok': True, 'project_list_cached': True, 'project_count': 2}
+    env.cli['probe-projects'] = {'signed_in': True, 'sidebar_entry': 'Projects Beta', 'browse_route_ok': True, 'project_list_cached': True, 'project_count': 2}
     r = S.cmd_check_beta(args(force=False))
     assert r['verdict'] == 'has_projects' and 'tell_user' not in r
-    assert ['systemctl', '--user', 'enable', '--now', 'ccp-refresh.timer'] in env.runs
+    assert ['systemctl', '--user', 'enable', '--now', 'cpg-refresh.timer'] in env.runs
 
 
 def test_check_beta_unknown_takes_screenshot(env):
-    env.ccp['probe-projects'] = {'signed_in': True, 'sidebar_entry': 'Projects', 'browse_route_ok': False}
-    env.ccp['screenshot'] = {'file': '/tmp/x.jpg'}
+    env.cli['probe-projects'] = {'signed_in': True, 'sidebar_entry': 'Projects', 'browse_route_ok': False}
+    env.cli['screenshot'] = {'file': '/tmp/x.jpg'}
     r = S.cmd_check_beta(args(force=False))
     assert r['verdict'] == 'unknown' and r['screenshot'] == '/tmp/x.jpg'
 
@@ -130,7 +130,7 @@ def test_preflight_records_state(env, monkeypatch):
 def _installed(monkeypatch, units=True):
     monkeypatch.setattr(S, 'installed', lambda: True); monkeypatch.setattr(S, 'layout', lambda: 'standard')
     monkeypatch.setattr(S, 'unit_active', lambda u: units)
-    for u in S.ALL_UNITS: (S.UNIT_DIR / f'{u}.service').write_text('[Service]\nExecStart=/bin/true\n')
+    for u in S.all_units(): (S.UNIT_DIR / f'{u}.service').write_text('[Service]\nExecStart=/bin/true\n')
 
 
 def test_status_start_asks_host_question(env):
@@ -168,7 +168,7 @@ def test_status_unhealthy(env, monkeypatch):
     ({'signed_in': True}, {'beta': {'verdict': 'has_projects'}, 'connected': {'transport': 'ssh'}, 'verify': {'result': 'warn', 'live': True}}, 'ready'),
 ])
 def test_status_after_install(env, monkeypatch, app, state_extra, expected):
-    _installed(monkeypatch); env.ccp['status'] = app
+    _installed(monkeypatch); env.cli['status'] = app
     S.save_state(dict({'host': {'class': 'always_on_linux'}}, **state_extra))
     r = S.compute_status()
     assert r['state'] == expected
@@ -178,7 +178,7 @@ def test_status_after_install(env, monkeypatch, app, state_extra, expected):
 
 
 def test_status_via_mcp_records_connection(env, monkeypatch):
-    _installed(monkeypatch); env.ccp['status'] = {'signed_in': True}
+    _installed(monkeypatch); env.cli['status'] = {'signed_in': True}
     S.save_state({'beta': {'verdict': 'has_projects'}})
     r = S.cmd_status(args(via_mcp=True))
     assert r['state'] == 'verifying' and S.load_state()['connected']['transport'] == 'mcp'
@@ -219,38 +219,38 @@ def test_install_runs_installer_without_apt_when_packages_present(env, monkeypat
 def test_signin_start_never_prints_the_password(env):
     env.run_map['is-active'] = (0, 'active', '')
     (S.CONFIG_DIR / 'vncpass.txt').write_text('s3cretPW')
-    env.ccp['status'] = {'signed_in': False, 'route': '/login', 'vnc_viewers': 0}
+    env.cli['status'] = {'signed_in': False, 'route': '/login', 'vnc_viewers': 0}
     r = S.cmd_signin_start(args(switch=False, public_url=None))
     blob = json.dumps(r)
     assert 's3cretPW' not in blob and str(S.CONFIG_DIR / 'vncpass.txt') in blob
     assert r['result'] == 'awaiting_signin' and '/vnc.html' in r['links']['on_this_machine'] and 'ssh -N -L' in r['links']['from_another_computer']
-    assert ['systemctl', '--user', 'enable', '--now', 'ccp-novnc.service'] in env.runs
+    assert ['systemctl', '--user', 'enable', '--now', 'cpg-novnc.service'] in env.runs
     assert 'claude-open-url' in r['if_stuck_on_claude_link']
 
 
 def test_signin_start_when_already_signed_in(env):
-    env.ccp['status'] = {'signed_in': True}
+    env.cli['status'] = {'signed_in': True}
     assert S.cmd_signin_start(args(switch=False, public_url=None))['result'] == 'already_signed_in'
 
 
 def test_signin_wait_then_viewport_off(env, monkeypatch):
-    env.ccp['status'] = [{'signed_in': False}, {'signed_in': True, 'vnc_viewers': 1}, {'signed_in': True, 'vnc_viewers': 0}]
+    env.cli['status'] = [{'signed_in': False}, {'signed_in': True, 'vnc_viewers': 1}, {'signed_in': True, 'vnc_viewers': 0}]
     S.save_state({'beta': {'verdict': 'no_projects'}})
     r = S.cmd_signin_wait(args(timeout=60, poll=1, close_timeout=60))
-    assert r['result'] == 'signed_in' and r['viewport']['viewport'] == 'off' and r['next_action'] == 'ccp setup check-beta'
-    assert ['systemctl', '--user', 'disable', '--now', 'ccp-novnc.service'] in env.runs
+    assert r['result'] == 'signed_in' and r['viewport']['viewport'] == 'off' and r['next_action'] == 'claude-projects setup check-beta'
+    assert ['systemctl', '--user', 'disable', '--now', 'cpg-novnc.service'] in env.runs
     assert 'beta' not in S.load_state(), 'a new sign-in (maybe another account) must re-check Projects'
 
 
 def test_signin_wait_timeout(env, monkeypatch):
-    env.ccp['status'] = {'signed_in': False, 'route': '/login'}
+    env.cli['status'] = {'signed_in': False, 'route': '/login'}
     clock = iter(range(0, 10_000, 400)); monkeypatch.setattr(S.time, 'time', lambda: next(clock))
     r = S.cmd_signin_wait(args(timeout=900, poll=30, close_timeout=60))
     assert r['result'] == 'signin_timeout'
 
 
 def test_viewport_off_refuses_while_watched(env):
-    env.ccp['status'] = {'vnc_viewers': 1}
+    env.cli['status'] = {'vnc_viewers': 1}
     r = S.viewport(False)
     assert 'refused' in r and not any('disable' in c for c in env.runs)
 
@@ -259,15 +259,15 @@ def test_viewport_off_refuses_while_watched(env):
 
 def test_tidy_dry_run_then_apply(env):
     (S.STATE_DIR / 'ui.holder').write_text(json.dumps({'pid': 999999999, 'op': 'send'}))
-    old = S.STATE_DIR / '.ccp-idb-abc'; old.mkdir(); os.utime(old, (time.time() - 7200, time.time() - 7200))
-    env.ccp['staging'] = {'dry_run': True, 'removed_count': 0}; env.ccp['status'] = {'signed_in': True}
+    old = S.STATE_DIR / '.cpg-idb-abc'; old.mkdir(); os.utime(old, (time.time() - 7200, time.time() - 7200))
+    env.cli['staging'] = {'dry_run': True, 'removed_count': 0}; env.cli['status'] = {'signed_in': True}
     r = S.cmd_tidy(args(apply=False))
     assert r['dry_run'] and (S.STATE_DIR / 'ui.holder').exists() and old.exists()
     assert {a['what'].split(' (')[0] for a in r['actions']} >= {'staging sweep', 'stale UI-lock holder record'}
     r = S.cmd_tidy(args(apply=True))
     assert not (S.STATE_DIR / 'ui.holder').exists() and not old.exists()
-    assert ['staging', 'sweep', '--apply'] in env.ccp_calls
-    assert not any('ccp-claude-desktop' in ' '.join(c) for c in env.runs), 'tidy never touches the app'
+    assert ['staging', 'sweep', '--apply'] in env.cli_calls
+    assert not any('cpg-claude-desktop' in ' '.join(c) for c in env.runs), 'tidy never touches the app'
 
 
 # ---------------------------------------------------------------- uninstall, connect
@@ -288,13 +288,13 @@ def test_connect_box_recommends_same_host(env):
 
 def test_claude_setup_tool(monkeypatch):
     pytest.importorskip('mcp')
-    import ccp_mcp as M
+    import cpg_mcp as M
     seen = []
     async def fake_run(a, timeout=900, **kw): seen.append(a); return {'ok': True}
     monkeypatch.setattr(M, 'run', fake_run)
     asyncio.run(M.claude_setup('verify', live=True)); asyncio.run(M.claude_setup('tidy'))
     assert seen == [['setup', '--via-mcp', 'verify', '--live'], ['setup', '--via-mcp', 'tidy']]
-    assert asyncio.run(M.claude_setup('uninstall'))['error'] == 'CCPError'
+    assert asyncio.run(M.claude_setup('uninstall'))['error'] == 'CPGError'
 
 
 def test_readme_has_one_prompt_with_public_url():
@@ -303,17 +303,17 @@ def test_readme_has_one_prompt_with_public_url():
     assert len(blocks) == 1, 'exactly one copy-paste prompt'
     p = blocks[0]
     assert 'https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot' in p and 'claude-projects-mcp\n' not in p
-    assert 'Part A' in p and 'ccp setup status' in p and 'test messages' in p and 'Claude Code Projects' in p
+    assert 'Part A' in p and 'claude-projects setup status' in p and 'test messages' in p and 'Claude Code Projects' in p
 
 
 def test_skill_part_a_covers_the_flow():
     sk = (REPO / 'skill' / 'SKILL.md').read_text()
     a = sk[sk.index('# Part A'):sk.index('# Part B')]
-    for needle in ('ccp setup preflight', 'ccp setup install', 'signin start', 'signin wait', 'check-beta', 'stay idle',
-                   'ccp setup connect', 'verify --live', 'tidy', 'reconfigure', 'hosts/macos/setup.sh', 'hosts\\windows\\setup.ps1',
+    for needle in ('claude-projects setup preflight', 'claude-projects setup install', 'signin start', 'signin wait', 'check-beta', 'stay idle',
+                   'claude-projects setup connect', 'verify --live', 'tidy', 'reconfigure', 'hosts/macos/setup.sh', 'hosts\\windows\\setup.ps1',
                    'claude-open-url', 'fallback'):
         assert needle in a, needle
-    for cmd in re.findall(r'ccp setup ([a-z-]+)', a):
+    for cmd in re.findall(r'claude-projects setup ([a-z-]+)', a):
         assert cmd in S.build_parser()._subparsers._group_actions[0].choices, cmd
 
 
@@ -326,7 +326,7 @@ def test_cli_parses_every_documented_command():
 
 
 def test_signin_start_without_browser_asks_first(env):
-    env.ccp['status'] = {'signed_in': False}
+    env.cli['status'] = {'signed_in': False}
     env.run_map = {'claude-signin-browser --check': (127, '', 'none')}
     r = S.cmd_signin_start(args(switch=False, public_url=None))
     assert r['result'] == 'no_signin_browser' and 'May I install one?' in r['ask_user']
@@ -362,7 +362,7 @@ def test_powershell_scripts_parse():
 
 def test_shell_scripts_pass_bash_n():
     import subprocess
-    for p in ('install.sh', 'ccp', 'hosts/macos/setup.sh', 'hosts/macos/ccp', 'bin/claude-signin-browser', 'bin/claude-open-url', 'bin/claude-desktop-launch'):
+    for p in ('install.sh', 'claude-projects', 'ccp', 'hosts/macos/setup.sh', 'hosts/macos/claude-projects', 'hosts/macos/ccp', 'bin/claude-signin-browser', 'bin/claude-open-url', 'bin/claude-desktop-launch'):
         r = subprocess.run(['bash', '-n', str(REPO / p)], capture_output=True, text=True)
         assert r.returncode == 0, (p, r.stderr)
 
@@ -372,8 +372,8 @@ def test_windows_script_review_items():
     assert '$($BotName -replace' not in ps and '$($OperatorName -replace' not in ps, 'sanitize outside the string'
     assert 'NOPASSWD' not in ps and '-G sudo' not in ps, 'the distro user gets no sudo'
     assert 'conhost.exe' not in ps, 'no undocumented conhost --headless'
-    assert '2.4.4' in ps and '--web-download' in ps and 'enable-linger ccp' in ps and 'seq 1 15' in ps
-    assert (REPO / 'hosts' / 'windows' / 'ccp.cmd').read_bytes().count(b'\r\n') >= 3, 'ccp.cmd uses CRLF'
+    assert '2.4.4' in ps and '--web-download' in ps and 'enable-linger cpg' in ps and 'seq 1 15' in ps
+    assert (REPO / 'hosts' / 'windows' / 'claude-projects.cmd').read_bytes().count(b'\r\n') >= 3, 'claude-projects.cmd uses CRLF'
 
 
 def test_macos_script_review_items():
@@ -452,7 +452,7 @@ def test_skill_has_mac_and_windows_guidance_with_references():
                  'check-beta', 'verify', 'Common failures', 'Get started'):
         assert must in win, f'windows.md: {must}'
     # the Mac commands that cross into the VM keep ~ and $ for the VM's shell
-    assert "limactl shell ccp -- cat ~" not in mac and "limactl shell ccp -- ~/" not in mac
+    assert "limactl shell claude-projects -- cat ~" not in mac and "limactl shell claude-projects -- ~/" not in mac
 
 
 def test_every_tool_count_says_24():
@@ -471,7 +471,7 @@ def test_every_tool_count_says_24():
 # ---------------------------------------------------------------- findings from a real Windows runner (PR 9)
 
 def test_windows_distro_preflight_does_not_warn_about_sudo(env, monkeypatch):
-    f = {'os': 'linux', 'arch': 'x86_64', 'python': '3.12.1', 'user': 'ccp', 'hostname': 'h', 'distro_id': 'ubuntu',
+    f = {'os': 'linux', 'arch': 'x86_64', 'python': '3.12.1', 'user': 'claude-projects', 'hostname': 'h', 'distro_id': 'ubuntu',
          'version_id': '24.04', 'distro_like': 'debian', 'pretty': 'Ubuntu 24.04', 'wsl': True, 'pid1': 'systemd'}
     monkeypatch.setattr(S.os, 'geteuid', lambda: 1000)
     monkeypatch.setattr(S, 'RUN', lambda cmd, timeout=60, env=None, input=None: (1, '', 'a password is required') if cmd[0] == 'sudo' else (0, 'yes', ''))
@@ -492,7 +492,7 @@ def _browser_pick(tmp_path, policies, candidates=None):
     fn = sh[sh.index('apt_browser_pkg() {'):]
     fn = fn[:fn.index('\n}\n') + 3]
     env = dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
-    if candidates: env['CCP_BROWSER_CANDIDATES'] = candidates
+    if candidates: env['CPG_BROWSER_CANDIDATES'] = candidates
     r = subprocess.run(['bash', '-c', fn + 'apt_browser_pkg'], capture_output=True, text=True, env=env)
     assert r.returncode == 0 and r.stderr == ''
     return r.stdout.strip()

@@ -18,6 +18,7 @@ __pycache__/
 cache/
 logs/
 attachments/
+.cpg-idb-*/
 .ccp-idb-*/
 *.log
 # editor / OS
@@ -30,6 +31,7 @@ cache/
 logs/
 backups/
 scratch/
+.cpg-idb-*/
 .ccp-idb-*/
 *.dupbackup
 next/
