@@ -1,14 +1,30 @@
 #!/usr/bin/env bash
 # Opens sign-in / OAuth pages inside the Claude app's viewport with a dedicated browser profile
 # (never touches your normal browser profile). Set as BROWSER for the Claude desktop service.
+#   claude-signin-browser --check   prints the browser it would use (exit 127 when there is none)
 set -euo pipefail
 CFG_DIR="${CCP_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp}"
-PROFILE="$CFG_DIR/browser-profile"; mkdir -p "$PROFILE"; chmod 700 "$PROFILE"
-for b in chromium chromium-browser google-chrome-stable google-chrome; do
-  if command -v "$b" >/dev/null 2>&1; then
-    exec "$b" --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check --password-store=gnome-libsecret --start-maximized "$@"
-  fi
-done
-if command -v firefox >/dev/null 2>&1; then exec firefox --profile "$PROFILE" --new-instance "$@"; fi
-if command -v firefox-esr >/dev/null 2>&1; then exec firefox-esr --profile "$PROFILE" --new-instance "$@"; fi
-echo "claude-signin-browser: no chromium/chrome/firefox found; install one (install.sh does)" >&2; exit 127
+PROFILE="$CFG_DIR/browser-profile"
+# Ubuntu ships /usr/bin/chromium-browser and /usr/bin/firefox as stubs that only point at a snap; skip a stub whose
+# snap isn't there (containers, minimal hosts without snapd), so we never hand the sign-in to a dead end.
+usable() {
+  local p; p="$(command -v "$1" 2>/dev/null)" || return 1
+  local snap; snap="$(grep -ao '/snap/bin/[a-z0-9-]*' "$(readlink -f "$p")" 2>/dev/null | head -n1 || true)"
+  [ -z "$snap" ] || [ -x "$snap" ]
+}
+pick() {
+  for b in chromium chromium-browser google-chrome-stable google-chrome firefox firefox-esr; do
+    if usable "$b"; then echo "$b"; return 0; fi
+  done
+  return 1
+}
+if [ "${1:-}" = "--check" ]; then
+  b="$(pick)" || { echo "claude-signin-browser: no usable browser (install chromium or firefox-esr; on Ubuntu: sudo snap install chromium)" >&2; exit 127; }
+  command -v "$b"; exit 0
+fi
+mkdir -p "$PROFILE"; chmod 700 "$PROFILE"
+b="$(pick)" || { echo "claude-signin-browser: no usable browser found; install chromium or firefox-esr (install.sh does)" >&2; exit 127; }
+case "$b" in
+  firefox|firefox-esr) exec "$b" --profile "$PROFILE" --new-instance "$@";;
+  *) exec "$b" --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check --password-store=gnome-libsecret --start-maximized "$@";;
+esac

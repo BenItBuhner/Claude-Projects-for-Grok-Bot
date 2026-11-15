@@ -43,6 +43,11 @@ DEFAULTS = {
     'ui_lock_file': '',
     # TCP ports whose established connections mean "a person is watching the viewport" (UI actions refuse)
     'viewer_ports': [],
+    # noVNC viewport: 'on-demand' = only on while someone signs in (ccp setup signin; new installs), 'always' = left on
+    'viewport_mode': 'always',
+    # written by install.sh so `ccp setup reconfigure` keeps them: Xvfb size and the address noVNC listens on
+    'screen': '540x1170',
+    'viewport_bind': '127.0.0.1',
     # zone used for *_local timestamps in output; '' = this machine's local zone
     'timezone': '',
     # zone the app renders transcript times in; '' = this machine's local zone
@@ -56,6 +61,14 @@ DEFAULTS = {
     'token_file': str(CONFIG_DIR / 'mcp.token'),
     'mcp_host': '127.0.0.1',
     'mcp_port': 8791,
+    # False = no HTTP server (ccp-mcp is not started); agents connect over stdio. The Grok Bot box installs this way.
+    'mcp_http': True,
+    # how the plugin's services run: 'systemd' (user units) or 'process' (ccp_proc.py, a small supervisor for hosts
+    # without user systemd, such as a container whose PID 1 is tini). install.sh picks it.
+    'service_mode': 'systemd',
+    # gnome-keyring data directory for the plugin's own keyring ('' = the default ~/.local/share/keyrings). New installs
+    # use a private one so a desktop login keyring on the same machine is never touched or asked to unlock.
+    'keyring_data_dir': '',
     # extra Host headers allowed by DNS-rebinding protection (e.g. your tunnel hostname); ['*'] disables the check
     'allowed_hosts': [],
     # managed staging / cache for files moving into and out of threads (default: <state_dir>/staging)
@@ -142,6 +155,28 @@ def tool(cfg, key):
     """Resolve a binary from config (absolute path or a name on PATH)."""
     v = cfg.get(key) or key
     return v if os.path.isabs(v) else (shutil.which(v) or v)
+
+
+def runtime_dir(cfg=None):
+    """XDG_RUNTIME_DIR for the plugin's processes. In process mode there is no logind to create /run/user/<uid>, so the
+    plugin keeps its own (private) one under the state dir; every caller computes the same path."""
+    cfg = cfg or CFG
+    if cfg.get('service_mode') == 'process':
+        return str(pathlib.Path(cfg['state_dir']) / 'run')
+    return os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}'
+
+
+def apply_runtime_env(cfg=None, environ=None):
+    """Point this process at the plugin's display and session bus. Process mode overrides any inherited bus address,
+    because the app, the keyring and the accessibility bus all live on the supervisor's private bus."""
+    cfg = cfg or CFG; env = os.environ if environ is None else environ
+    rd = runtime_dir(cfg)
+    env.setdefault('DISPLAY', cfg.get('display') or ':99')
+    if cfg.get('service_mode') == 'process':
+        env['XDG_RUNTIME_DIR'] = rd; env['DBUS_SESSION_BUS_ADDRESS'] = f'unix:path={rd}/bus'
+    else:
+        env.setdefault('XDG_RUNTIME_DIR', rd); env.setdefault('DBUS_SESSION_BUS_ADDRESS', f'unix:path={rd}/bus')
+    return env
 
 
 CFG = load()

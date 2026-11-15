@@ -1,5 +1,91 @@
 # Changelog
 
+## 1.0.2 (unreleased)
+
+Not tagged or released yet. Brings the guided setup to the public repo: one copy-paste prompt, an agent-driven
+`ccp setup` flow, Mac and Windows hosts, the 24th tool `claude_setup`, and hosts without systemd.
+
+### Guided setup
+- New `ccp setup` flow that an agent drives end to end. `status` prints the state, the next action, and `ask_user` (the
+  exact question for the user, or null). The other commands are `preflight`, `choose`, `install`, `signin start|wait`,
+  `check-beta`, `connect`, `verify [--live]`, `viewport on|off`, `tidy [--apply]`, `reconfigure`, `mark`, `move` and
+  `uninstall [--purge]`. Progress is kept in `<state_dir>/setup.json` (no secrets), so an interrupted setup resumes.
+- Projects-beta detection (`ccp probe-projects`, read-only): the sidebar entry, the Projects route, and the app's cached
+  project-list query, plus the app's apt version, so an outdated app isn't mistaken for a missing beta. When the
+  account has no Projects, setup flags it plainly and stays idle, with the background refresh off.
+- noVNC sign-in as a step: `signin start` turns the viewport on and gives the user the link and the password-file path
+  (never the password). `signin wait` waits for the sign-in and for the tab to close, closes the sign-in browser, and
+  turns the viewport off again (`viewport_mode: on-demand`, the default for new installs; older installs keep `always`).
+- New MCP tool `claude_setup` (24 tools): status, verify, check_beta, tidy, connect, viewport on/off.
+- Hosts: always-on Linux (recommended), always-on Mac through a Lima VM (`hosts/macos/setup.sh`), always-on Windows PC
+  through a dedicated WSL2 distro (`hosts/windows/setup.ps1`), laptops with a warning, and the agent's own box as a
+  fallback with a warning.
+- `install.sh --apt-only`: when sudo needs a password, the user pastes one line and the agent does the rest.
+  `install.sh` also records `screen` and `viewport_bind` so `reconfigure` keeps them.
+- Skill: new Part A (setup and maintenance) in front of the usage guide. The default policy pre-approves setup
+  upkeep (status, verify, check_beta, tidy) and surfaces host changes.
+- README rebuilt around one copy-paste prompt. The manual steps moved to `docs/manual-install.md`, and hosts are
+  covered in `docs/hosts.md`.
+
+### Host scripts (review fixes)
+- Windows (`hosts/windows/setup.ps1`):
+  - The script now parses: values are sanitized outside the strings, and the bot name, operator name and time zone are
+    checked against a safe character set.
+  - It checks for WSL 2.4.4+ and updates WSL if needed. `-WebDownload`, and an automatic retry, cover PCs without the
+    Microsoft Store.
+  - It waits for systemd and retries `enable-linger`.
+  - The distro user `ccp` has no sudo. Root steps run from Windows with `wsl -u root`.
+  - The keep-alive task is a hidden PowerShell instead of `conhost --headless`. The at-sign-in trigger is documented,
+    and `-AtStartup` adds an S4U at-boot task.
+  - Sleep and battery checks warn instead of aborting.
+  - The time-zone lookup uses .NET's Windows-to-IANA mapping.
+  - `ccp.cmd` uses CRLF line endings.
+  - Bash scripts reach the distro as base64 through `wsl.exe --exec` (`Invoke-WslScript`). Passed as plain text after
+    `wsl.exe --`, wsl expanded `$name` against the guest environment, and Windows PowerShell 5.1 split embedded double
+    quotes.
+  - `wsl --version`, `--status` and `-l` run with stderr guarded (`Invoke-WslQuiet`), so PowerShell 5.1 with
+    `ErrorActionPreference=Stop` can't abort on them.
+- macOS (`hosts/macos/setup.sh`):
+  - Homebrew's paths are on PATH (Apple silicon and Intel), with `brew shellenv`, and `"$LIMACTL"` is used everywhere.
+  - Only an already-running VM is skipped. Real start failures stop the script, and it waits for `Running`.
+  - `git` and `ca-certificates` are installed in the VM before the clone.
+  - Linger is retried.
+  - The LaunchAgent runs a helper that exits quietly when the VM is up, and logs go to `~/Library/Logs`.
+  - A flag given without a value is an error.
+- CI (`.github/workflows/checks.yml`) runs pytest, ShellCheck, the PowerShell parser and PSScriptAnalyzer
+  (`tools/check-ps1.ps1`).
+
+### Grok Bot box and other hosts without systemd
+
+- Process mode: on a host without user systemd (a container whose PID 1 is tini, like the Grok Bot box) the installer
+  runs the same unit files with `ccp_proc.py`, a small supervisor with its own D-Bus session bus, restarts on failure
+  and the 10-minute refresh. The MCP server, `ccp setup status` and `ccp setup start` bring it up. The preflight no
+  longer suggests `enable-linger` there.
+- The supervisor holds its lock for its whole life and retries for a few seconds when a status probe is in the way,
+  so a probe can't make a starting supervisor give up (it occasionally failed at start-up).
+- The box is detected without `--host-kind box` (a container without systemd), installs stdio only (no HTTP server),
+  and `--mcp-port N` / `--no-http` / `--http` set the HTTP server everywhere. A busy MCP port gets a suggested free one.
+- Sign-in on the box: `signin start` asks before opening a temporary Cloudflare quick tunnel (`--tunnel`) or takes the
+  user's own URL, and puts a one-time viewport password in the link, which `signin wait` replaces when done.
+- Older hand-built installs (`claude-projects-mcp.service`, `venv/`) count as installed; `install` and `reconfigure`
+  leave them alone unless `--migrate`.
+- New installs keep the plugin's keyring in its own folder, so a desktop login keyring is never asked to unlock.
+- `install` runs the preflight first (also with `--dry-run`) and stops on a failure; `viewport on` and `signin start`
+  report units that didn't start instead of saying the viewport is on; `status` gives the right next step when a
+  service file is missing, a service is down, or the app was started by hand.
+- The sign-in steps say "Get started" (the app's current first screen). System packages install without Recommends
+  (fonts and xauth listed explicitly), and the label says "as root" or "with sudo".
+
+### Platform guidance in the skill
+
+- `skill/SKILL.md` explains why the plugin needs a Linux host and how a Mac (Lima VM) or Windows PC (WSL2 distro)
+  provides one, with a side-by-side table and the two pitfalls that cost the most time (quoting across the VM/WSL
+  boundary, the runtime stopping after a restart).
+- New `skill/references/macos.md` and `skill/references/windows.md`: every step the host scripts do, by hand, for an
+  agent that only has a shell on the Mac or PC: install, VM/distro, systemd and linger, start at login, ports, running
+  ccp inside, viewer link and password file, sleep, connecting, verify commands and common failures.
+- Mac and Windows connect lines keep `~` and `$` for the Linux side (`bash -lc '...'`, `wsl.exe --exec`).
+
 ## 1.0.1 (2026-11-14)
 
 ### Fixed

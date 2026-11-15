@@ -15,6 +15,8 @@ EXPECTED = {
     # oss-prep additions
     'claude_thread_permissions', 'claude_thread_permission', 'claude_thread_forward', 'claude_staging',
     'claude_skill_get', 'claude_policy_get', 'claude_policy_propose',
+    # 1.1: guided setup
+    'claude_setup',
 }
 
 
@@ -51,7 +53,7 @@ def test_send_passes_bot_name(monkeypatch):
 def test_systemd_templates_render(tmp_path):
     subs = {'DISPLAY': ':99', 'SCREEN': '540x1170', 'REPO': '/opt/x', 'CONFIG_DIR': '/c', 'CONFIG_FILE': '/c/config.json',
             'VNC_PORT': '5999', 'NOVNC_PORT': '6179', 'VIEWPORT_BIND': '127.0.0.1', 'NOVNC_WEB': '/usr/share/novnc',
-            'MCP_HOST': '127.0.0.1', 'MCP_PORT': '8791'}
+            'MCP_HOST': '127.0.0.1', 'MCP_PORT': '8791', 'KEYRING_ENV': 'Environment=XDG_DATA_HOME=/k'}
     for f in (pathlib.Path(M.__file__).parent / 'systemd').iterdir():
         s = f.read_text()
         for k, v in subs.items(): s = s.replace(f'@{k}@', v)

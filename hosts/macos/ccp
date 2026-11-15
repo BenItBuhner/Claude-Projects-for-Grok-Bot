@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Run ccp inside the Lima VM that hosts the plugin on this Mac:  hosts/macos/ccp setup status
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+LIMACTL="$(command -v limactl || true)"
+[ -n "$LIMACTL" ] || { echo "limactl not found; run hosts/macos/setup.sh first" >&2; exit 3; }
+exec "$LIMACTL" shell "${CCP_LIMA_NAME:-ccp}" -- bash -lc 'cd ~/claude-projects-mcp && exec ./ccp "$@"' ccp "$@"

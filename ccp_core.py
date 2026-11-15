@@ -29,8 +29,7 @@ IDB_PY = CFG['idb_python']; IDB_SCRIPT = pathlib.Path(__file__).resolve().parent
 OPERATOR = CFG.get('operator_name') or 'the user'; HOST_LABEL = CFG.get('host_label') or 'the Claude Code host'
 for d in (CACHE, LOGD): d.mkdir(parents=True, exist_ok=True)
 U = os.getuid()
-os.environ.setdefault('DISPLAY', CFG['display']); os.environ.setdefault('XDG_RUNTIME_DIR', f'/run/user/{U}')
-os.environ.setdefault('DBUS_SESSION_BUS_ADDRESS', f'unix:path=/run/user/{U}/bus')
+import ccp_config; ccp_config.apply_runtime_env(CFG)   # display + session bus (process mode: the supervisor's private bus)
 if CFG.get('gi_typelib_path'): os.environ.setdefault('GI_TYPELIB_PATH', CFG['gi_typelib_path'])
 def _tool_env():
     env = dict(os.environ)
@@ -650,7 +649,7 @@ def win():
         if nm(app) == 'claude-desktop':
             for f in kids(app):
                 if role(f) == 'frame': return f
-    raise AppError('Claude desktop window not found (systemctl --user status claude-desktop)')
+    raise AppError('Claude desktop window not found (is the ccp-claude-desktop service running? ccp setup status)')
 def walk(o, maxn=60000):
     st = [o]; n = 0
     while st and n < maxn:
@@ -3398,6 +3397,48 @@ def op_refresh(projects=None, background=False, max_projects=3, force=False):
         except Busy: break
         except Exception as ex: done.append({'project': t, 'error': str(ex)[:200]})
     return {'list_fetched_by_app_local': res['list_fetched_by_app_local'], 'previous_fetch_local': res['previous_fetch_local'], 'refreshed': done}
+def _pkg_version(pkg='claude-desktop'):
+    """Installed and candidate apt versions of the Claude desktop package (None when apt/dpkg is unavailable)."""
+    out = {'installed': None, 'candidate': None}
+    try:
+        r = subprocess.run(['dpkg-query', '-W', '-f=${Version}', pkg], capture_output=True, text=True, timeout=10)
+        out['installed'] = r.stdout.strip() or None
+        r = subprocess.run(['apt-cache', 'policy', pkg], capture_output=True, text=True, timeout=20)
+        m = re.search(r'Candidate:\s*(\S+)', r.stdout or '')
+        out['candidate'] = m.group(1) if m and m.group(1) != '(none)' else None
+    except Exception: pass
+    return out
+def op_probe_projects(force=False):
+    """READ-ONLY: does the signed-in account have Claude Code Projects? Looks for the sidebar entry ('Projects Beta' or
+    'Projects'), opens the Projects browse view to see whether the route sticks, and reads whether the app cached a
+    project-list query. Presses nothing else, types nothing, and returns the app to its home screen."""
+    out = {'signed_in': None, 'route': None, 'sidebar_entry': None, 'browse_route_ok': False, 'project_list_cached': False,
+           'project_list_query_status': None, 'project_count': None, 'app_version': _pkg_version()}
+    with ui_lock('probe-projects', force):
+        try:
+            d, _ = main_doc()
+            if not d: raise AppError('the Claude app window is not reachable (is ccp-claude-desktop running?)')
+            out['route'] = route(); out['signed_in'] = not re.search(r'/login|/oauth', out['route'] or '')
+            if out['signed_in']:
+                is_entry = lambda e: nm(e) in ('Projects Beta', 'Projects')
+                b = find(d, 'push button', pred=is_entry)
+                if not b:
+                    sb = find(d, 'push button', 'Show sidebar')
+                    if sb: act(sb); time.sleep(1.5)
+                    b = find(main_doc()[0], 'push button', pred=is_entry)
+                if b:
+                    out['sidebar_entry'] = nm(b); act(b)
+                    u = wait_route(lambda u: (u or '').startswith('/epitaxy/projects/browse'), 15)
+                    out['browse_route_ok'] = (u or '').startswith('/epitaxy/projects/browse'); time.sleep(3)
+        finally:
+            try: go_home()
+            except Exception: pass
+    try:
+        snap = idb_snapshot()
+        out['project_list_cached'] = bool(snap.get('channels_updated')); out['project_list_query_status'] = snap.get('channels_query_status')
+        out['project_count'] = len(project_rows(snap)) if out['project_list_cached'] else None
+    except CCPError as ex: out['cache_error'] = str(ex)[:200]
+    return out
 def op_status():
     holder = None
     try: holder = json.loads((ROOT/'ui.holder').read_text())
@@ -3510,6 +3551,8 @@ def main(argv=None):
     s = sp.add_parser('project-menu', help="list or press an item in a project's ... menu"); s.add_argument('project'); s.add_argument('--item'); s.add_argument('--confirm')
     s = sp.add_parser('refresh', help='refresh list + changed projects'); s.add_argument('projects', nargs='*'); s.add_argument('--background', action='store_true'); s.add_argument('--max', type=int, default=3)
     s = sp.add_parser('thread-status', help='compact triage: state, latest message, machine (cache by default)'); s.add_argument('project'); s.add_argument('--thread'); s.add_argument('--refresh', action='store_true', help='live UI read instead of cache')
+    sp.add_parser('tidy-ui', help='cancel stray file-picker windows and return the app home (presses Cancel only)')
+    sp.add_parser('probe-projects', help='READ-ONLY: does this account have Claude Code Projects (beta)?')
     sp.add_parser('status', help='app / lock / viewer status'); sp.add_parser('home', help='return the app to its home screen')
     s = sp.add_parser('origin', help='print the origin header (and the full text with --message) without touching the app'); s.add_argument('--message'); s.add_argument('--bot-name'); s.add_argument('--title'); s.add_argument('--instructions')
     sp.add_parser('config', help='print the effective configuration (paths only, no secrets)')
@@ -3563,6 +3606,9 @@ def main(argv=None):
         elif a.cmd == 'refresh': res = op_refresh(a.projects, a.background, a.max, **F)
         elif a.cmd == 'thread-status': res = op_thread_status(a.project, a.thread, a.refresh, **F, stay=a.stay)
         elif a.cmd == 'status': res = op_status()
+        elif a.cmd == 'probe-projects': res = op_probe_projects(**F)
+        elif a.cmd == 'tidy-ui':
+            with ui_lock('tidy-ui', a.force): res = {'file_pickers_closed': _dismiss_open_files('tidy'), 'home': go_home()}
         elif a.cmd == 'origin':
             bn = a.bot_name if a.bot_name is not None else CFG.get('bot_name')
             text = create_thread_message(a.title, a.instructions or '', a.bot_name) if a.title else add_origin(a.message or '', bn)

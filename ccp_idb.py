@@ -65,6 +65,7 @@ def main():
             if name == 'cc-project-channels':
                 d = clean(st.get('data')); items = d if isinstance(d, list) else (d or {}).get('channels') or (d or {}).get('data') or []
                 out['channels'] = [flat(i) for i in items]; out['channels_updated'] = iso(st.get('dataUpdatedAt'))
+                out['channels_query_status'] = st.get('status') if isinstance(st.get('status'), str) else None
             elif name == 'sessions_api_list_sessions':
                 d = clean(st.get('data')); pages = d.get('pages') if isinstance(d, dict) and 'pages' in d else [d]
                 for p in pages:

@@ -6,6 +6,7 @@ After=dbus.socket
 Type=dbus
 BusName=org.freedesktop.secrets
 StandardInput=file:@CONFIG_DIR@/keyring-pass
+@KEYRING_ENV@
 ExecStart=/usr/bin/gnome-keyring-daemon --foreground --unlock --components=secrets --control-directory=%t/keyring
 Restart=on-failure
 RestartSec=5

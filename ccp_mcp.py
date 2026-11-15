@@ -354,6 +354,26 @@ async def claude_staging(action: str = 'info', dry_run: bool = True, older_than_
     a = ['staging', action] + (['--older-than-hours', str(older_than_hours)] if older_than_hours is not None else []) + sum((['--kind', k] for k in (kinds or [])), []) + ([] if (dry_run or action == 'info') else ['--apply'])
     return await run(a, 120)
 
+# ---------------------------------------------------------------- setup and upkeep
+SETUP_ACTIONS = ('status', 'verify', 'check_beta', 'tidy', 'connect', 'viewport_on', 'viewport_off')
+@mcp.tool()
+async def claude_setup(action: str = 'status', live: bool = False, apply: bool = False) -> dict:
+    """Guided setup and upkeep of this plugin (skill Part A). action='status' (default): where the setup stands, the next
+    action and, when set, ask_user = the exact question to put to the user; calling it through this connector also records
+    that the connector works. 'verify': read-only end-to-end checks (services, app, sign-in, Projects access, project read,
+    MCP tools, skill sha256); live=true also refreshes, opens Project settings for the cloud environment and runs a send
+    dry run (nothing is typed or sent). 'check_beta': does the signed-in account have Claude Code Projects? (read-only;
+    verdict has_projects | no_projects | app_outdated | unknown, plus tell_user text). 'tidy': leftovers (staging, stale lock
+    record, IndexedDB copies, file pickers, sign-in browser, viewport left on); dry run unless apply=true; never restarts the
+    app. 'connect': connector options. 'viewport_on' / 'viewport_off': the noVNC viewport (off refuses while someone watches).
+    Install, sign-in, reconfigure and uninstall need a shell on the host: run `ccp setup ...` there."""
+    if action not in SETUP_ACTIONS:
+        return {'error': 'CCPError', 'message': f'action must be one of {", ".join(SETUP_ACTIONS)}', 'code': 2}
+    a = {'status': ['status'], 'verify': ['verify'] + (['--live'] if live else []), 'check_beta': ['check-beta'],
+         'tidy': ['tidy'] + (['--apply'] if apply else []), 'connect': ['connect'], 'viewport_on': ['viewport', 'on'],
+         'viewport_off': ['viewport', 'off']}[action]
+    return await run(['setup', '--via-mcp'] + a, 900 if action == 'verify' else 300)
+
 # ---------------------------------------------------------------- skill + policy (no UI)
 @mcp.tool()
 async def claude_skill_get(policy_only: bool = False) -> dict:
@@ -406,6 +426,10 @@ def _read_token():
     return t
 
 if __name__ == '__main__':
+    if CFG.get('service_mode') == 'process':
+        # no systemd on this host: nothing else brings the display and the app back after a restart of the box,
+        # so the MCP server (started by the agent) starts the plugin's supervisor when it isn't running
+        import ccp_proc; ccp_proc.ensure_up()
     if STDIO:
         mcp.run('stdio')
     else:

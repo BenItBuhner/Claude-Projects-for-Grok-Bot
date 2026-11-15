@@ -35,6 +35,7 @@ Grok Bot ──MCP──▶ ccp_mcp.py ──▶ ccp (CLI) ──AT-SPI + xdotoo
 | `claude_skill_get` / `claude_policy_get` | The canonical agent skill with the user's effective policy / the policy alone |
 | `claude_policy_propose` | Appends a proposed policy change to a user-owned file; never applied automatically |
 | `claude_app_status` | Health: route, dialogs, viewers, lock holder, sign-in |
+| `claude_setup` | Setup state and next step, read-only verify, Projects-beta check, tidy, viewport on/off ([skill Part A](../skill/SKILL.md)) |
 
 The CLI has the same commands: `./ccp --help`. `./ccp origin --message "hi"` previews the bracket without touching the app.
 
@@ -80,6 +81,7 @@ trimmed above `staging_max_mb`; a sweep runs at most hourly and never touches an
 
 - `display`, `bot_name`, `operator_name`, `timezone`
 - `mcp_host` / `mcp_port`, `allowed_hosts` (add your tunnel hostname here)
+- `viewport_mode`: `on-demand` (new installs: noVNC is only on while someone signs in) or `always`
 - `viewer_ports`: VNC/noVNC ports; UI actions refuse while a viewer is connected. `install.sh` writes `5900+N` and `6080+N`
   for display `:N`, and an empty value falls back to the same ports
 - `environment_labels` / `environment_ids` (optional): map Claude Code's "Running on …" labels to names like "the workstation"
@@ -95,7 +97,8 @@ trimmed above `staging_max_mb`; a sweep runs at most hourly and never touches an
 - Generates a private MCP token, VNC password and keyring password (chmod 600, never printed).
 - Enables the user services `ccp-*`.
 
-Flags: `--display :N`, `--bot-name`, `--operator-name`, `--timezone`, `--no-apt`, `--no-http`, `--claude-md`, `--dry-run`, `--uninstall`.
+Flags: `--display :N`, `--bot-name`, `--operator-name`, `--timezone`, `--no-apt`, `--apt-only`, `--no-http`, `--claude-md`, `--dry-run`, `--uninstall`.
+Agents don't call it directly: `ccp setup install` / `reconfigure` / `uninstall` wrap it (see [skill Part A](../skill/SKILL.md)).
 
 ## Development
 

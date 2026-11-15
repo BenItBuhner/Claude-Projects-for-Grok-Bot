@@ -25,7 +25,8 @@ def test_file_then_env(tmp_path):
     assert c['display'] == ':7' and c['bot_name'] == 'FromEnv' and c['mcp_port'] == 9100 and c['viewer_ports'] == [1, 2]
 
 
-GENERIC = (r'/home/[a-z][a-z0-9_-]*/|/Users/[A-Za-z]|env_01[0-9A-Za-z]{8}|chan_01[0-9A-Za-z]{8}|cse_01[0-9A-Za-z]{8}|'
+# /home/ccp/ is allowed: it is the plugin's own user in its WSL distro, the same on every PC
+GENERIC = (r'/home/(?!ccp/)[a-z][a-z0-9_-]*/|/Users/[A-Za-z]|env_01[0-9A-Za-z]{8}|chan_01[0-9A-Za-z]{8}|cse_01[0-9A-Za-z]{8}|'
            r'cmsg_01[0-9A-Za-z]{8}|\b100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+\b|Bearer [A-Za-z0-9_-]{24,}')
 # Maintainers: put deployment-specific words (hostnames, user names, domains) one per line in a file outside the repo and
 # point CCP_PRIVATE_PATTERNS at it, so the check covers them without publishing them here.
@@ -36,7 +37,9 @@ PRIVATE = re.compile('|'.join([GENERIC] + _words), re.I)
 
 def test_no_deployment_literals_in_shipped_files():
     bad = []
-    for f in list(REPO.glob('*.py')) + list(REPO.glob('*.sh')) + list(REPO.glob('*.md')) + [REPO / 'ccp'] + list((REPO / 'bin').glob('*')) + list((REPO / 'systemd').glob('*')):
+    for f in (list(REPO.glob('*.py')) + list(REPO.glob('*.sh')) + list(REPO.glob('*.md')) + [REPO / 'ccp'] + list((REPO / 'bin').glob('*'))
+              + list((REPO / 'systemd').glob('*')) + list((REPO / 'skill').rglob('*.md')) + list((REPO / 'docs').glob('*.md'))
+              + [p for p in (REPO / 'hosts').rglob('*') if p.is_file()]):
         if f.name in ('LICENSE', 'test_config.py') or not f.is_file(): continue
         for n, line in enumerate(f.read_text(errors='ignore').splitlines(), 1):
             if PRIVATE.search(line): bad.append(f'{f.name}:{n}: {line.strip()[:100]}')
