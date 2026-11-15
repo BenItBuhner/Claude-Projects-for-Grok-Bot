@@ -1004,6 +1004,16 @@ def safe_url(u):
     """never return query strings (they can carry signed tokens) or the org id"""
     return re.sub(r'/api/[0-9a-f-]{36}/', '/api/<org>/', re.sub(r'/organizations/[0-9a-f-]{36}/', '/organizations/<org>/', strip_q(u)))
 
+BADGE_RE = re.compile(r'^(?P<badge>[A-Z0-9]{2,5}) (?P<name>\S.*\.(?P<ext>[A-Za-z0-9]{1,10}))$')
+BADGE_ALIASES = {'JPEG': ('jpg', 'jpeg'), 'JPG': ('jpg', 'jpeg'), 'TIFF': ('tif', 'tiff'), 'YAML': ('yml', 'yaml'), 'MARKDOWN': ('md',)}
+def tile_file_name(label, statics=()):
+    """A file tile's accessible name carries the app's type badge ("PNG tablet-light.png"): -> the file name.
+    The tile's static children are the badge and the name; without them, a leading badge that matches the extension is dropped."""
+    st = [x.strip() for x in statics if x and x.strip()]
+    if len(st) >= 2 and re.fullmatch(r'[A-Z0-9]{2,5}', st[0]) and ' '.join(st) == label.strip() and UPLOAD_RE.match(st[-1]): return st[-1]
+    m = BADGE_RE.match(label.strip())
+    if m and (m['badge'].lower() == m['ext'].lower() or m['ext'].lower() in BADGE_ALIASES.get(m['badge'], ())): return m['name']
+    return label
 REF_RE = re.compile(r'^(?P<name>[^\s—][^—\n]*?\.[A-Za-z0-9]{1,10}) — (?P<path>\S.*)$')
 UPLOAD_RE = re.compile(r'^(?!(Download|Copy|Open|View|Save|Reload|Show|Close|Remove|Delete) )[^/\\—\n\[\]]{1,200}\.[A-Za-z0-9]{1,10}$')
 OUT_CHIP_RE = re.compile(r'^(?P<type>[A-Z0-9]{2,6}) (?P<name>.+\.[A-Za-z0-9]{1,10})$')
@@ -1041,10 +1051,11 @@ def md_walk(o, R, ctx=None, depth=0):
                        'source': 'transcript: output added by Claude (opens in the output pane)'}, o)
             return f"\n[output file: {a['name']}]\n"
         if UPLOAD_RE.match(x):
-            mi = guess_mime(x); ex = extents(o)
-            a = R.add({'kind': 'image' if is_image_mime(mi) or (ex and ex[3] > 60 and not mi) else 'file', 'name': x, 'mime': mi,
-                       'source': 'transcript: attachment tile (uploaded with the message)'}, o)
-            return f"\n[attached {a['kind']}: {x}]\n"
+            fn = tile_file_name(x, [nm(c) for c in ch if role(c) in ('static', 'text', 'label')])
+            mi = guess_mime(fn); ex = extents(o)
+            a = R.add({'kind': 'image' if is_image_mime(mi) or (ex and ex[3] > 60 and not mi) else 'file', 'name': fn, 'mime': mi,
+                       'source': 'transcript: attachment tile (uploaded with the message)', **({'tile_label': x} if fn != x else {})}, o)
+            return f"\n[attached {a['kind']}: {fn}]\n"
         return f'[{x}]' if not ch or all(role(c) in ('static', 'text', 'paragraph', 'section') for c in ch) else ''.join(md_walk(c, R, ctx, depth + 1) for c in ch)
     if r == 'link':
         u = _uri(o); txt = norm(''.join(md_walk(c, R, ctx, depth + 1) for c in ch) or name)
@@ -1304,30 +1315,100 @@ def find_article(thread, idx, max_pages=15):
         except Exception: pass
         time.sleep(.3); xdo('key', '--repeat', '8', '--delay', '60', 'Up'); time.sleep(1.5)
     raise NotFound(f'message {idx} is not rendered (scrolled {max_pages} pages back)')
-def _close_overlays():
-    """Close an image preview dialog or a file/output side pane (Escape, then the pane's Close button), never anything else."""
+# ---- attachment viewers: the Image preview dialog, the file/output side pane, and the Overview document viewer.
+# Only these controls are ever pressed while fetching: the tile itself, the viewer's "Close", and its "Download file".
+# Anything that could post, share, delete or open more menus is refused by name, whatever finds it.
+NEVER_PRESS_RE = re.compile(r'^(Add a pinned comment\b|Add a comment\b|More actions$|More options\b|Send\b|Reply\b|Comment\b|Share\b|Delete\b|Remove\b|Rename\b|Pin\b|Unpin\b)', re.I)
+def _press(e, what=''):
+    if NEVER_PRESS_RE.match(nm(e)): raise AppError(f'refusing to press {nm(e)!r} {what}'.strip())
+    return act(e, what)
+def overview_viewer(d=None):
+    """The app's "Overview" document viewer (it replaces the transcript when a file tile is opened):
+    -> dict(region, close, download, image, section) or None. Read-only."""
+    if d is None: d, _ = main_doc()
+    if not d: return None
+    reg = find(d, 'landmark', 'Overview')
+    if reg is None:
+        tb = find(d, 'tool bar', 'Overview controls')
+        reg = tb and next((e for e in walk(d) if role(e) == 'landmark' and find(e, 'tool bar', 'Overview controls') is not None), None)
+    if reg is None or find(reg, 'tool bar', pred=lambda e: nm(e) in ('Overview controls', 'Document navigation and actions')) is None: return None
+    ctl = find(reg, 'tool bar', 'Overview controls'); nav = find(reg, 'tool bar', 'Document navigation and actions')
+    sec = find(nav, 'section', pred=lambda e: bool(nm(e).strip())) if nav else None   # the named one; it sits inside an unnamed wrapper
+    imgs = [e for e in walk(reg) if role(e) == 'image']
+    img = max(imgs, key=lambda e: (extents(e) or (0, 0, 0, 0))[2] * (extents(e) or (0, 0, 0, 0))[3]) if imgs else None
+    return {'region': reg, 'close': find(ctl, 'push button', 'Close') if ctl else None,
+            'download': find(nav, 'push button', 'Download file') if nav else None, 'image': img, 'section': nm(sec) if sec else ''}
+def _close_att_overlays():
+    """Close what an attachment fetch opened: the Image preview dialog, a file/output side pane, or the Overview viewer
+    (Escape, then the viewer's or pane's own Close button). Returns True once none is open. Presses nothing else."""
     for _ in range(3):
         u = route() or ''; d, _ = main_doc()
-        dlg = find(d, 'dialog', 'Image preview') if d else None
-        if not dlg and 'sidePane=' not in u: return True
+        dlg = find(d, 'dialog', 'Image preview') if d else None; ov = overview_viewer(d)
+        if not dlg and not ov and 'sidePane=' not in u: return True
+        if ov and ov['close'] is not None:
+            try: _press(ov['close'], 'Close (Overview viewer)')
+            except Exception: xdo('key', 'Escape')
+            _wait_until(lambda: not overview_viewer(), 1.5, .25); continue
         xdo('key', 'Escape'); time.sleep(1)
         u = route() or ''
         if 'sidePane=' in u:
             d, _ = main_doc(); reg = find(d, 'tool bar', pred=lambda e: nm(e).endswith(' controls') and find(e, 'push button', 'Close') is not None) if d else None
             c = find(reg, 'push button', 'Close') if reg else None
             if c:
-                try: act(c)
+                try: _press(c, 'Close (side pane)')
                 except Exception: pass
                 time.sleep(1)
-    return 'sidePane=' not in (route() or '')
+    d, _ = main_doc()
+    return 'sidePane=' not in (route() or '') and not (d and find(d, 'dialog', 'Image preview')) and not overview_viewer(d)
+def http_cache_by_name(name):
+    """Original bytes of an uploaded file from the app's HTTP cache, found by its Content-Disposition file name, with no
+    viewer open. Only an unambiguous hit counts: every cached /files/<id>/contents response with that name has the same bytes."""
+    if not name: return None
+    hits = {}
+    try: files = list(HTTPC.glob('*_0'))
+    except Exception: files = []
+    for f in files:
+        try:
+            with open(f, 'rb') as fh: head = fh.read(2048)
+        except Exception: continue
+        if b'/files/' not in head or b'/contents' not in head: continue
+        try: e = _cache_entry(f)
+        except Exception: e = None
+        if not e or not e.get('content_disposition') or (e.get('status') and e['status'] not in ('200', '203')): continue
+        mm = re.search(r"filename\*=utf-8''([^;]+)|filename=\"?([^\";]+)", e['content_disposition'], re.I)
+        if not mm: continue
+        import urllib.parse
+        if urllib.parse.unquote(mm.group(1) or mm.group(2)) != name: continue
+        body = _decode_body(e)
+        if body: hits[hashlib.sha256(body).hexdigest()] = {'body': body, 'content_type': (e.get('content_type') or '').split(';')[0] or None, 'filename': name, 'url': safe_url(e['key'].split('/', 2)[-1] if e['key'][:2] == '1/' else e['key'])}
+    return next(iter(hits.values())) if len(hits) == 1 else None
+def _viewer_text(reg):
+    """Rendered text of a viewer region (tool bars and the pinned-comment button left out), or ''."""
+    parts = []
+    for k in kids(reg):
+        if role(k) == 'tool bar' or find(k, 'tool bar') is not None: continue
+        parts.extend(kids(k) if NEVER_PRESS_RE.match(nm(k)) else [k])   # the pinned-comment button wraps the content
+    R = Rich(); return finish_md(''.join(md_walk(k, R, {}, 0) for k in parts))
 def _fetch_upload(att, elem):
-    """User-uploaded attachment tile: open the app's Image preview, take the file id from the <img> src, then read the bytes from the app's HTTP cache."""
-    elem.get_component_iface().scroll_to(0); time.sleep(.6); act(elem, att['name']); dlg = img = None; t0 = time.time()
+    """Uploaded-file tile (the user's or Claude's). The app opens one of two viewers:
+    - the Image preview dialog: file id from the <img> src, bytes from the app's HTTP cache;
+    - the Overview document viewer (src is a blob:): the original through its "Download file" button and the Save as dialog.
+    Fallbacks: the HTTP cache by file name (needs no viewer), then a screen crop or the viewer's text.
+    -> (data, name, mime, source, extra); extra['download_path'] is set when the original was saved to disk."""
+    steps = []; name = att['name']
+    try: elem.get_component_iface().scroll_to(0); time.sleep(.3)
+    except Exception: pass
+    act(elem, name); dlg = img = ov = None; t0 = time.time()   # the tile itself (its name is the file's)
     while time.time() - t0 < 8:
         d, _ = main_doc(); dlg = find(d, 'dialog', 'Image preview') if d else None
         img = find(dlg, 'image') if dlg else None
         if img: break
-        time.sleep(.5)
+        ov = overview_viewer(d)
+        if ov and (ov['download'] is not None or ov['image'] is not None): break
+        time.sleep(.25)
+    if ov and not img:
+        try: return _fetch_from_overview(att, ov, steps)
+        finally: _close_att_overlays()
     src = _attrs(img).get('src', '') if img else ''
     m = re.search(r'/files/([0-9a-f-]{36})/(contents|preview)', src)
     got = None; how = None
@@ -1335,17 +1416,61 @@ def _fetch_upload(att, elem):
         for sub, lab in ((f'/files/{m.group(1)}/contents', 'original file'), (f'/files/{m.group(1)}/preview', 'preview rendition')):
             got = http_cache_get(sub, wait=8 if lab == 'original file' else 1)
             if got: how = f"app HTTP cache ({lab}, {got['url']})"; break
+        if not got: steps.append('HTTP cache by file id: not cached')
+    elif dlg: steps.append(f'Image preview: no /files/ URL in the image ({src.split(":", 1)[0] or "no src"})')
+    else: steps.append('opening the tile: neither the Image preview nor the Overview viewer appeared within 8 s')
+    if not got:
+        got = http_cache_by_name(name)
+        if got: how = f"app HTTP cache, found by file name ({got['url']})"
+        else: steps.append('HTTP cache by file name: no single match')
     crop = None
     if not got and img:
         try: img.get_component_iface().scroll_to(0); time.sleep(.4)
         except Exception: pass
         ex = extents(img); crop = screen_crop(ex) if ex else None
+        if not crop: steps.append('screen crop of the preview: empty')
     if not got and not crop and not dlg:
-        crop = screen_crop(extents(elem)) if extents(elem) else None; how = 'screen crop of the tile (no preview dialog)'
-    _close_overlays()
-    if got: return got['body'], (got['filename'] or att['name']), sniff_mime(got['body']) or got['content_type'] or att.get('mime'), how, {'file_id': m.group(1) if m else None}
-    if crop: return crop, os.path.splitext(att['name'])[0] + '.png', 'image/png', how or 'screen crop of the app\'s image preview (not in the HTTP cache)', {'file_id': m.group(1) if m else None}
-    return None, att['name'], att.get('mime'), 'not available (preview did not open)', {}
+        ex = extents(elem); crop = screen_crop(ex) if ex else None
+        if crop: how = 'screen crop of the tile (no preview dialog)'
+        else: steps.append('screen crop of the tile: the tile is no longer on screen')
+    _close_att_overlays()
+    if got: return got['body'], (got['filename'] or name), sniff_mime(got['body']) or got['content_type'] or att.get('mime'), how, {'file_id': m.group(1) if m else None}
+    if crop: return crop, os.path.splitext(name)[0] + '.png', 'image/png', how or 'screen crop of the app\'s image preview (not in the HTTP cache)', {'file_id': m.group(1) if m else None}
+    return None, name, att.get('mime'), 'not available: ' + '; '.join(steps), {'failed_steps': steps}
+def _fetch_from_overview(att, ov, steps):
+    name = att['name']; mi = att.get('mime') or guess_mime(name)
+    if ov['section'] and tile_file_name(ov['section']) != tile_file_name(name):
+        steps.append(f'the Overview viewer opened {ov["section"]!r}, not {name!r}')
+        return None, name, mi, 'not available: ' + '; '.join(steps), {'failed_steps': steps, 'viewer': 'overview'}
+    extra = {'viewer': 'overview'}
+    src = _attrs(ov['image']).get('src', '') if ov['image'] is not None else ''
+    m = re.search(r'/files/([0-9a-f-]{36})/(contents|preview)', src)
+    if m:
+        got = http_cache_get(f'/files/{m.group(1)}/contents', wait=3)
+        if got: return got['body'], got['filename'] or name, sniff_mime(got['body']) or got['content_type'] or mi, f"app HTTP cache (original file, {got['url']})", dict(extra, file_id=m.group(1), original=True)
+    if ov['download'] is not None:
+        try: path = _save_with_button(ov['download'], name, dialog_timeout=OV_DIALOG_TIMEOUT)   # the viewer already holds the bytes
+        except Exception as ex: path = None; log(f'overview download failed for {name}: {ex!r}')
+        if path: return None, name, mi or 'application/octet-stream', "the Overview viewer's Download file button (original file)", dict(extra, original=True, download_path=path)
+        steps.append('Overview "Download file": the Save as dialog did not finish')
+    else: steps.append('Overview viewer: no "Download file" button')
+    got = http_cache_by_name(name)
+    if got: return got['body'], name, sniff_mime(got['body']) or got['content_type'] or mi, f"app HTTP cache, found by file name ({got['url']})", dict(extra, original=True)
+    steps.append('HTTP cache by file name: no single match')
+    im = ov['image']
+    if im is not None:
+        try: im.get_component_iface().scroll_to(0); time.sleep(.4)
+        except Exception: pass
+        ex = extents(im); crop = screen_crop(ex) if ex else None
+        if crop:
+            return crop, os.path.splitext(name)[0] + '.png', 'image/png', f'screen crop of the Overview viewer image ({ex[2]}x{ex[3]} px; the download failed, see failed_steps)', dict(extra, original=False, rendered_size=[ex[2], ex[3]], failed_steps=steps)
+        steps.append('screen crop of the Overview image: empty')
+    else:
+        txt = _viewer_text(ov['region'])
+        if txt and not is_loading_text(txt):
+            return txt.encode(), name if is_text_mime(mi, name) else os.path.splitext(name)[0] + '.txt', mi if is_text_mime(mi, name) else 'text/plain', 'Overview viewer, rendered text read through the accessibility tree (the download failed, see failed_steps)', dict(extra, original=False, failed_steps=steps)
+        steps.append('Overview viewer: no image and no readable text')
+    return None, name, mi, 'not available: ' + '; '.join(steps), dict(extra, failed_steps=steps)
 def _fetch_pane(att, elem):
     """Claude output chip or inline file link: open it in the app's side pane and read it (text -> markdown from the accessibility tree,
     images -> HTTP cache if the src is a URL, else a screen crop)."""
@@ -1357,7 +1482,7 @@ def _fetch_pane(att, elem):
             d, _ = main_doc(); reg = find(d, 'landmark', pred=lambda e: nm(e) in (base, att['name'])) if d else None
             if reg: break
         time.sleep(.5)
-    if not reg: _close_overlays(); return None, att['name'], att.get('mime'), 'not available (the file pane did not open)', {}
+    if not reg: _close_att_overlays(); return None, att['name'], att.get('mime'), 'not available (the file pane did not open)', {}
     time.sleep(1.5)
     extra = {}
     cp = find(reg, 'push button', pred=lambda e: nm(e).startswith('Copy path '))
@@ -1398,7 +1523,7 @@ def _fetch_pane(att, elem):
         while is_loading_text(md) and time.time() - t0 < 20:
             time.sleep(1); R = Rich(); md = finish_md(''.join(md_walk(k, R, {}, 0) for k in kids(reg) if not (tb and find(k, 'tool bar') is not None)))
         if is_loading_text(md):
-            _close_overlays(); return None, base, mi, 'not available (the file pane never finished loading)', {}
+            _close_att_overlays(); return None, base, mi, 'not available (the file pane never finished loading)', {}
         if md:
             data = md.encode(); how = 'app file pane, rendered text read through the accessibility tree' + (' (markdown reconstructed from the rendering)' if mi == 'text/markdown' else '')
             if not is_text_mime(mi, base): mi = 'text/plain'
@@ -1406,11 +1531,11 @@ def _fetch_pane(att, elem):
         else:
             ex = extents(reg); data = screen_crop(ex) if ex else None; mi = 'image/png'; name = os.path.splitext(base)[0] + '-pane.png'
             how = 'screen crop of the app\'s file pane (no readable text; binary file)'
-    _close_overlays()
+    _close_att_overlays()
     return data, name, mi, how, extra
 # ---- originals through the app's own Download control (output chips / file pane), never the HTTP cache
 SAVE_TITLES = ('Save as', 'Save As', 'Save File')
-DL_DIALOG_TIMEOUT = int(os.environ.get('CPG_DL_DIALOG_TIMEOUT', '900')); DL_WRITE_TIMEOUT = int(os.environ.get('CPG_DL_WRITE_TIMEOUT', '900'))
+DL_DIALOG_TIMEOUT = int(os.environ.get('CPG_DL_DIALOG_TIMEOUT', '900')); OV_DIALOG_TIMEOUT = int(os.environ.get('CPG_OV_DIALOG_TIMEOUT', '90')); DL_WRITE_TIMEOUT = int(os.environ.get('CPG_DL_WRITE_TIMEOUT', '900'))
 LOADING_RE = re.compile(r'^\s*(Loading( file)?|Loading\u2026|Loading\.\.\.)\s*$', re.I)
 def is_loading_text(s): return bool(s) and bool(LOADING_RE.match(s))
 def _save_dialog_wid():
@@ -1426,14 +1551,23 @@ def _press_save(wid):
         root = next((f for app in kids(A().get_desktop(0)) for f in kids(app) if nm(f) in SAVE_TITLES), None)
         btn = find(root, 'push button', 'Save') if root else None
         if btn is not None:
-            try: act(btn, 'Save'); time.sleep(2)
+            try: act(btn, 'Save')
             except Exception: pass
-            if not _save_dialog_wid(): return True
+            if _wait_until(lambda: not _save_dialog_wid(), 2): return True
         try: _ensure_chooser_open_visible(wid)
         except Exception: pass
         g = _xdo_geom(wid); xdo('windowactivate', '--sync', wid)
-        _click_xy(g['X'] + g['WIDTH'] - 55, g['Y'] + g['HEIGHT'] - 32); time.sleep(2)
+        _click_xy(g['X'] + g['WIDTH'] - 55, g['Y'] + g['HEIGHT'] - 32)
+        if _wait_until(lambda: not _save_dialog_wid(), 2): return True
     return not _save_dialog_wid()
+def _wait_until(fn, secs, step=.2):
+    """Poll fn() until it returns something truthy or secs pass -> that value, or None."""
+    t0 = time.time()
+    while True:
+        v = fn()
+        if v: return v
+        if time.time() - t0 >= secs: return None
+        time.sleep(step)
 def _sha256_file(path):
     h = hashlib.sha256()
     with open(path, 'rb') as f:
@@ -1454,26 +1588,29 @@ def _download_via_app(att, article, elem):
             d, _ = main_doc(); tb = find(d, 'tool bar', pred=lambda e: nm(e) in (f'{base} controls', f'{name} controls')) if d else None
             btn = find(tb, 'push button', 'Download file') if tb else None
             if btn is None: time.sleep(.5)
-    if btn is None or _save_dialog_wid(): return None
+    if btn is None: return None
+    return _save_with_button(btn, name)
+def _save_with_button(btn, name, dialog_timeout=None):
+    """Press a Download control and save through the Save as dialog into a fresh incoming slot -> path or None."""
+    if _save_dialog_wid(): return None
     dest = STAGE.new_slot('incoming')   # managed staging; the file is then moved into ATT_DIR by store_file
     target = save_target(dest, name)
-    btn.get_component_iface().scroll_to(0); time.sleep(.4); act(btn, f'Download {name}')
-    t0 = time.time(); wid = None
-    while time.time() - t0 < DL_DIALOG_TIMEOUT and not wid:        # the app fetches the whole file before the dialog shows
-        wid = _save_dialog_wid() or (time.sleep(1) or None)
+    btn.get_component_iface().scroll_to(0); time.sleep(.2); _press(btn, f'Download {name}')
+    wid = _wait_until(_save_dialog_wid, dialog_timeout or DL_DIALOG_TIMEOUT, .25)   # the app fetches the whole file before the dialog shows
     if not wid: return None
     try:
-        xdo('windowactivate', '--sync', wid); time.sleep(.6)
+        xdo('windowactivate', '--sync', wid); time.sleep(.3)
         if _active_win_name() not in SAVE_TITLES: return None
         xdo('key', '--clearmodifiers', 'ctrl+a'); time.sleep(.2)
-        xdo('type', '--delay', '15', '--clearmodifiers', str(target)); time.sleep(1.5)
+        xdo('type', '--delay', '10', '--clearmodifiers', str(target)); time.sleep(.8)
         if not _press_save(wid): return None
+        # Chromium writes <name>.crdownload and renames it when done: the target plus no .crdownload is the finished file
         t0 = time.time(); last = -1; stable = 0
         while time.time() - t0 < DL_WRITE_TIMEOUT:
             if target.exists():
                 sz = target.stat().st_size; stable = stable + 1 if sz == last and sz > 0 else 0; last = sz
-                if stable >= 3 and not list(dest.glob('*.crdownload')): return str(target)
-            time.sleep(1)
+                if stable >= 2 and not list(dest.glob('*.crdownload')): return str(target)
+            time.sleep(.3)
         return None
     finally:
         if _save_dialog_wid(): xdo('key', 'Escape'); time.sleep(.5)
@@ -1489,14 +1626,168 @@ def store_file(src, name, mime, meta):
     size = p.stat().st_size
     (ATT_DIR/f'{sha[:32]}.json').write_text(json.dumps(dict(meta, sha256=sha, path_on_host=str(p), size=size, stored_at=now().isoformat()), ensure_ascii=False))
     _att_index_put(dict(meta, size=size), sha, str(p)); _att_prune(); return str(p), sha, size
-def op_attachment_get(project, thread=None, attachment_id=None, message_index=None, n=1, as_='auto', full=False, force=False, stay=False, shot=None):
+# ---- background jobs (attachment fetches, sends): a lock file held while one runs, a JSON result/state file.
+# A job runs in a detached worker so a tool call can answer within its budget; the same call again joins it.
+class Interrupted(BaseException):
+    """SIGTERM or the watchdog: not an AppError, so no fallback path catches it; cleanup in finally blocks still runs."""
+def job_lock(dirp, key):
+    """-> an open file holding the job's exclusive lock, or None when another process holds it."""
+    dirp.mkdir(parents=True, exist_ok=True); os.chmod(dirp, 0o700)
+    f = open(dirp/f'{key}.lock', 'a+')
+    try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); return f
+    except OSError: f.close(); return None
+def job_unlock(f):
+    try: fcntl.flock(f, fcntl.LOCK_UN)
+    except Exception: pass
+    f.close()
+def job_running(dirp, key):
+    if not (dirp/f'{key}.lock').exists(): return False
+    f = job_lock(dirp, key)
+    if f is None: return True
+    job_unlock(f); return False
+def job_read(dirp, key):
+    try: return json.loads((dirp/f'{key}.json').read_text())
+    except Exception: return None
+def job_write(dirp, key, data):
+    dirp.mkdir(parents=True, exist_ok=True); t = dirp/f'{key}.json.tmp'
+    t.write_text(json.dumps(data, ensure_ascii=False, default=str)); t.replace(dirp/f'{key}.json')
+def jobs_running():
+    """Running background jobs (for status and the deploy busy check)."""
+    out = []
+    for kind, dirp in (('attachment', ATT_JOBS), ('send', SEND_JOBS)):
+        try: locks = list(dirp.glob('*.lock'))
+        except Exception: locks = []
+        for lk in locks:
+            key = lk.name[:-5]
+            if not job_running(dirp, key): continue
+            st = job_read(dirp, key) or {}
+            out.append({'kind': kind, 'job_id': key, 'state': st.get('state') or 'running', 'step': st.get('step'),
+                        'started_at_local': ct(datetime.datetime.fromtimestamp(st['started_ts'], datetime.timezone.utc).isoformat()) if st.get('started_ts') else None})
+    return out
+def _use_systemd_scope():
+    rd = os.environ.get('XDG_RUNTIME_DIR') or ''
+    return bool(shutil.which('systemd-run')) and bool(rd) and os.path.exists(os.path.join(rd, 'systemd', 'private')) and not os.environ.get('CPG_NO_SCOPE')
+def spawn_job(argv, name):
+    """Start a detached worker. Under a systemd user manager it runs in its own transient scope, so restarting the MCP
+    service (a deploy) does not kill it mid-job; elsewhere it gets its own session."""
+    LOGD.mkdir(parents=True, exist_ok=True)
+    with open(LOGD/'jobs.log', 'a') as lf:
+        if _use_systemd_scope():
+            unit = f'cpg-job-{name}-{int(time.time())}'
+            pr = subprocess.Popen(['systemd-run', '--user', '--scope', '--quiet', '--collect', f'--unit={unit}', '--'] + argv,
+                                  stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, start_new_session=True, env=dict(os.environ))
+            time.sleep(.3)
+            if pr.poll() in (None, 0): return 'scope'
+            log(f'systemd-run for {name} failed (rc={pr.returncode}); starting it as a plain process')
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, start_new_session=True, env=dict(os.environ))
+        return 'process'
+ATT_JOBS = CACHE/'attachment-jobs'
+SEND_JOBS = CACHE/'send-jobs'
+ATT_BUDGET = float(os.environ.get('CPG_ATTACH_BUDGET', '40'))   # seconds a budgeted call (the MCP tool) waits before answering "pending"
+def _att_parse(attachment_id, message_index, n):
     if attachment_id:
         mm = re.match(r'^(\d+)[.:/a-z]+(\d+)$', str(attachment_id).strip())
         if not mm: raise CPGError('attachment_id looks like "<message_index>.<n>" (from the attachments list of claude_thread_read)')
         message_index, n = int(mm.group(1)), int(mm.group(2))
     if message_index is None: raise CPGError('pass attachment_id or message_index (+ n)')
+    return int(message_index), int(n)
+def att_job_key(chan, thread, message_index, n):
+    """One fetch per project / thread / message / attachment: retries and concurrent calls share it."""
+    t = norm(str(thread)).casefold() if thread else 'primary'
+    return hashlib.sha256(f'{chan}|{t}|{int(message_index)}|{int(n)}'.encode()).hexdigest()[:24]
+def _att_job_result(key): return job_read(ATT_JOBS, key)
+def _att_identity_ok(meta):
+    """A cached file is served only while the on-disk transcript cache still shows the same attachment at that number:
+    the app's "Message N" numbering shifts, so N.n alone can point at another message later. No UI, no lock."""
+    idt = meta.get('identity') or {}
+    if not idt.get('name'): return False
+    th = meta.get('thread_id'); c = read_cache(meta.get('project_id'), None if th in (None, 'primary') else th)
+    m = next((x for x in (c or {}).get('messages') or [] if x.get('index') == meta.get('message_index')), None)
+    if not m: return False
+    atts = m.get('attachments') or []; n = int(idt.get('n') or 0)
+    if not 1 <= n <= len(atts) or tile_file_name(atts[n - 1].get('name') or '') != tile_file_name(idt['name']): return False
+    for k, v in (('role', m.get('role')), ('time_utc', m.get('time_utc')), ('text_sha', _text_sha(m.get('text')))):
+        if idt.get(k) and v and idt[k] != v: return False
+    return True
+def _text_sha(t): return hashlib.sha256((t or '').encode()).hexdigest()[:16] if t else None
+def _att_cached(key, since=None, fresh=False):
+    """A finished result for key: an available file still on disk whose identity the transcript cache confirms, or
+    (since=t) any result written after t (the fetch this call started or joined). fresh=True: only the latter."""
+    r = _att_job_result(key)
+    if not r: return None
+    if since is not None and (r.get('finished_ts') or 0) >= since: return r
+    m = r.get('meta') or {}
+    if not fresh and m.get('available') and m.get('path_on_host') and pathlib.Path(m['path_on_host']).is_file() and _att_identity_ok(m): return r
+    return None
+def _att_job_running(key): return job_running(ATT_JOBS, key)
+def _att_run_job(key, job):
+    """Run one fetch for key under its job lock and write the result file. Returns the result, or None when another
+    process already holds the lock (that one writes the result; the caller waits for it)."""
+    f = job_lock(ATT_JOBS, key)
+    if f is None: return None
+    try:
+        r = _att_cached(key, since=job.get('started_ts'), fresh=bool(job.get('refresh')))
+        if r: return r                                 # finished while this one waited for the lock
+        t0 = time.time()
+        try: r = {'status': 'done', 'meta': _attachment_fetch(**{k: job[k] for k in ('project', 'thread', 'message_index', 'n', 'force', 'stay', 'shot')})}
+        except CPGError as ex: r = {'status': 'failed', 'error': str(ex), 'error_type': type(ex).__name__, 'code': getattr(ex, 'code', 1)}
+        except Exception as ex: r = {'status': 'failed', 'error': repr(ex), 'error_type': 'AppError', 'code': 6}
+        except Interrupted as ex: r = {'status': 'failed', 'error': f'interrupted ({ex})', 'error_type': 'AppError', 'code': 6}
+        r.update(job_id=key, finished_ts=time.time(), seconds=round(time.time() - t0, 1))
+        job_write(ATT_JOBS, key, r)
+        return r
+    finally: job_unlock(f)
+def _att_spawn_worker(key, job):
+    """Detached `claude-projects attachment get ... --job` that does the fetch; it outlives this call."""
+    argv = [sys.executable, str(pathlib.Path(__file__).resolve()), '--json'] + (['--force'] if job.get('force') else []) + \
+           ['attachment', 'get', job['chan'], f"{job['message_index']}.{job['n']}", '--job'] + (['--thread', job['thread']] if job.get('thread') else []) + \
+           (['--refresh'] if job.get('refresh') else [])
+    how = spawn_job(argv, f'att-{key[:8]}')
+    log(f'attachment job {key} started in the background ({job["message_index"]}.{job["n"]}, {how})')
+def _att_answer(r, as_, full, cached=False):
+    if r.get('status') == 'failed':
+        cls = {c.__name__: c for c in (NotFound, AppError, CPGError)}.get(r.get('error_type'), AppError)
+        raise cls(r.get('error') or 'attachment fetch failed')
+    out = present_attachment(r['meta'], as_, full); out['job_id'] = r.get('job_id')
+    if cached: out['cached'] = True
+    return out
+def op_attachment_get(project, thread=None, attachment_id=None, message_index=None, n=1, as_='auto', full=False, force=False, stay=False, shot=None,
+                      budget=None, refresh=False, job=False):
+    """budget=None: fetch now and wait for it (CLI, forward). budget=seconds (the MCP tool): answer within that time; a fetch
+    still running then comes back as pending with a job_id, and the same call again returns the file. Either way a
+    finished file is answered from the cache, and a fetch already running for the same attachment is joined, never repeated."""
+    message_index, n = _att_parse(attachment_id, message_index, n)
     as_ = (as_ or 'auto').lower()
     if as_ not in ('auto', 'image', 'text', 'base64', 'path'): raise CPGError('as must be auto | image | text | base64 | path')
+    p = resolve_project(project); chan = p['id']; key = att_job_key(chan, thread, message_index, n); t_start = time.time()
+    if not refresh:
+        r = _att_cached(key)
+        if r: return _att_answer(r, as_, full, cached=True)
+    spec = dict(project=chan, chan=chan, thread=thread, message_index=message_index, n=n, force=force, stay=stay, shot=shot, refresh=refresh, started_ts=t_start)
+    if job or budget is None:
+        r = _att_run_job(key, spec)
+        if r is None and job: return {'available': False, 'pending': True, 'job_id': key, 'note': 'a fetch of this attachment was already running'}
+        if r is None:                                  # another fetch of this attachment is running: wait for its result
+            t0 = time.time()
+            while time.time() - t0 < (budget or 900) and r is None:
+                time.sleep(.5); r = _att_cached(key, since=t_start, fresh=refresh)
+                if r is None and not _att_job_running(key): r = _att_run_job(key, spec)   # it ended without a result
+            if r is None:
+                return {'available': False, 'pending': True, 'job_id': key, 'project': p['name'], 'message_index': message_index, 'n': n,
+                        'note': 'another fetch of this attachment is still running; call again with the same arguments for the file'}
+        return _att_answer(r, as_, full)
+    spawned = False
+    while time.time() - t_start < budget:
+        r = _att_cached(key, since=t_start, fresh=refresh)
+        if r: return _att_answer(r, as_, full)
+        if not spawned and not _att_job_running(key): _att_spawn_worker(key, spec); spawned = True   # else join the running fetch
+        time.sleep(.25)
+    return {'available': False, 'pending': True, 'job_id': key, 'project': p['name'], 'project_id': chan, 'thread_id': thread or 'primary',
+            'message_index': message_index, 'n': n, 'retry_after_s': 15,
+            'note': f'still fetching in the app after {int(budget)} s; call again with the same arguments to get the file '
+                    '(the call joins this fetch and never starts a second one)'}
+def _attachment_fetch(project, thread, message_index, n, force=False, stay=False, shot=None):
+    """Open the attachment in the app and store it. -> metadata (path_on_host, sha256, mime, size, ...), no payload."""
     p = resolve_project(project); chan = p['id']
     with ui_lock(f'attachment {p["name"]} {thread or "primary"} {message_index}.{n}', force):
         try:
@@ -1508,15 +1799,20 @@ def op_attachment_get(project, thread=None, attachment_id=None, message_index=No
             if not 1 <= int(n) <= len(R.atts): raise NotFound(f'message {message_index} has {len(R.atts)} attachment(s); n must be 1..{len(R.atts)}')
             att = dict(R.atts[int(n) - 1]); el = R.elems[int(n) - 1]
             meta = dict(att, project=p['name'], project_id=chan, thread_id=tid or 'primary', message_index=int(message_index))
+            try:
+                pm = parse_article(a)
+                meta['identity'] = {'name': tile_file_name(att.get('name') or ''), 'n': int(n), 'role': pm.get('role'), 'time_utc': pm.get('time_utc'), 'text_sha': _text_sha(pm.get('text'))}
+            except Exception as ex: log(f'attachment identity not read: {ex!r}')
             if att['kind'] in ('link', 'pull_request'):
                 meta.update(note='a link: nothing to download in the app; open the URL yourself', text=att.get('url'))
                 return meta
             dl = None
-            if att['kind'] in ('image', 'file'): data, name, mime, how, extra = _fetch_upload(att, el)
+            if att['kind'] in ('image', 'file'):
+                data, name, mime, how, extra = _fetch_upload(att, el); dl = extra.pop('download_path', None)
             else:
                 try: dl = _download_via_app(att, a, el)
                 except Exception as ex: log(f'download via app failed for {att["name"]}: {ex!r}')
-                try: _close_overlays()
+                try: _close_att_overlays()
                 except Exception: pass
                 if dl:
                     data, name, mime, extra = None, att['name'], att.get('mime') or guess_mime(att['name']) or 'application/octet-stream', {'original': True}
@@ -1526,48 +1822,48 @@ def op_attachment_get(project, thread=None, attachment_id=None, message_index=No
                     data, name, mime, how, extra = _fetch_pane(att, el); extra['original'] = False
             if shot: screenshot(shot)
         finally:
-            try: _close_overlays()
+            try: _close_att_overlays()
             except Exception: pass
             if not stay: go_home()
     meta.update({k: v for k, v in extra.items() if v is not None}); meta['source'] = how; meta['fetched_at_local'] = ct(now().isoformat())
     if dl:
         path, sha, size = store_file(dl, name, mime, dict(meta, mime=mime))
         meta.update(available=True, mime=mime, size=size, saved_name=name, path_on_host=path, sha256=sha)
-        if is_image_mime(mime) and size <= 50 * 2**20:
-            data = pathlib.Path(path).read_bytes(); w, h, _ = image_info(data); meta['width'], meta['height'] = w, h
-            if as_ in ('auto', 'image'):
-                b, m2, w2, h2, ds = image_for_mcp(data, full)
-                meta['image'] = {'mime': m2, 'base64': base64.b64encode(b).decode(), 'width': w2, 'height': h2, 'bytes': len(b), 'downscaled': ds}
-                meta['returned_as'] = 'image'; return meta
-        elif is_text_mime(mime, name) and size <= 2 * 2**20 and as_ in ('auto', 'text'):
-            meta['text'] = pathlib.Path(path).read_text('utf-8', 'replace')[:400000]; meta['returned_as'] = 'text'; return meta
-        meta['returned_as'] = 'path'; return meta
-    if data is None:
+    elif data is None:
         meta['available'] = False; return meta
-    meta['available'] = True; meta['mime'] = mime; meta['size'] = len(data); meta['saved_name'] = name
-    path, sha = store_bytes(data, name, mime, meta)
-    meta['path_on_host'] = path; meta['sha256'] = sha or hashlib.sha256(data).hexdigest()
-    if is_image_mime(mime):
-        w, h, _ = image_info(data); meta['width'], meta['height'] = w, h
+    else:
+        meta.update(available=True, mime=mime, size=len(data), saved_name=name)
+        path, sha = store_bytes(data, name, mime, meta)
+        meta['path_on_host'] = path; meta['sha256'] = sha or hashlib.sha256(data).hexdigest()
+        if not path: meta['note'] = f'larger than {ATT_FILE_CAP >> 20} MB: not stored'
+    if is_image_mime(meta['mime']) and meta.get('path_on_host') and meta['size'] <= 50 * 2**20:
+        try: w, h, _ = image_info(pathlib.Path(meta['path_on_host']).read_bytes()); meta['width'], meta['height'] = w, h
+        except Exception: pass
+    return meta
+def present_attachment(meta, as_='auto', full=False):
+    """Stored attachment metadata -> the tool's answer: image content, text, base64 or just the path (as_)."""
+    meta = dict(meta); path = meta.get('path_on_host')
+    if not meta.get('available'): return meta
+    if not path or not pathlib.Path(path).is_file(): meta['returned_as'] = 'path'; return meta
+    mime = meta.get('mime'); name = meta.get('saved_name') or meta.get('name') or ''; size = pathlib.Path(path).stat().st_size
     text = None
-    if is_text_mime(mime, name):
-        text = data.decode('utf-8', 'replace')
-    elif mime == 'application/pdf' and path:
-        text = pdf_text(path)
+    if is_text_mime(mime, name) and size <= 2 * 2**20: text = pathlib.Path(path).read_text('utf-8', 'replace')
+    elif mime == 'application/pdf': text = pdf_text(path)
     if text: meta['preview_text'] = text[:400]
     mode = as_
-    if mode == 'auto': mode = 'image' if is_image_mime(mime) else ('text' if text else 'path')
+    if mode == 'auto': mode = 'image' if is_image_mime(mime) and size <= 50 * 2**20 else ('text' if text else 'path')
     if mode == 'image':
         if not is_image_mime(mime): meta['note'] = f'not an image ({mime}); returned metadata and path'
+        elif size > 50 * 2**20: meta['note'] = 'image larger than 50 MB; use the path'; mode = 'path'
         else:
-            b, m2, w, h, ds = image_for_mcp(data, full)
+            b, m2, w, h, ds = image_for_mcp(pathlib.Path(path).read_bytes(), full)
             meta['image'] = {'mime': m2, 'base64': base64.b64encode(b).decode(), 'width': w, 'height': h, 'bytes': len(b), 'downscaled': ds}
     elif mode == 'text':
         if text is None: meta['note'] = f'no text form for {mime}; returned metadata and path'
         else: meta['text'] = text[:400000]; meta['text_truncated'] = len(text) > 400000
     elif mode == 'base64':
-        if len(data) > 10 * 2**20: meta['note'] = 'larger than 10 MB; use the path'
-        else: meta['base64'] = base64.b64encode(data).decode()
+        if size > 10 * 2**20: meta['note'] = 'larger than 10 MB; use the path'
+        else: meta['base64'] = base64.b64encode(pathlib.Path(path).read_bytes()).decode()
     meta['returned_as'] = mode
     return meta
 
@@ -1804,40 +2100,96 @@ def _click_chooser_open(root, wid):
     btn = _chooser_named(root, 'Open', roles=('push button',)) if root else None
     if btn is not None:
         if _activate_or_click(btn):
-            time.sleep(1.0); return
-        try: act(btn); time.sleep(1.0); return
+            _wait_until(lambda: not _open_files_wids(), 1.0, .2); return
+        try: act(btn); _wait_until(lambda: not _open_files_wids(), 1.0, .2); return
         except Exception: pass
     g = _xdo_geom(wid)
     # Open is the right-hand action button on the dialog footer.
     _click_xy(g['X'] + g['WIDTH'] - 55, g['Y'] + g['HEIGHT'] - 32)
     time.sleep(1.0)
-def _composer_has_chip(name):
-    d, _ = main_doc()
-    if not d: return False
-    return bool(find(d, 'push button', pred=lambda e: nm(e) == name or nm(e).startswith(('Remove ' + name, name))))
+ATTACH_BUTTON_NAMES = ('Add', 'Add files', 'Attach', 'Add content', 'Add attachment')
+ATTACH_FILE_TIMEOUT = float(os.environ.get('CPG_ATTACH_FILE_TIMEOUT', '20'))   # one file: picker, path, Open, chip
+class AttachError(AppError):
+    """One file failed at one step; names both."""
+    def __init__(self, name, step, detail=''):
+        self.file, self.step = name, step
+        super().__init__(f"{name}: {step}{(' (' + detail + ')') if detail else ''}; nothing was sent")
+class Deadline:
+    """The whole send's time limit, enforced inside the job (not by an outside SIGTERM)."""
+    def __init__(self, secs=None): self.secs = secs; self.t = (time.time() + secs) if secs else None
+    def left(self, cap=None):
+        x = float('inf') if self.t is None else max(0.0, self.t - time.time())
+        return min(x, cap) if cap is not None else x
+    def check(self, what):
+        if self.t is not None and time.time() >= self.t: raise AppError(f'send took longer than {int(self.secs)} s ({what}); nothing was sent')
+def _find_rev(root, r=None, name=None, maxn=40000):
+    """find() that walks children last-first: popups and menus are appended at the end of the document."""
+    st = [root] if root is not None else []; n = 0
+    while st and n < maxn:
+        e = st.pop(); n += 1
+        if (r is None or role(e) == r) and (name is None or nm(e) == name): return e
+        st.extend(kids(e))
+    return None
+def _composer_scope(e=None, levels=8):
+    """The smallest ancestor of the composer that also holds its Add button: chips and the Add control live there,
+    so polling it is cheap (a whole-document walk over AT-SPI takes seconds on a long transcript)."""
+    e = e or composer(); node = e
+    for _ in range(levels):
+        try: par = node.get_parent() if node is not None else None
+        except Exception: par = None
+        if par is None: break
+        node = par
+        if find(node, 'push button', pred=lambda x: nm(x) in ATTACH_BUTTON_NAMES) is not None: return node
+    return node
+def _chip_pred(name): return lambda e: nm(e) == name or nm(e).startswith(('Remove ' + name, name))
+def _composer_has_chip(name, scope=None):
+    root = scope if scope is not None else main_doc()[0]
+    if root is None: return False
+    return bool(find(root, 'push button', pred=_chip_pred(name)))
+def _remove_chip(name, scope=None):
+    """Press the chip's own "Remove <name>" (it only takes the file out of the unsent message). True when it's gone."""
+    root = scope if scope is not None else main_doc()[0]
+    b = find(root, 'push button', pred=lambda e: nm(e).startswith('Remove ' + name)) if root is not None else None
+    if b is None: return not _composer_has_chip(name)
+    try: act(b, f'Remove {name}')
+    except Exception: return False
+    return bool(_wait_until(lambda: not _composer_has_chip(name, scope) and not _composer_has_chip(name), 3, .25))
 # ---- location-bar attach (primary). The GTK chooser is NOT exposed over AT-SPI in this Electron build
 # (Chromium owns the ATK root; the only extra claude-desktop frame is an unnamed hidden window), so
 # browsing by row name can never find a folder/file. Typing the absolute path into the location bar
 # needs no AT-SPI at all; OCR of the chooser header is used only as evidence for the attach-only test.
-def _open_attach_picker():
-    info = locate_attach_control()
-    if not info.get('attach_item'): raise AppError('attach menu item not found; nothing attached')
-    d, _ = main_doc(); b = find(d, 'push button', info['attach_button']); act(b); time.sleep(1.2)
-    it = find(main_doc()[0], 'menu item', info['attach_item']); act(it); time.sleep(2.0)
-    wid = _wait_open_files(15)
+class AttachCtx:
+    """What a send learns once and reuses for every file: the Add button and menu item names, the composer scope."""
+    button = item = scope = None
+    def ensure(self):
+        if self.item is None:
+            info = locate_attach_control()
+            if not info.get('attach_item'): raise AppError('attach menu item not found; nothing attached')
+            self.button, self.item = info['attach_button'], info['attach_item']; self.scope = _composer_scope()
+        return self
+def _open_attach_picker(ctx=None, limit=15):
+    ctx = (ctx or AttachCtx()).ensure(); t0 = time.time()
+    b = find(ctx.scope, 'push button', ctx.button) if ctx.scope is not None else None
+    if b is None: ctx.scope = _composer_scope(); b = find(ctx.scope, 'push button', ctx.button) or find(main_doc()[0], 'push button', ctx.button)
+    if b is None: raise AppError(f'the {ctx.button!r} button is gone from the composer; nothing attached')
+    act(b)
+    it = _wait_until(lambda: _find_rev(main_doc()[0], 'menu item', ctx.item), min(5, limit), .15)
+    if it is None: xdo('key', 'Escape'); raise AppError(f'the {ctx.item!r} menu item did not show; nothing attached')
+    act(it)
+    wid = _wait_open_files(max(1, limit - (time.time() - t0)))
     if not wid: raise AppError('Open Files dialog did not appear; nothing attached')
     _ensure_chooser_left_visible(wid)
     return wid
 def _chooser_type_location(wid, path):
     """Open the location bar (ctrl+L), replace its text with the absolute path. Never presses Return/Open."""
-    xdo('windowactivate', '--sync', str(wid)); time.sleep(.2)
-    xdo('key', '--clearmodifiers', 'ctrl+l'); time.sleep(.5)
+    xdo('windowactivate', '--sync', str(wid)); time.sleep(.15)
+    xdo('key', '--clearmodifiers', 'ctrl+l'); time.sleep(.35)
     xdo('key', '--clearmodifiers', 'ctrl+a'); time.sleep(.1)
     if _has_non_ascii(path):
         if not _paste_via_clipboard(path): raise AppError('could not paste the (non-ASCII) path into Open Files; nothing attached')
     else:
-        xdo('type', '--delay', '12', '--clearmodifiers', '--file', '-', inp=path)
-    time.sleep(.9)
+        xdo('type', '--delay', '8', '--clearmodifiers', '--file', '-', inp=path)
+    time.sleep(.5)
     if _active_win_name() not in ('Open Files', 'Open File'):
         raise AppError(f'Open Files lost focus while typing the path (active={_active_win_name()!r}); nothing attached')
 def _alnum(t): return re.sub(r'[^a-z0-9]', '', (t or '').lower())
@@ -1879,11 +2231,15 @@ def _chooser_ocr(wid, save=None, needle=None):
         except Exception as ex:
             log(f'chooser OCR unavailable: {ex!r}'); break
     return chr(10).join(out)
-def _attach_one_via_location(f, test_only=False, shot_dir=None):
+def _attach_one_via_location(f, test_only=False, shot_dir=None, ctx=None, deadline=None, per_file=None):
     path = str(pathlib.Path(f['path']).expanduser().resolve())
     if not os.path.isfile(path) or not os.access(path, os.R_OK): raise AppError(f'{path} is not a readable file; nothing attached')
-    wid = _open_attach_picker()
-    _chooser_type_location(wid, path)
+    deadline = deadline or Deadline(); limit = deadline.left(per_file or ATTACH_FILE_TIMEOUT); t0 = time.time(); tm = {}
+    def left(): return limit - (time.time() - t0)
+    try: wid = _open_attach_picker(ctx, limit=max(1, left()))
+    except AppError as ex: raise AttachError(f['name'], 'opening the file picker', str(ex).replace('; nothing attached', ''))
+    tm['picker'] = time.time() - t0
+    _chooser_type_location(wid, path); tm['path'] = time.time() - t0 - sum(tm.values())
     shot = str(pathlib.Path(shot_dir)/f"attach-test-{_alnum(f['name'])[:40]}.jpg") if (test_only and shot_dir) else None
     txt = _chooser_ocr(wid, save=shot, needle=f['name']) if test_only else ''
     if test_only:
@@ -1892,27 +2248,44 @@ def _attach_one_via_location(f, test_only=False, shot_dir=None):
         log(f"attach-test {f['name']}: typed path, ocr_match={ok}, cancelled={closed}")
         return {'name': f['name'], 'path': path, 'size': os.path.getsize(path), 'typed_in_location_bar': True,
                 'ocr_saw_filename': ok, 'ocr_text': ' '.join(txt.split())[:200], 'screenshot': shot, 'cancelled': closed}
-    _click_chooser_open(None, wid)
-    t0 = time.time()
-    while time.time() - t0 < 45:
-        if _composer_has_chip(f['name']): log(f"attached {f['name']} via location bar"); return {'name': f['name'], 'attached': True}
-        time.sleep(1)
-    raise AppError(f"{f['name']} did not appear in the composer after Open (location bar); nothing was sent")
-def attach_files(files, test_only=False, shot_dir=None):
-    """Primary: one picker pass per file, absolute path typed into the GTK location bar.
+    if left() <= 0: raise AttachError(f['name'], f'typing the path took longer than {int(limit)} s')
+    _click_chooser_open(None, wid); tm['open'] = time.time() - t0 - sum(tm.values())
+    scope = getattr(ctx, 'scope', None); polls = 0
+    while True:
+        polls += 1
+        # the composer scope is cheap to poll; every 5th poll checks the whole document in case the chip sits elsewhere
+        if _composer_has_chip(f['name'], scope if (scope is not None and polls % 5) else None):
+            tm['chip'] = time.time() - t0 - sum(tm.values())
+            log(f"attached {f['name']} via location bar in {time.time() - t0:.1f} s (" + ', '.join(f'{k} {v:.1f}' for k, v in tm.items()) + ')')
+            return {'name': f['name'], 'attached': True, 'seconds': round(time.time() - t0, 1), 'timing': {k: round(v, 1) for k, v in tm.items()}}
+        if left() <= 0: break
+        time.sleep(.3)
+    if _open_files_wids(): _dismiss_open_files('attach timeout')
+    log(f"attach {f['name']} timed out after {time.time() - t0:.1f} s (" + ', '.join(f'{k} {v:.1f}' for k, v in tm.items()) + ')')
+    raise AttachError(f['name'], f'did not appear in the composer within {int(limit)} s after Open')
+def attach_files(files, test_only=False, shot_dir=None, done=None, deadline=None, per_file=None, progress=None):
+    """Primary: one picker pass per file, absolute path typed into the GTK location bar, each file bounded by per_file
+    seconds (CPG_ATTACH_FILE_TIMEOUT) and the whole send by deadline. done (a list) collects the names attached so far,
+    so a caller can take them out again when a later file fails.
     Fallback (only if the path step fails before Open is pressed): legacy browse-by-name.
     test_only: type the path, OCR + screenshot, then Cancel; never presses Open; returns per-file results."""
     if not files: return []
-    results = []
+    results = []; done = done if done is not None else []; deadline = deadline or Deadline()
     try:
-        for f in files:
+        ctx = AttachCtx()
+        for i, f in enumerate(files):
+            deadline.check(f"before attaching {f['name']} ({i + 1}/{len(files)})")
+            if progress: progress('attaching', attached=i, total=len(files), file=f['name'])
             try:
-                results.append(_attach_one_via_location(f, test_only=test_only, shot_dir=shot_dir))
+                results.append(_attach_one_via_location(f, test_only=test_only, shot_dir=shot_dir, ctx=ctx, deadline=deadline, per_file=per_file))
+                if not test_only: done.append(f['name'])
             except AppError as ex:
+                if isinstance(ex, AttachError) and ex.step != 'opening the file picker': raise
                 if 'after Open' in str(ex) or test_only: raise
                 log(f"location-bar attach failed for {f['name']}: {ex}; falling back to browse")
-                _dismiss_open_files('location fallback')
-                _attach_files_impl([f]); results.append({'name': f['name'], 'attached': True, 'via': 'browse'})
+                _dismiss_open_files('location fallback'); deadline.check(f"falling back to browse for {f['name']}")
+                _attach_files_impl([f]); results.append({'name': f['name'], 'attached': True, 'via': 'browse'}); done.append(f['name'])
+        if progress and not test_only: progress('attached', attached=len(files), total=len(files))
         return results
     except BaseException:
         try: _dismiss_open_files('attach failed')
@@ -2568,9 +2941,31 @@ def open_target_settled(chan, tid, maxs=25):
         return True
     raise Busy(f'transcript panel did not settle for {tid or "primary"} after reopen; retry')
 
-def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, force=False, stay=False, shot=None, dry_run=False, type_test=False, attachments=None, bot_name=None, attach_test=False):
+def _cleanup_composer(names, scope=None):
+    """After a failed send: close a file picker, take our chips out of the unsent message, clear typed text.
+    -> report of what was done and what is still there. Never presses Send."""
+    rep = {'open_files_closed': None, 'chips_removed': [], 'chips_left': [], 'composer_empty': None}
+    try: rep['open_files_closed'] = _dismiss_open_files('send cleanup')
+    except BaseException as ex: log(f'cleanup: dismiss failed {ex!r}')
+    for nme in names or []:
+        try: (rep['chips_removed'] if _remove_chip(nme, scope) else rep['chips_left']).append(nme)
+        except BaseException as ex: rep['chips_left'].append(nme); log(f'cleanup: remove {nme} failed {ex!r}')
+    try:
+        e = composer()
+        if e is not None and norm(composer_text(e)): _clear_composer_keys(); time.sleep(.3)
+        e = composer(); rep['composer_empty'] = bool(e is not None and not norm(composer_text(e)))
+    except BaseException as ex: log(f'cleanup: clear failed {ex!r}')
+    log(f'send cleanup: {rep}')
+    return rep
+_PROGRESS = None   # set by a send job's worker: progress(state, **detail)
+def _progress(state, **kw):
+    if _PROGRESS:
+        try: _PROGRESS(state, **kw)
+        except Exception as ex: log(f'progress hook failed: {ex!r}')
+def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, force=False, stay=False, shot=None, dry_run=False, type_test=False, attachments=None, bot_name=None, attach_test=False, deadline_s=None, prepared_files=None):
     STAGE.maybe_sweep()
-    files = prepare_attachment_files(attachments) if attachments else []
+    files = prepared_files if prepared_files is not None else (prepare_attachment_files(attachments) if attachments else [])
+    dl = Deadline(deadline_s)
     if (not message or not message.strip()) and not files: raise CPGError('message is empty')
     # Origin bracket: every message this plugin types starts with "[sent by Grok Bot]" (never doubled).
     message = add_origin(message or '', bot_name if bot_name is not None else CFG.get('bot_name'))
@@ -2582,9 +2977,9 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 open_target(chan, None); settle(None, 15); ths = parse_threads(chan, True, True); ensure_threads_panel(False)
                 tid = resolve_thread(chan, tid[7:], ths)
                 if str(tid).startswith('LOOKUP:'): raise NotFound(f'no thread titled {thread!r} in {p["name"]}')
-            open_target(chan, tid); settle(tid)
-            dl = dialogs()
-            if dl: raise AppError(f'a dialog is open in the app, not sending: {dl}')
+            _progress('opening'); open_target(chan, tid); settle(tid)
+            dlg_open = dialogs()
+            if dlg_open: raise AppError(f'a dialog is open in the app, not sending: {dlg_open}')
             if _open_files_wids():
                 if dry_run and not type_test:
                     raise AppError('a GTK Open Files chooser is open on the app display (left by a failed attach); a real send would dismiss it first. Nothing typed.')
@@ -2616,29 +3011,42 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 if files: r.update(would_attach=files, attach_control=att_info, attach_note='dry run stops at locating the attach control: attaching uploads the file to claude.ai')
                 return r
             if dry_run and files: raise CPGError('type_test with attachments is not supported (attaching uploads the file); use plain --dry-run')
-            if files: attach_files(files); e = composer() or e
-            if message: type_text(e, message)
-            got = composer_text(composer() or e)
-            if dry_run:
-                typed_ok, diff = send_text_diff(message, got)
-                if shot: screenshot(shot)
-                _clear_composer_keys(); time.sleep(.5)
-                left = composer_text(composer() or e)
-                out = {'dry_run': True, 'typed_and_cleared': True, 'project': p['name'], 'thread_id': tid or 'primary', 'route': route(),
-                        'composer': nm(e), 'typed_text_matched': typed_ok, 'composer_empty_after_clear': not bool(normalize_for_send_compare(left)),
-                        'send_button_found': bool(sb), 'latest_message_index': bmax, 'note': 'Send was NOT pressed'}
-                if not typed_ok: out['typed_diff'] = diff
-                return out
-            ok_match, diff = send_text_diff(message, got)
-            if not ok_match:
-                _clear_composer_keys()
-                raise AppError('typed text did not match; cleared the box, nothing was sent' + chr(10) + (diff or ''))
-            d, _ = main_doc()
-            sb = [b for b in find_all(d, 'push button', lambda b: nm(b) in ('Send', 'Send message', 'Submit'))]
-            if sb: act(sb[-1], 'Send')
-            else: xdo('key', '--clearmodifiers', 'Return')
-            log(f'sent {len(message)} chars to {p["name"]} {tid or "primary"}: {message[:80]!r}')
-            m = _verify_sent(tid, message, bmax)
+            attached = []; send_pressed = False
+            try:
+                if files: attach_files(files, done=attached, deadline=dl, progress=_progress); e = composer() or e
+                dl.check('before typing'); _progress('typing', attached=len(attached), total=len(files))
+                if message: type_text(e, message)
+                dl.check('after typing')
+                got = composer_text(composer() or e)
+                if dry_run:
+                    typed_ok, diff = send_text_diff(message, got)
+                    if shot: screenshot(shot)
+                    _clear_composer_keys(); time.sleep(.5)
+                    left = composer_text(composer() or e)
+                    out = {'dry_run': True, 'typed_and_cleared': True, 'project': p['name'], 'thread_id': tid or 'primary', 'route': route(),
+                            'composer': nm(e), 'typed_text_matched': typed_ok, 'composer_empty_after_clear': not bool(normalize_for_send_compare(left)),
+                            'send_button_found': bool(sb), 'latest_message_index': bmax, 'note': 'Send was NOT pressed'}
+                    if not typed_ok: out['typed_diff'] = diff
+                    return out
+                ok_match, diff = send_text_diff(message, got)
+                if not ok_match:
+                    _clear_composer_keys()
+                    raise AppError('typed text did not match; cleared the box, nothing was sent' + chr(10) + (diff or ''))
+                d, _ = main_doc()
+                sb = [b for b in find_all(d, 'push button', lambda b: nm(b) in ('Send', 'Send message', 'Submit'))]
+                _progress('sending', attached=len(attached), total=len(files)); send_pressed = True
+                if sb: act(sb[-1], 'Send')
+                else: xdo('key', '--clearmodifiers', 'Return')
+                log(f'sent {len(message)} chars to {p["name"]} {tid or "primary"}: {message[:80]!r}')
+                _progress('verifying', attached=len(attached), total=len(files))
+                m = _verify_sent(tid, message, bmax)
+            except BaseException as ex:
+                if send_pressed: raise                     # it went out: never clear or retry after Send
+                rep = _cleanup_composer(attached)
+                try: ex.cleanup = rep
+                except Exception: pass
+                log(f'send to {p["name"]} {tid or "primary"} stopped before Send ({type(ex).__name__}: {ex}); cleanup {rep}')
+                raise
             res = {'project': p['name'], 'project_id': chan, 'thread_id': tid or 'primary', 'sent': True, 'verified_in_transcript': bool(m), 'attached': [f['name'] for f in files] or None,
                    'message_index': m['index'] if m else None, 'origin_header': message.split(chr(10), 1)[0], 'sent_at_local': ct(now().isoformat()), 'route': route()}
             if shot: screenshot(shot)
@@ -2648,6 +3056,98 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
         w = op_wait(p['id'], tid, after_index=res['message_index'] or bmax, timeout=timeout, poll=poll, force=force, stay=stay, shot=shot)
         res['reply'] = w
     return res
+# ---- sends as background jobs: the MCP tool answers within its budget; a retry joins the job and never sends twice
+SEND_BUDGET = float(os.environ.get('CPG_SEND_BUDGET', '40'))
+SEND_DEADLINE = float(os.environ.get('CPG_SEND_DEADLINE', '420'))          # a whole send, enforced inside the job
+SEND_DEDUPE_WINDOW = float(os.environ.get('CPG_SEND_DEDUPE_S', '1800'))    # the same send again within this window joins the old job
+SEND_FINAL = ('sent', 'failed')
+def send_job_key(chan, thread, message, files, idempotency_key=None):
+    if idempotency_key: base = f'key|{chan}|{idempotency_key}'
+    else:
+        fs = '|'.join(f"{f['name']}:{f['size']}" for f in files or [])
+        base = f"{chan}|{norm(str(thread)).casefold() if thread else 'primary'}|{message}|{fs}"
+    return 's' + hashlib.sha256(base.encode()).hexdigest()[:23]
+def _send_state_public(st):
+    out = {k: st.get(k) for k in ('job_id', 'state', 'step', 'attached', 'total', 'file', 'error', 'error_type', 'cleanup', 'project', 'thread_id') if st.get(k) is not None}
+    if st.get('started_ts'): out['started_at_local'] = ct(datetime.datetime.fromtimestamp(st['started_ts'], datetime.timezone.utc).isoformat())
+    if st.get('finished_ts'): out['finished_at_local'] = ct(datetime.datetime.fromtimestamp(st['finished_ts'], datetime.timezone.utc).isoformat())
+    if st.get('state') == 'attaching' and st.get('total'): out['progress'] = f"attaching {min(st.get('attached', 0) + 1, st['total'])}/{st['total']}"
+    return out
+def _send_answer(st, joined=False):
+    if st.get('state') == 'sent':
+        r = dict(st.get('result') or {}); r['job_id'] = st['job_id']
+        if joined: r['joined_existing_send'] = True; r['note'] = 'this send already went out (same message and files, or same idempotency_key); nothing was sent again'
+        return r
+    if st.get('state') == 'failed':
+        out = dict(_send_state_public(st), sent=False, failed=True)
+        out['note'] = 'nothing was sent' + ('; ' + st['cleanup_note'] if st.get('cleanup_note') else '') + '. Calling again starts a new attempt.'
+        return out
+    return dict(_send_state_public(st), pending=True, sent=False, retry_after_s=15,
+                note='still sending in the app; call claude_thread_send again with the same arguments (or job_id) for the result. '
+                     'It joins this send and never types or sends the message twice.')
+def op_send_job(project, message, thread=None, force=False, attachments=None, bot_name=None, budget=None, idempotency_key=None, job_id=None):
+    """A send that answers within `budget` seconds: the send itself runs in a detached worker."""
+    budget = SEND_BUDGET if budget is None else budget
+    if job_id:
+        st = job_read(SEND_JOBS, job_id)
+        if not st: raise NotFound(f'no send job {job_id}')
+        if st.get('state') not in SEND_FINAL and not job_running(SEND_JOBS, job_id):
+            st = dict(st, state='failed', error='the send job ended without a result (killed?)', error_type='AppError'); job_write(SEND_JOBS, job_id, st)
+        return _send_answer(st)
+    STAGE.maybe_sweep()
+    files = prepare_attachment_files(attachments) if attachments else []
+    if (not message or not message.strip()) and not files: raise CPGError('message is empty')
+    full = add_origin(message or '', bot_name if bot_name is not None else CFG.get('bot_name'))
+    if len(full) > 20000: raise CPGError('message longer than 20000 characters')
+    p = resolve_project(project); chan = p['id']; key = send_job_key(chan, thread, full, files, idempotency_key)
+    st = job_read(SEND_JOBS, key); t_start = time.time()
+    if st and job_running(SEND_JOBS, key): joined = True                     # a retry while the send runs: join it
+    elif st and st.get('state') == 'sent' and time.time() - (st.get('finished_ts') or 0) < SEND_DEDUPE_WINDOW: return _send_answer(st, joined=True)
+    else:
+        joined = False
+        spec = {'project': chan, 'thread': thread, 'message': message, 'bot_name': bot_name, 'force': force, 'files': files, 'deadline_s': SEND_DEADLINE}
+        job_write(SEND_JOBS, key, {'job_id': key, 'state': 'queued', 'project': p['name'], 'thread_id': thread or 'primary', 'started_ts': t_start,
+                                   'total': len(files), 'attached': 0, 'spec': spec})
+        how = spawn_job([sys.executable, str(pathlib.Path(__file__).resolve()), '--json'] + (['--force'] if force else []) + ['send-job', key], f'send-{key[:8]}')
+        log(f'send job {key} started for {p["name"]} {thread or "primary"} ({len(files)} file(s), {how})')
+    while time.time() - t_start < budget:
+        st = job_read(SEND_JOBS, key) or {}
+        if st.get('state') in SEND_FINAL: return _send_answer(st, joined=joined)
+        time.sleep(.3)
+    return _send_answer(job_read(SEND_JOBS, key) or {'job_id': key, 'state': 'queued'})
+def run_send_job(key):
+    """The worker: one send for key, under its job lock, with progress written to the job file. A SIGTERM or the
+    deadline stops it cleanly: the composer is cleaned up, the lock released, the app sent home, the reason recorded."""
+    global _PROGRESS
+    f = job_lock(SEND_JOBS, key)
+    if f is None: return {'job_id': key, 'note': 'this send job is already running'}
+    st = job_read(SEND_JOBS, key) or {}
+    try:
+        if st.get('state') in SEND_FINAL: return _send_answer(st)
+        spec = st.get('spec') or {}
+        def prog(state, **kw):
+            st.update(kw, state=state, step=state, updated_ts=time.time()); job_write(SEND_JOBS, key, st)
+        _PROGRESS = prog; prog('starting')
+        try:
+            r = op_send(spec['project'], spec.get('message') or '', spec.get('thread'), force=spec.get('force', False), bot_name=spec.get('bot_name'),
+                        prepared_files=spec.get('files') or [], deadline_s=spec.get('deadline_s'))
+            st.update(state='sent', step='sent', result=r)
+        except BaseException as ex:
+            rep = getattr(ex, 'cleanup', None)
+            if st.get('state') in ('sending', 'verifying'):   # Send was pressed: it went out, so it must never be retried
+                st.update(state='sent', step='sent', result={'project': st.get('project'), 'thread_id': st.get('thread_id'), 'sent': True, 'verified_in_transcript': False,
+                                                              'note': f'Send was pressed, then {type(ex).__name__}: {ex}; check the thread before sending again'})
+                st['finished_ts'] = time.time(); st.pop('spec', None); job_write(SEND_JOBS, key, st); log(f'send job {key}: sent, then {ex!r}')
+                return _send_answer(st)
+            st.update(state='failed', error=str(ex) or type(ex).__name__, error_type=type(ex).__name__, cleanup=rep,
+                      cleanup_note=(None if not rep else ('chips still in the composer: ' + ', '.join(rep['chips_left']) if rep.get('chips_left') else 'the composer was left clean')))
+            if isinstance(ex, (CPGError, Interrupted)): pass
+            else: log(f'send job {key} crashed: {ex!r}')
+        st['finished_ts'] = time.time(); st.pop('spec', None) if st.get('state') == 'sent' else None
+        job_write(SEND_JOBS, key, st); log(f"send job {key}: {st['state']} ({st.get('error') or ''})")
+        return _send_answer(st)
+    finally:
+        _PROGRESS = None; job_unlock(f)
 def op_wait(project, thread=None, after_index=None, timeout=600, poll=10, force=False, stay=False, shot=None, quiet_polls=2):
     """Poll the transcript until Claude has replied after `after_index` and is no longer working."""
     p = resolve_project(project); chan = p['id']; tid = resolve_thread(chan, thread)
@@ -3445,6 +3945,9 @@ def op_status():
     try: holder = json.loads((ROOT/'ui.holder').read_text())
     except Exception: pass
     st = {'vnc_viewers': vnc_viewers(), 'x_idle_min': x_idle_min(), 'effective_user_idle_min': effective_user_idle_min(), 'own_input_age_min': last_own_input_age_min(), 'lock_holder': holder}
+    try: st['jobs_running'] = jobs_running() or None
+    except Exception as ex: st['jobs_running'] = None; log(f'jobs_running failed: {ex!r}')
+    st['busy'] = bool(holder) or bool(st['jobs_running'])   # deploys: restart only when this is false
     try: st['route'] = route(); st['dialogs'] = dialogs() or None; st['stray_open_files'] = len(_open_files_wids()) or None; st['signed_in'] = not re.search(r'/login|/oauth', st['route'] or '')
     except Exception as ex: st['app'] = f'not reachable: {ex}'
     try:
@@ -3539,8 +4042,12 @@ def main(argv=None):
     s = sp.add_parser('read', help='read a thread (primary by default)'); s.add_argument('project'); s.add_argument('--thread'); s.add_argument('--cached', action='store_true'); s.add_argument('--max', type=int, default=20); s.add_argument('--history', type=int, default=0); s.add_argument('--expand', action='store_true'); s.add_argument('--attachments', action='store_true', help='list attachments/blocks per message'); s.add_argument('--images', action='store_true', help='inline image thumbnails (base64, JSON only)'); s.add_argument('--markdown', action='store_true', help='markdown rendering of each message')
     s = sp.add_parser('send', help='type + send a message'); s.add_argument('project'); s.add_argument('message', nargs='?'); s.add_argument('--file'); s.add_argument('--thread'); s.add_argument('--wait', action='store_true'); s.add_argument('--timeout', type=int, default=600); s.add_argument('--poll', type=int, default=10); s.add_argument('--dry-run', action='store_true', help='check targeting only; never presses Send'); s.add_argument('--type-test', action='store_true', help='with --dry-run: type the text, read it back, clear it'); s.add_argument('--attach-test', action='store_true', help='with --dry-run and --attach: open the picker per file, type the path, OCR it, Cancel (never Open/Send)'); s.add_argument('--attach', action='append', help='file on the Claude Code host to attach (repeatable); --attach-json for base64')
     s.add_argument('--attach-json', help='JSON file: [{"path":...} | {"base64":...,"filename":...}]'); s.add_argument('--bot-name', help='name in the origin bracket: [sent by Grok Bot · NAME]')
+    s.add_argument('--budget', type=float, help='answer within this many seconds; the send runs as a background job (call again, or --job-id, for the result)'); s.add_argument('--idempotency-key', help='with --budget: calls with the same key are one send'); s.add_argument('--job-id', help='the result of a send job (nothing is sent)')
+    s = sp.add_parser('send-job', help=argparse.SUPPRESS); s.add_argument('key')
+    sp.add_parser('jobs', help='running background jobs (attachment fetches, sends); exit 0, busy=true while any runs')
     s = sp.add_parser('attachment', help='get an attachment / file / image from a message'); s.add_argument('action', choices=['get', 'list']); s.add_argument('project'); s.add_argument('id', nargs='?', help='<message_index>.<n> (from read --attachments)')
     s.add_argument('--thread'); s.add_argument('--message', type=int); s.add_argument('--n', type=int, default=1); s.add_argument('--as', dest='as_', default='auto', choices=['auto', 'image', 'text', 'base64', 'path']); s.add_argument('--full', action='store_true', help='full-size image (default: max 1600 px / ~1 MB)'); s.add_argument('--out', help='also write the returned image/text/bytes to this file')
+    s.add_argument('--budget', type=float, help='answer within this many seconds; a fetch still running comes back as pending with a job_id (call again for the file)'); s.add_argument('--refresh', action='store_true', help='fetch again even if this attachment was fetched before'); s.add_argument('--job', action='store_true', help=argparse.SUPPRESS)
     s = sp.add_parser('create-thread', help='ask the primary thread to start a new thread'); s.add_argument('project'); s.add_argument('title'); s.add_argument('instructions'); s.add_argument('--wait', action='store_true'); s.add_argument('--timeout', type=int, default=900); s.add_argument('--dry-run', action='store_true'); s.add_argument('--bot-name')
     s = sp.add_parser('wait', help='wait for a reply'); s.add_argument('project'); s.add_argument('--thread'); s.add_argument('--after', type=int); s.add_argument('--timeout', type=int, default=600); s.add_argument('--poll', type=int, default=10)
     s = sp.add_parser('create-project', help='create a project (optionally attach a GitHub repo, pin)'); s.add_argument('name'); s.add_argument('--description'); s.add_argument('--repo', help='owner/name or https://github.com/owner/name'); s.add_argument('--pin', dest='pin', action='store_true', default=True); s.add_argument('--no-pin', dest='pin', action='store_false')
@@ -3566,8 +4073,10 @@ def main(argv=None):
     a = ap.parse_args(argv); F = dict(force=a.force)  # argv already hoisted
     import signal
     lim = int(os.environ.get('CPG_MAX_SECONDS', '0')) or ((getattr(a, 'timeout', 0) or 0) + 300 if a.cmd in ('send', 'wait') else 600)
-    def _alarm(*_): raise AppError(f'claude-projects watchdog: {a.cmd} exceeded {lim}s')
-    signal.signal(signal.SIGALRM, _alarm); signal.alarm(lim)
+    if a.cmd == 'send-job': lim = int(SEND_DEADLINE + 120)        # the job enforces its own deadline; this is the backstop
+    def _alarm(*_): raise Interrupted(f'claude-projects watchdog: {a.cmd} exceeded {lim}s')
+    def _term(*_): raise Interrupted('stopped by SIGTERM')    # finally blocks run: composer cleanup, lock release, go home
+    signal.signal(signal.SIGALRM, _alarm); signal.alarm(lim); signal.signal(signal.SIGTERM, _term)
     try:
         if a.cmd == 'projects': res = op_projects(a.refresh, a.all, **F, stay=a.stay)
         elif a.cmd == 'project': res = op_project_get(a.project, not a.cached, a.resolved, a.all_threads, a.max, **F, stay=a.stay, shot=a.shot)
@@ -3581,7 +4090,7 @@ def main(argv=None):
                 r = op_read(a.project, a.thread, True, 0 if a.message else 30, 0, False, **F, stay=a.stay)
                 res = {'project': r['project'], 'thread_id': r['thread_id'], 'attachments': [dict(at, message_index=m['index']) for m in r['messages'] if (not a.message or m['index'] == a.message) for at in (m.get('attachments') or [])]}
             else:
-                res = op_attachment_get(a.project, a.thread, a.id, a.message, a.n, a.as_, a.full, **F, stay=a.stay, shot=a.shot)
+                res = op_attachment_get(a.project, a.thread, a.id, a.message, a.n, a.as_, a.full, **F, stay=a.stay, shot=a.shot, budget=a.budget, refresh=a.refresh, job=a.job)
                 if a.out:
                     o = pathlib.Path(a.out).expanduser(); o.parent.mkdir(parents=True, exist_ok=True)
                     if res.get('image'): o.write_bytes(base64.b64decode(res['image']['base64']))
@@ -3591,6 +4100,13 @@ def main(argv=None):
                     if o: res['written_to'] = str(o)
                 if not a.json:
                     res = {k: (v if k not in ('image', 'base64') else (dict(v, base64=f"<{len(v['base64'])} base64 chars>") if isinstance(v, dict) else f'<{len(v)} base64 chars>')) for k, v in res.items()}
+        elif a.cmd == 'send-job': res = run_send_job(a.key)
+        elif a.cmd == 'jobs': jr = jobs_running(); res = {'busy': bool(jr), 'jobs_running': jr}
+        elif a.cmd == 'send' and a.job_id: res = op_send_job(a.project, None, job_id=a.job_id)
+        elif a.cmd == 'send' and a.budget is not None and not a.dry_run and not a.wait:
+            msg = pathlib.Path(a.file).read_text(encoding='utf-8') if a.file else (a.message if a.message not in (None, '-') else sys.stdin.read())
+            atts = list(a.attach or []) + (json.loads(pathlib.Path(a.attach_json).read_text()) if a.attach_json else [])
+            res = op_send_job(a.project, msg.rstrip('\n'), a.thread, a.force, atts or None, a.bot_name, a.budget, a.idempotency_key)
         elif a.cmd == 'send':
             msg = pathlib.Path(a.file).read_text(encoding='utf-8') if a.file else (a.message if a.message not in (None, '-') else sys.stdin.read())
             atts = list(a.attach or []) + (json.loads(pathlib.Path(a.attach_json).read_text()) if a.attach_json else [])
@@ -3626,8 +4142,13 @@ def main(argv=None):
         elif a.cmd == 'home':
             with ui_lock('home', a.force): res = {'home': go_home(), 'route': route()}
         elif a.cmd == 'screenshot': res = {'file': screenshot(a.file)}
+    except Interrupted as ex:
+        out = {'error': 'Interrupted', 'message': str(ex), 'code': 6}
+        if getattr(ex, 'cleanup', None): out['cleanup'] = ex.cleanup
+        print(json.dumps(out, ensure_ascii=False) if a.json else f'claude-projects: {ex}', file=sys.stdout if a.json else sys.stderr); log(f'{a.cmd} interrupted: {ex}'); return 6
     except CPGError as ex:
         out = {'error': type(ex).__name__, 'message': str(ex), 'code': ex.code}
+        if getattr(ex, 'cleanup', None): out['cleanup'] = ex.cleanup
         if isinstance(ex, Busy):
             h = _read_ui_holder()
             if h: out['holder'] = h

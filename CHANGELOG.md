@@ -5,6 +5,15 @@
 Not tagged or released yet. Brings the guided setup to the public repo: one copy-paste prompt, an agent-driven
 `claude-projects setup` flow, Mac and Windows hosts, the 24th tool `claude_setup`, and hosts without systemd.
 
+### Attachment reliability
+- Files the app opens in its Overview document viewer are saved as original bytes through its Download file button;
+  the HTTP cache by file name and a crop or rendered text are fallbacks, and `source` says which was used.
+- `claude_thread_attachment_get` and `claude_thread_send` answer within about 45 s; a call still running returns
+  `pending` with a `job_id`, and calling again joins that job instead of fetching or sending twice. A cached file is
+  served only while the transcript still shows the same attachment at that message.
+- File names no longer carry the tile's type badge. A failed send removes the chips it attached and clears its text,
+  each file has its own attach timeout, nothing that comments or posts is pressed, and `status` lists running jobs.
+
 ### New names (the old ones keep working)
 - The CLI is `claude-projects` (was `ccp`), the modules are `cpg_*.py` (were `ccp_*.py`), install.sh's services are
   `cpg-*` (were `ccp-*`), and the environment variables are `CPG_*` (were `CCP_*`). On a Mac the VM is
