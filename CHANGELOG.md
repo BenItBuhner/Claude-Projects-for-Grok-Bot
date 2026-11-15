@@ -86,6 +86,27 @@ Not tagged or released yet. Brings the guided setup to the public repo: one copy
   ccp inside, viewer link and password file, sleep, connecting, verify commands and common failures.
 - Mac and Windows connect lines keep `~` and `$` for the Linux side (`bash -lc '...'`, `wsl.exe --exec`).
 
+### Installing a pre-release from the host scripts
+- `hosts/macos/setup.sh --ref REF` and `hosts/windows/setup.ps1 -Ref REF` (or `CCP_REPO_REF`; the flag wins) install a
+  branch, a tag or a full commit sha instead of the default branch, e.g. `--ref release-1.0.2`. A fresh install clones
+  and checks it out; a re-run fetches it from origin and checks it out, and refuses when the existing clone has local
+  changes or local commits. The ref is validated strictly in the outer script before anything runs. Without a ref,
+  nothing changes.
+
+### Windows and install fixes (from runs on GitHub's Windows runners)
+- `setup.ps1` on the old inbox WSL (Windows Server 2022 and other builds without `wsl --version`): it tries
+  `wsl --update --web-download`, then `wsl --update`. If WSL 2.4.4+ still isn't there, or `wsl --status` or
+  `wsl --set-default-version 2` fails, it stops with a readable message and next steps instead of a stack trace: turn
+  on the two Windows features as admin, reboot, install the WSL package from github.com/microsoft/WSL/releases, re-run.
+  It makes WSL 2 the default and converts an existing WSL 1 `ClaudeProjects` distro. Any other unexpected failure ends
+  with one readable line.
+- `setup.ps1` decodes `wsl.exe` output from its raw bytes: UTF-16LE (with or without a BOM, which the old wsl.exe prints
+  whatever `WSL_UTF8` says) or UTF-8, with NULs and BOMs dropped, for `--version`, `-l -q`, `-l -v` and `--status`.
+- `install.sh` installs a sign-in browser deb only when apt has a candidate for it (`firefox-esr` or `chromium` on
+  Debian). On Ubuntu, which has neither, it goes straight to the chromium snap with no apt error.
+- Preflight on a Windows distro no longer warns that sudo needs a password: the `ccp` user has no sudo by design, and
+  the check now says root steps run from Windows with `wsl -u root`.
+
 ## 1.0.1 (2026-11-14)
 
 ### Fixed

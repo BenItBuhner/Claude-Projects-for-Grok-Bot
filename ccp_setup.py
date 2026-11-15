@@ -345,7 +345,11 @@ def linux_checks(f, host_class):
     if os.geteuid() == 0:
         out.append(check('user', 'warn', 'running as root; the plugin is meant to run as a regular user', fix='Create or use a regular user with sudo'))
     rc, _, _ = RUN(['sudo', '-n', 'true'], timeout=10)
-    out.append(check('sudo', 'pass' if rc == 0 or os.geteuid() == 0 else 'warn',
+    if host_class == 'windows_runtime' and rc != 0 and os.geteuid() != 0:
+        # the Windows distro's ccp user has no sudo by design: hosts/windows/setup.ps1 runs the root steps itself
+        out.append(check('sudo', 'pass', 'root steps run from Windows with wsl -u root; no sudo needed',
+                         command=as_root(f'{REPO}/install.sh --apt-only')))
+    else: out.append(check('sudo', 'pass' if rc == 0 or os.geteuid() == 0 else 'warn',
                      'passwordless sudo available' if rc == 0 or os.geteuid() == 0 else
                      ('sudo needs a password' if shutil.which('sudo') else 'no sudo here: the package step needs someone with root'),
                      fix=None if rc == 0 or os.geteuid() == 0 else f'The user pastes one line: {as_root(f"{REPO}/install.sh --apt-only")}'))

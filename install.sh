@@ -95,14 +95,30 @@ PKGS=(xvfb xauth xfonts-base fonts-dejavu-core fonts-liberation openbox x11vnc n
       gir1.2-atspi-2.0 at-spi2-core xdotool xclip gnome-keyring libsecret-1-0 dbus dbus-user-session libxss1 iproute2
       poppler-utils curl gnupg git ca-certificates)
 APT_INSTALL=(apt-get install -y -qq --no-install-recommends)
+# The first of firefox-esr / chromium that apt can really install here (a candidate other than "(none)"), or nothing.
+# CCP_BROWSER_CANDIDATES overrides the list (tests).
+apt_browser_pkg() {
+  local p c
+  for p in ${CCP_BROWSER_CANDIDATES:-firefox-esr chromium}; do
+    c="$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+    if [ -n "$c" ] && [ "$c" != "(none)" ]; then echo "$p"; return 0; fi
+  done
+  return 0
+}
 if [ "$DO_APT" = 1 ]; then
   say "Installing system packages ($AS)"
   missing=(); for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
-  if [ ${#missing[@]} -gt 0 ]; then run $SUDO apt-get update -qq; run $SUDO DEBIAN_FRONTEND=noninteractive "${APT_INSTALL[@]}" "${missing[@]}"; fi
-  # a real browser for the in-viewport sign-in (Ubuntu's chromium-browser/firefox debs are only stubs for snaps)
+  APT_UPDATED=0
+  if [ ${#missing[@]} -gt 0 ]; then run $SUDO apt-get update -qq; APT_UPDATED=1; run $SUDO DEBIAN_FRONTEND=noninteractive "${APT_INSTALL[@]}" "${missing[@]}"; fi
+  # a real browser for the in-viewport sign-in. Only install a package this distro really has: firefox-esr and chromium
+  # are real debs on Debian, but Ubuntu has neither (its chromium-browser/firefox debs are only stubs for snaps), so
+  # there the snap is the path. Checking the apt candidate first keeps apt's "no installation candidate" error away.
   if ! "$REPO/bin/claude-signin-browser" --check >/dev/null 2>&1; then
     say "Installing a browser for the in-viewport sign-in"
-    run $SUDO DEBIAN_FRONTEND=noninteractive "${APT_INSTALL[@]}" firefox-esr || run $SUDO DEBIAN_FRONTEND=noninteractive "${APT_INSTALL[@]}" chromium || true
+    BROWSER_PKG="$(apt_browser_pkg)"
+    if [ -z "$BROWSER_PKG" ] && [ "$APT_UPDATED" = 0 ]; then run $SUDO apt-get update -qq; BROWSER_PKG="$(apt_browser_pkg)"; fi
+    if [ -n "$BROWSER_PKG" ]; then run $SUDO DEBIAN_FRONTEND=noninteractive "${APT_INSTALL[@]}" "$BROWSER_PKG" || true
+    else echo "    no firefox-esr or chromium deb here (normal on Ubuntu): using the chromium snap"; fi
     if ! "$REPO/bin/claude-signin-browser" --check >/dev/null 2>&1 && command -v snap >/dev/null && snap version >/dev/null 2>&1; then
       run $SUDO snap install chromium || true
     fi

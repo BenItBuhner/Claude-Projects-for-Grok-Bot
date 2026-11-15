@@ -24,6 +24,24 @@ Setting it up by hand instead of with the scripts (or finishing a run that stopp
 with verify commands and common failures, in [skill/references/macos.md](../skill/references/macos.md) and
 [skill/references/windows.md](../skill/references/windows.md).
 
+### Installing a branch, tag or commit (pre-releases)
+
+The scripts install the repository's default branch. To test a pre-release, give them a branch, a tag or a full
+40-character commit sha:
+
+```bash
+bash hosts/macos/setup.sh --ref release-1.0.2                                            # Mac
+powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1 -Ref release-1.0.2     # Windows
+```
+
+Both scripts also read `CCP_REPO_REF` (the flag wins). On a fresh install they clone and check out that ref; on a
+re-run, where `~/claude-projects-mcp` already exists in the VM or distro, they fetch the ref from origin and check it
+out, and they refuse (leaving the clone as it is) when it has uncommitted changes or local commits that origin doesn't
+have. Without a ref nothing changes: a missing clone gets the default branch and an existing one is left alone, so to go
+back from a pre-release run the script again with `--ref main` / `-Ref main`. The ref is checked before anything runs:
+letters, digits and `. _ / -` only, at most 200 characters, no leading `-`, no `..`, `//`, `@{`, trailing `/` or `.`,
+no part starting with `.` or ending in `.lock`, and `git check-ref-format` where git is installed.
+
 After setup, run every `ccp` command from the host side through the wrappers:
 
 ```bash

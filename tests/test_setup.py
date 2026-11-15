@@ -417,7 +417,7 @@ def test_windows_script_arrives_intact_through_fake_wsl(tmp_path):
     t = tmp_path / 't.ps1'
     t.write_text(r'''$ErrorActionPreference = "Stop"
 $src = Get-Content "%s" -Raw
-$funcs = $src.Substring($src.IndexOf('function Say'), $src.IndexOf('# 1. WSL itself') - $src.IndexOf('function Say'))
+$funcs = $src.Substring($src.IndexOf('function Say'), $src.IndexOf('# 0. The ref') - $src.IndexOf('function Say'))
 $Distro = "ClaudeProjects"; $DryRun = $false
 Invoke-Expression $funcs
 $script = @'
@@ -466,3 +466,44 @@ def test_every_tool_count_says_24():
         for m in re.finditer(r'\b(\d+)\s+(?:MCP\s+)?tools\b|\((\d+) tools\)', text):
             seen.append((f.name, int(m.group(1) or m.group(2))))
     assert seen and all(n == S.EXPECTED_TOOLS == 24 for _, n in seen), seen
+
+
+# ---------------------------------------------------------------- findings from a real Windows runner (PR 9)
+
+def test_windows_distro_preflight_does_not_warn_about_sudo(env, monkeypatch):
+    f = {'os': 'linux', 'arch': 'x86_64', 'python': '3.12.1', 'user': 'ccp', 'hostname': 'h', 'distro_id': 'ubuntu',
+         'version_id': '24.04', 'distro_like': 'debian', 'pretty': 'Ubuntu 24.04', 'wsl': True, 'pid1': 'systemd'}
+    monkeypatch.setattr(S.os, 'geteuid', lambda: 1000)
+    monkeypatch.setattr(S, 'RUN', lambda cmd, timeout=60, env=None, input=None: (1, '', 'a password is required') if cmd[0] == 'sudo' else (0, 'yes', ''))
+    monkeypatch.setattr(S, 'detect_platform', lambda: f)
+    c = {x['id']: x for x in S.linux_checks(f, 'windows_runtime')}['sudo']
+    assert c['status'] == 'pass' and c['detail'] == 'root steps run from Windows with wsl -u root; no sudo needed'
+    assert 'wsl.exe -d' in c['command'] and '-u root' in c['command'] and 'fix' not in c
+    other = {x['id']: x for x in S.linux_checks(f, 'always_on_linux')}['sudo']
+    assert other['status'] == 'warn', 'elsewhere a password-only sudo still warns'
+
+
+def _browser_pick(tmp_path, policies, candidates=None):
+    import subprocess
+    b = tmp_path / 'bin'; b.mkdir(exist_ok=True)
+    cases = ''.join(f'  {p}) printf "{p}:\\n  Installed: (none)\\n  Candidate: {c}\\n";;\n' for p, c in policies.items())
+    (b / 'apt-cache').write_text(f'#!/bin/bash\ncase "$2" in\n{cases}  *) ;;\nesac\n'); (b / 'apt-cache').chmod(0o755)
+    sh = (REPO / 'install.sh').read_text()
+    fn = sh[sh.index('apt_browser_pkg() {'):]
+    fn = fn[:fn.index('\n}\n') + 3]
+    env = dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+    if candidates: env['CCP_BROWSER_CANDIDATES'] = candidates
+    r = subprocess.run(['bash', '-c', fn + 'apt_browser_pkg'], capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and r.stderr == ''
+    return r.stdout.strip()
+
+
+def test_install_picks_a_browser_deb_that_exists(tmp_path):
+    # Ubuntu 24.04: neither deb has a candidate -> nothing (the snap path), and apt is never asked to install it
+    assert _browser_pick(tmp_path, {'firefox-esr': '(none)', 'chromium': '(none)'}) == ''
+    assert _browser_pick(tmp_path, {}) == '', 'unknown package: no output at all'
+    assert _browser_pick(tmp_path, {'firefox-esr': '115.12.0esr-1~deb12u1', 'chromium': '126.0-1'}) == 'firefox-esr'   # Debian
+    assert _browser_pick(tmp_path, {'firefox-esr': '(none)', 'chromium': '126.0-1'}) == 'chromium'
+    sh = (REPO / 'install.sh').read_text()
+    assert 'firefox-esr || run' not in sh, 'no blind apt install that prints "no installation candidate"'
+    assert '"$BROWSER_PKG"' in sh and 'snap install chromium' in sh

@@ -2,7 +2,9 @@
 
 Use this when the plugin should run on an always-on Windows PC and `hosts\windows\setup.ps1` isn't used (you only have
 a shell on the PC, the script failed halfway, or the user wants to see each step). The script does exactly these
-steps; if it's there, prefer `powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1 [-BotName NAME] [-AtStartup] [-WebDownload] [-NoSleep] [-DryRun]`.
+steps; if it's there, prefer `powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1 [-BotName NAME] [-Ref REF] [-AtStartup] [-WebDownload] [-NoSleep] [-DryRun]`.
+For a pre-release, add `-Ref release-1.0.2` (a branch, a tag or a full commit sha; `$env:CCP_REPO_REF = 'release-1.0.2'`
+works too, and the parameter wins).
 
 ## Why WSL
 
@@ -71,6 +73,22 @@ Invoke-Distro ccp 'cd ~/claude-projects-mcp && ./ccp setup install --no-apt --bo
 Invoke-Distro ccp 'cd ~/claude-projects-mcp && ./ccp setup status'
 ```
 
+**A pre-release branch, tag or commit** (what `-Ref` / `CCP_REPO_REF` do). Only use a ref made of letters, digits and
+`. _ / -` (no leading `-`, no `..`). `Invoke-Distro` carries the script as base64, so quoting is safe, but a strict ref
+keeps the git commands unambiguous. Check the clone is clean first; if the first line prints anything, stop and ask the
+user instead of overwriting their changes:
+
+```powershell
+Invoke-Distro ccp 'cd ~/claude-projects-mcp && git status --porcelain --untracked-files=no'   # must print nothing
+# a branch:
+Invoke-Distro ccp 'cd ~/claude-projects-mcp && git fetch origin +refs/heads/release-1.0.2:refs/remotes/origin/release-1.0.2 && git checkout -B release-1.0.2 origin/release-1.0.2'
+# or a tag:
+Invoke-Distro ccp 'cd ~/claude-projects-mcp && git fetch --force origin refs/tags/v1.0.1:refs/tags/v1.0.1 && git checkout --detach v1.0.1'
+```
+
+Then run the `install.sh --apt-only` and `./ccp setup install --no-apt` lines again (re-running `setup.ps1 -Ref
+release-1.0.2` does all of this).
+
 When a result says `needs_sudo` or gives an `as_root` line, run that line through `Invoke-Distro root` from Windows:
 `ccp` itself has no sudo. Afterwards `hosts\windows\ccp.cmd setup <command>` (from cmd) does the same as
 `Invoke-Distro ccp 'cd ~/claude-projects-mcp && ./ccp setup <command>'`.
@@ -133,6 +151,8 @@ curl.exe -s http://127.0.0.1:8791/healthz            # ok (when the HTTP server 
 
 | symptom | fix |
 |---|---|
+| `wsl --version` isn't recognized, `--install --no-distribution` isn't either, `Default Version: 1` (old inbox WSL, e.g. Windows Server 2022) | `wsl --update --web-download` (or `wsl --update`); if `wsl --version` still fails: as admin `dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart` and the same for `VirtualMachinePlatform`, reboot, install the `.msi` from https://github.com/microsoft/WSL/releases, then `wsl --set-default-version 2` |
+| `wsl.exe` output looks like `W S L` with gaps, or parsing it finds nothing | the old wsl.exe prints UTF-16LE and ignores `WSL_UTF8`: decode the raw bytes as UTF-16LE (and drop NULs), as `setup.ps1` does |
 | `wsl --install` asks for admin or says WSL is missing | run it once in an administrator PowerShell, reboot, re-run |
 | `--name` is an unknown option | WSL older than 2.4.4: `wsl --update` (or `--web-download`) |
 | Store download fails or is blocked | add `--web-download` to `--install` and `--update` |
