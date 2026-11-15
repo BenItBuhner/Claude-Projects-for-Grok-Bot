@@ -20,7 +20,7 @@ class App:
     """Just enough of the app for op_send: a composer, chips, and a picker that attaches each file after Open."""
     def __init__(self, stall=None, term_on=None):
         self.chips, self.text, self.stall, self.term_on = [], '', stall, term_on
-        self.sent = 0; self.removed = []; self.home = 0; self.current = None; self.dismissed = 0
+        self.sent = 0; self.removed = []; self.home = 0; self.current = None; self.dismissed = 0; self.sent_with = None
 
 
 @pytest.fixture
@@ -51,6 +51,7 @@ def app(monkeypatch, files):
     monkeypatch.setattr(C, '_chooser_type_location', type_loc)
     monkeypatch.setattr(C, '_click_chooser_open', click_open)
     monkeypatch.setattr(C, '_composer_has_chip', lambda name, scope=None: name in a.chips)
+    monkeypatch.setattr(C, 'composer_chips', lambda scope=None: list(a.chips))
     monkeypatch.setattr(C, '_dismiss_open_files', lambda reason='': (setattr(a, 'dismissed', a.dismissed + 1), True)[1])
     def remove(name, scope=None):
         a.removed.append(name); a.chips.remove(name); return True
@@ -58,7 +59,10 @@ def app(monkeypatch, files):
     monkeypatch.setattr(C, '_clear_composer_keys', lambda: setattr(a, 'text', ''))
     def type_text(e, msg): a.text = msg
     monkeypatch.setattr(C, 'type_text', type_text)
-    monkeypatch.setattr(C, 'xdo', lambda *x, **k: setattr(a, 'sent', a.sent + 1) if x[-1:] == ('Return',) else '')
+    def xdo(*x, **k):
+        if x[-1:] == ('Return',): a.sent += 1; a.sent_with = (list(a.chips), a.text)
+        return ''
+    monkeypatch.setattr(C, 'xdo', xdo)
     monkeypatch.setattr(C, '_verify_sent', lambda tid, msg, bmax, secs=40: {'index': 7})
     # a fast clock: every poll advances 1 s, so a 20 s per-file limit ends in 20 polls
     clock = [1_000_000.0]
@@ -104,6 +108,138 @@ def test_text_mismatch_also_removes_the_chips(app, files, monkeypatch):
     with pytest.raises(C.AppError, match='did not match'):
         C.op_send('Notes', 'see the files', prepared_files=files[:2])
     assert app.chips == [] and app.text == '' and app.sent == 0
+
+
+# ---------------------------------------------------------------- leftover chips and the open dry run
+
+def test_dry_run_is_not_empty_with_leftover_chips(app, files):
+    app.chips = ['old.png', 'old.png']
+    r = C.op_send('Notes', 'hi', dry_run=True)
+    assert r['composer_empty'] is False and r['composer_chips'] == ['old.png', 'old.png'] and 'clear_leftovers' in r['leftover_note']
+    assert app.sent == 0 and app.chips == ['old.png', 'old.png'] and app.removed == []
+
+
+def test_text_only_send_refuses_with_leftover_chips(app, files):
+    app.chips = ['old.png', 'notes.txt']
+    with pytest.raises(C.Refused) as ei:
+        C.op_send('Notes', 'just text')
+    assert 'old.png' in str(ei.value) and 'notes.txt' in str(ei.value) and 'clear_leftovers' in str(ei.value)
+    assert app.sent == 0 and app.text == '' and app.chips == ['old.png', 'notes.txt'], 'nothing typed, chips left alone'
+
+
+def test_clear_leftovers_removes_them_and_sends_only_the_text(app, files):
+    app.chips = ['old.png', 'old.png', 'pill.js']
+    r = C.op_send('Notes', 'just text', clear_leftovers=True)
+    assert r['sent'] and r['cleared_leftovers'] == ['old.png', 'old.png', 'pill.js'] and r['attached'] is None
+    assert app.removed == ['old.png', 'old.png', 'pill.js'] and app.sent == 1
+    assert app.sent_with[0] == [] and app.sent_with[1].endswith('just text'), 'Send saw no chips, only the text'
+
+
+def test_clear_leftovers_then_attach_sends_only_our_file(app, files):
+    app.chips = ['pill.js']                       # the same name as the file we attach: the leftover still goes first
+    r = C.op_send('Notes', 'with file', prepared_files=files[1:2], clear_leftovers=True)
+    assert r['sent'] and r['attached'] == ['pill.js'] and app.sent_with[0] == ['pill.js'] and app.removed == ['pill.js']
+
+
+def test_extra_chip_before_send_aborts_cleanly(app, files, monkeypatch):
+    def type_and_stray(e, msg): app.text = msg; app.chips.append('stray.png')
+    monkeypatch.setattr(C, 'type_text', type_and_stray)
+    with pytest.raises(C.AppError, match=r"did not add: \['stray.png'\].*nothing was sent") as ei:
+        C.op_send('Notes', 'see the files', prepared_files=files[:2])
+    assert app.sent == 0 and app.text == '' and app.removed == ['ember-dots.mp4', 'pill.js'] and app.chips == ['stray.png']
+    assert ei.value.cleanup['chips_removed'] == ['ember-dots.mp4', 'pill.js']
+
+
+def test_duplicate_chip_names_are_all_detected(monkeypatch):
+    buttons = ['Remove a.png', 'Add', 'Remove a.png', 'Remove b.json', 'a.png', 'Remove model']
+    monkeypatch.setattr(C, 'nm', lambda e: e)
+    monkeypatch.setattr(C, 'find_all', lambda root, r=None, pred=None: [b for b in buttons if pred is None or pred(b)])
+    assert C.composer_chips(scope='composer') == ['a.png', 'a.png', 'b.json']
+    assert C._chip_count('a.png', 'composer') == 2 and C._chip_count('b.js', 'composer') == 0, 'b.js is not b.json'
+    assert C._extra_chips(['a.png', 'a.png', 'b.json'], ['a.png']) == (['a.png', 'b.json'], [])
+    assert C._extra_chips(['a.png'], ['a.png', 'c.txt']) == ([], ['c.txt'])
+
+
+def test_remove_chip_with_duplicates_waits_for_the_count_to_drop(monkeypatch):
+    chips = ['a.png', 'a.png']
+    monkeypatch.setattr(C, 'main_doc', lambda: ('doc', ''))
+    monkeypatch.setattr(C, 'nm', lambda e: e)
+    monkeypatch.setattr(C, 'find', lambda root, r=None, name=None, pred=None: next((b for b in ['Remove ' + c for c in chips] if pred is None or pred(b)), None))
+    monkeypatch.setattr(C, 'act', lambda b, what='': chips.remove(b[7:]) or True)
+    monkeypatch.setattr(C, 'composer_chips', lambda scope=None: list(chips))
+    assert C._remove_chip('a.png') is True and chips == ['a.png'], 'one press, one chip; the other copy is still there'
+    assert C._remove_chip('a.png') is True and chips == []
+
+
+def test_attach_test_open_attaches_removes_and_never_types_or_sends(app, files, monkeypatch):
+    monkeypatch.setattr(C, 'type_text', lambda e, msg: pytest.fail('the open test must never type the message'))
+    r = C.op_send('Notes', 'hi', dry_run=True, attach_test='open', prepared_files=files[:3])
+    assert r['attach_test'] == 'open' and r['all_attached'] and r['all_removed'] and r['composer_empty'] is True and r['composer_chips'] == []
+    assert [f['name'] for f in r['files']] == ['ember-dots.mp4', 'pill.js', 'full.js'] and all('seconds' in f for f in r['files'])
+    assert app.removed == ['ember-dots.mp4', 'pill.js', 'full.js'] and app.sent == 0 and app.text == '' and 'timing' in r
+
+
+def test_attach_test_open_refuses_with_leftovers(app, files):
+    app.chips = ['old.png']
+    with pytest.raises(C.Refused, match='old.png'):
+        C.op_send('Notes', 'hi', dry_run=True, attach_test='open', prepared_files=files[:1])
+    assert app.chips == ['old.png'] and app.removed == [] and app.sent == 0
+
+
+def test_attach_test_open_stall_cleans_up(app, files):
+    app.stall = 'pill.js'
+    with pytest.raises(C.AttachError):
+        C.op_send('Notes', 'hi', dry_run=True, attach_test='open', prepared_files=files[:3])
+    assert app.chips == [] and app.sent == 0 and app.removed == ['ember-dots.mp4']
+
+
+def test_cli_attach_test_modes_and_clear_leftovers(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(C, 'op_send', lambda *a, **k: seen.update(k) or {'ok': True})
+    for argv, mode in ((['send', 'P', 'm', '--dry-run', '--attach-test'], 'cancel'), (['send', 'P', 'm', '--dry-run', '--attach-test=open'], 'open'),
+                       (['send', 'P', 'm', '--dry-run'], False)):
+        assert C.main(['--json'] + argv) == 0 and seen['attach_test'] == mode
+    assert C.main(['--json', 'send', 'P', 'm', '--clear-leftovers']) == 0 and seen['clear_leftovers'] is True
+
+
+def test_joined_send_says_how_to_send_again(jobs, files):
+    r1 = send(files, budget=5); r2 = send(files, budget=5)
+    assert r1['sent'] and r2['joined_existing_send'] is True and 'new idempotency_key' in r2['note'] and jobs['sends'] == 1
+    r3 = send(files, budget=5, idempotency_key='again-1')
+    assert r3['sent'] and not r3.get('joined_existing_send') and jobs['sends'] == 2
+
+
+def test_clear_leftovers_reaches_the_worker(jobs, files, monkeypatch):
+    seen = {}
+    real = C.op_send
+    monkeypatch.setattr(C, 'op_send', lambda *a, **k: seen.update(k) or real(*a, **k))
+    send(files, budget=5, clear_leftovers=True)
+    assert seen.get('clear_leftovers') is True
+
+
+# ---------------------------------------------------------------- deploy busy check
+
+def test_jobs_exits_nonzero_while_the_ui_lock_is_held(monkeypatch, capsys):
+    monkeypatch.setattr(C, 'jobs_running', lambda: [])
+    monkeypatch.setattr(C, '_read_ui_holder', lambda: {'pid': os.getpid(), 'op': 'attachment Demo 138.2'})
+    assert C.main(['--json', 'jobs']) == 3
+    out = json.loads(capsys.readouterr().out)
+    assert out['busy'] is True and out['lock_holder']['op'] == 'attachment Demo 138.2'
+
+
+def test_jobs_exits_nonzero_while_a_job_runs_and_zero_when_idle(monkeypatch, capsys):
+    monkeypatch.setattr(C, '_read_ui_holder', lambda: None)
+    monkeypatch.setattr(C, 'jobs_running', lambda: [{'kind': 'send', 'job_id': 's1'}])
+    assert C.main(['--json', 'jobs']) == 3
+    monkeypatch.setattr(C, 'jobs_running', lambda: [])
+    assert C.main(['--json', 'jobs']) == 0 and json.loads(capsys.readouterr().out.strip().splitlines()[-1])['busy'] is False
+
+
+def test_a_dead_lock_holder_is_not_busy(monkeypatch):
+    p = subprocess.Popen([sys.executable, '-c', 'pass']); p.wait()
+    monkeypatch.setattr(C, '_read_ui_holder', lambda: {'pid': p.pid, 'op': 'killed'})
+    monkeypatch.setattr(C, 'jobs_running', lambda: [])
+    assert C.ui_lock_holder() is None and C.deploy_busy()['busy'] is False
 
 
 # ---------------------------------------------------------------- the job layer

@@ -7,7 +7,7 @@ Transports:
   python cpg_mcp.py --stdio    stdio (for an MCP client on the same machine or over `ssh host ... --stdio`); no token
 """
 import os, sys, json, hmac, asyncio, tempfile, pathlib
-from typing import Optional
+from typing import Optional, Union
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from cpg_config import CFG
 from cpg_origin import ORIGIN_PREFIX, origin_header
@@ -191,8 +191,8 @@ async def claude_thread_attachment_get(project: str, thread: Optional[str] = Non
 @mcp.tool()
 async def claude_thread_send(project: str, message: str, thread: Optional[str] = None, wait: bool = False,
                              timeout_s: int = 600, poll_s: int = 10, dry_run: bool = False, attachments: Optional[list[dict]] = None,
-                             bot_name: Optional[str] = None, attach_test: bool = False, force: bool = False,
-                             idempotency_key: Optional[str] = None, job_id: Optional[str] = None) -> dict:
+                             bot_name: Optional[str] = None, attach_test: Union[bool, str] = False, force: bool = False,
+                             idempotency_key: Optional[str] = None, job_id: Optional[str] = None, clear_leftovers: bool = False) -> dict:
     """Type `message` into the composer of the project's primary thread (thread=None) or a child thread and press Send, exactly as
     the user would; then read the transcript back (verified_in_transcript, message_index). wait=true also waits for Claude's reply
     (see claude_thread_wait). Refuses if the box holds an unsent draft or a VNC viewer is connected (force=true overrides the viewer
@@ -203,6 +203,12 @@ async def claude_thread_send(project: str, message: str, thread: Optional[str] =
     to claude.ai, so dry_run=true only validates the files and locates the attach control (nothing is attached).
     dry_run=true + attach_test=true goes one step further without uploading: for each file it opens the app's file picker, types
     the absolute path into the location bar, confirms by OCR that the picker shows it, and presses Cancel (never Open, never Send).
+    dry_run=true + attach_test="open" presses Open per file, waits for the chip (timing per file), takes the chip out again with
+    its own "Remove <name>" button and checks the box is empty. It never types the message and never presses Send (the file
+    does upload with the chip, then the chip is removed).
+    LEFTOVER CHIPS: composer_chips lists attachments already in the box (duplicates included) and composer_empty is false while
+    any is there. A real send refuses when the box holds chips it did not add, naming them; clear_leftovers=true removes them
+    with their own Remove buttons first (they are never sent). Right before Send it checks again and stops if any extra chip shows.
     Base64 attachments are written to a unique folder under the managed staging dir (staging/outgoing/<stamp>-<id>/<filename>),
     so same-named files never overwrite each other; the result lists each file's absolute path. See claude_staging.
     ORIGIN BRACKET: the typed text always starts with the line '[sent by Grok Bot]' ('[sent by Grok Bot · <bot_name>]' when
@@ -211,18 +217,19 @@ async def claude_thread_send(project: str, message: str, thread: Optional[str] =
     ALWAYS ANSWERS WITHIN ABOUT 45 S: a send (wait=false) runs as a background job. If it is still attaching or typing after
     about 40 s, the answer is pending=true with job_id, state (opening, attaching n/N, typing, sending, verifying) and
     retry_after_s; call claude_thread_send again with the same arguments, or with job_id, for the result. A repeat of the
-    same send (same message and files, or the same idempotency_key, within 30 min) joins it and never sends twice. A failed
+    same send (same message and files, or the same idempotency_key, within 30 min) joins it and never sends twice: the answer
+    then says joined_existing_send=true. To send the same text again on purpose, pass a new idempotency_key. A failed
     send says which file and step failed and that the composer was cleaned up; nothing was sent. With attachments,
     wait=true is not waited for: call claude_thread_wait after the send."""
     if job_id:
         return await run(flags(force) + ['send', project, '--job-id', job_id], 60)
     jobbed = not dry_run and (not wait or bool(attachments))
     if jobbed:
-        a = ['send', project] + (['--thread', thread] if thread else []) + (['--bot-name', bot_name] if bot_name else []) + ['--budget', str(SEND_BUDGET)] + (['--idempotency-key', idempotency_key] if idempotency_key else [])
+        a = ['send', project] + (['--thread', thread] if thread else []) + (['--bot-name', bot_name] if bot_name else []) + ['--budget', str(SEND_BUDGET)] + (['--idempotency-key', idempotency_key] if idempotency_key else []) + (['--clear-leftovers'] if clear_leftovers else [])
         r = await run(flags(force) + a, 120, msg=message, attach=attachments, busy_budget=60)
         if wait and isinstance(r, dict): r['wait_note'] = 'wait=true is not waited for on a send with attachments; call claude_thread_wait'
         return r
-    a = ['send', project] + (['--thread', thread] if thread else []) + (['--bot-name', bot_name] if bot_name else []) + (['--wait', '--timeout', str(timeout_s), '--poll', str(poll_s)] if wait else []) + (['--dry-run'] if dry_run else []) + (['--attach-test'] if (dry_run and attach_test) else [])
+    a = ['send', project] + (['--thread', thread] if thread else []) + (['--bot-name', bot_name] if bot_name else []) + (['--wait', '--timeout', str(timeout_s), '--poll', str(poll_s)] if wait else []) + (['--dry-run'] if dry_run else []) + ([('--attach-test=open' if attach_test == 'open' else '--attach-test')] if (dry_run and attach_test) else []) + (['--clear-leftovers'] if clear_leftovers else [])
     return await run(flags(force) + a, (timeout_s + 400) if wait else 300, msg=message, attach=attachments, busy_budget=(timeout_s + 400) if wait else 900)
 
 @mcp.tool()

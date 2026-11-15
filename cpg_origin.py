@@ -52,17 +52,29 @@ def strip_origin(message):
 
 _LEADING_RE = re.compile(r'^[\ufeff \t\r\n]*\[sent by Grok Bot(?: · [^\]\n]{1,64})?\][ \t]*(?:\r?\n)?')
 
+# Attachment chips the app renders before the message text in a read-back transcript: "[attached image: x.png]",
+# "[MP4 ember-dots.mp4]", "[x.png]", or a bare badge + file name ("PNG x.png"). Only a run of these, directly
+# followed by the bracket, is skipped; a bracket anywhere later in the text still doesn't count.
+_CHIP = r'(?:\[(?!sent by Grok Bot)[^\]\n]{1,240}\]|(?:[A-Z0-9]{2,5} )?[^\s\[\]]{1,200}\.[A-Za-z0-9]{1,10})'
+_CHIPS_RE = re.compile(r'^[\ufeff \t\r\n]*(?:' + _CHIP + r'[ \t\r\n]*)+(?=\[sent by Grok Bot)')
+
+
+def _skip_chips(text):
+    m = _CHIPS_RE.match(text or '')
+    return (text or '')[m.end():] if m else (text or '')
+
 
 def origin_body(text):
     """Text with a leading origin bracket removed, also when the read-back collapsed the header's newline
     ('[sent by Grok Bot] body'). Text without a bracket is returned unchanged. Use it for summaries and
     for comparing a bot-sent message with the words the caller asked to send."""
     text = text or ''
-    m = _LEADING_RE.match(text)
-    return text[m.end():].lstrip(' \t') if m else text
+    m = _LEADING_RE.match(text) or _LEADING_RE.match(_skip_chips(text))
+    if not m: return text
+    return (text if _LEADING_RE.match(text) else _skip_chips(text))[m.end():].lstrip(' \t')
 
 
 def is_bot_sent(text):
     """Lenient check for transcripts read back from the app (which may collapse the header's newline):
-    a message is bot-sent when its text starts with ORIGIN_PREFIX."""
-    return (text or '').lstrip('\ufeff \t\r\n').startswith(ORIGIN_PREFIX)
+    a message is bot-sent when its text starts with ORIGIN_PREFIX, also after attachment chips the app shows first."""
+    return _skip_chips(text).lstrip('\ufeff \t\r\n').startswith(ORIGIN_PREFIX)
