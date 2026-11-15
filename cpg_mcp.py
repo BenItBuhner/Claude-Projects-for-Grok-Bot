@@ -59,6 +59,10 @@ def _is_busy(res):
     msg = (res.get('message') or '').lower()
     return 'busy' in msg and res.get('error') in ('Busy', 'ToolError', None)
 
+ATTACH_BUDGET = float(os.environ.get('CPG_ATTACH_BUDGET', '40'))   # MCP clients give up near 60 s
+SEND_BUDGET = float(os.environ.get('CPG_SEND_BUDGET', '40'))
+
+
 async def run(args, timeout=900, msg=None, attach=None, busy_budget=None):
     """Run claude-projects --json. On Busy (code 3 / holder), auto-retry with 2..15s backoff until busy_budget
     (default 900s; wait tools pass their own timeout). Each attempt keeps the original subprocess timeout."""
@@ -166,22 +170,29 @@ async def claude_thread_read(project: str, thread: Optional[str] = None, refresh
 
 @mcp.tool(structured_output=False)
 async def claude_thread_attachment_get(project: str, thread: Optional[str] = None, attachment_id: Optional[str] = None,
-                                       message_index: Optional[int] = None, n: int = 1, as_: str = 'auto', full_size: bool = False, force: bool = False):
+                                       message_index: Optional[int] = None, n: int = 1, as_: str = 'auto', full_size: bool = False, force: bool = False,
+                                       refresh: bool = False):
     """Get the content of an attachment shown in a thread (no message is sent; it only opens the preview / file pane in the app and
     closes it again). Pick it with attachment_id ('<message_index>.<n>' from claude_thread_read attachments) or message_index + n.
     as_: 'auto' (images as image content, text-like files as text, others as metadata + path), 'image', 'text', 'base64', 'path'.
     Images are downscaled to max 1600 px / ~1 MB unless full_size=true. Sources, best first: Claude's output files and file links are
     saved through the app's own Download button (original bytes, any size; original=true); uploaded images and files come from the app's
-    HTTP cache; otherwise the app's file pane read through the accessibility tree (text files) or a screen crop of the preview
-    (original=false). A pane still showing 'Loading file' is reported as not available. The file is kept on the Claude Code host (path_on_host,
-    named by sha256). Links and PRs return just their URL."""
-    a = ['attachment', 'get', project] + ([attachment_id] if attachment_id else []) + (['--thread', thread] if thread else []) + (['--message', str(message_index), '--n', str(n)] if (message_index is not None and not attachment_id) else []) + ['--as', as_] + (['--full'] if full_size else [])
-    return with_images(await run(flags(force) + a, 300))
+    HTTP cache, or, when the app opens its Overview document viewer, through that viewer's Download file button (viewer='overview');
+    otherwise the app's file pane or viewer read through the accessibility tree (text files) or a screen crop of the preview
+    (original=false). A pane still showing 'Loading file' is reported as not available; a not-available result lists each step
+    that failed (failed_steps). Nothing that comments or posts is ever pressed. The file is kept on the Claude Code host (path_on_host,
+    named by sha256). Links and PRs return just their URL.
+    Always answers within about 45 s: a fetch still running then comes back as pending=true with a job_id; call again with the
+    same arguments (after retry_after_s) to get the file. Calls for the same attachment share one fetch, and a fetched file is
+    answered from the cache (cached=true); refresh=true fetches it again."""
+    a = ['attachment', 'get', project] + ([attachment_id] if attachment_id else []) + (['--thread', thread] if thread else []) + (['--message', str(message_index), '--n', str(n)] if (message_index is not None and not attachment_id) else []) + ['--as', as_] + (['--full'] if full_size else []) + (['--refresh'] if refresh else []) + ['--budget', str(ATTACH_BUDGET)]
+    return with_images(await run(flags(force) + a, 120))
 
 @mcp.tool()
 async def claude_thread_send(project: str, message: str, thread: Optional[str] = None, wait: bool = False,
                              timeout_s: int = 600, poll_s: int = 10, dry_run: bool = False, attachments: Optional[list[dict]] = None,
-                             bot_name: Optional[str] = None, attach_test: bool = False, force: bool = False) -> dict:
+                             bot_name: Optional[str] = None, attach_test: bool = False, force: bool = False,
+                             idempotency_key: Optional[str] = None, job_id: Optional[str] = None) -> dict:
     """Type `message` into the composer of the project's primary thread (thread=None) or a child thread and press Send, exactly as
     the user would; then read the transcript back (verified_in_transcript, message_index). wait=true also waits for Claude's reply
     (see claude_thread_wait). Refuses if the box holds an unsent draft or a VNC viewer is connected (force=true overrides the viewer
@@ -196,7 +207,21 @@ async def claude_thread_send(project: str, message: str, thread: Optional[str] =
     so same-named files never overwrite each other; the result lists each file's absolute path. See claude_staging.
     ORIGIN BRACKET: the typed text always starts with the line '[sent by Grok Bot]' ('[sent by Grok Bot · <bot_name>]' when
     bot_name is passed or configured), so the Project can tell this request came from a bot, not from a person typing. Do not
-    add it yourself; it is never doubled. The result's origin_header shows the exact line used."""
+    add it yourself; it is never doubled. The result's origin_header shows the exact line used.
+    ALWAYS ANSWERS WITHIN ABOUT 45 S: a send (wait=false) runs as a background job. If it is still attaching or typing after
+    about 40 s, the answer is pending=true with job_id, state (opening, attaching n/N, typing, sending, verifying) and
+    retry_after_s; call claude_thread_send again with the same arguments, or with job_id, for the result. A repeat of the
+    same send (same message and files, or the same idempotency_key, within 30 min) joins it and never sends twice. A failed
+    send says which file and step failed and that the composer was cleaned up; nothing was sent. With attachments,
+    wait=true is not waited for: call claude_thread_wait after the send."""
+    if job_id:
+        return await run(flags(force) + ['send', project, '--job-id', job_id], 60)
+    jobbed = not dry_run and (not wait or bool(attachments))
+    if jobbed:
+        a = ['send', project] + (['--thread', thread] if thread else []) + (['--bot-name', bot_name] if bot_name else []) + ['--budget', str(SEND_BUDGET)] + (['--idempotency-key', idempotency_key] if idempotency_key else [])
+        r = await run(flags(force) + a, 120, msg=message, attach=attachments, busy_budget=60)
+        if wait and isinstance(r, dict): r['wait_note'] = 'wait=true is not waited for on a send with attachments; call claude_thread_wait'
+        return r
     a = ['send', project] + (['--thread', thread] if thread else []) + (['--bot-name', bot_name] if bot_name else []) + (['--wait', '--timeout', str(timeout_s), '--poll', str(poll_s)] if wait else []) + (['--dry-run'] if dry_run else []) + (['--attach-test'] if (dry_run and attach_test) else [])
     return await run(flags(force) + a, (timeout_s + 400) if wait else 300, msg=message, attach=attachments, busy_budget=(timeout_s + 400) if wait else 900)
 

@@ -25,7 +25,7 @@ class UI:
 
 def wire(monkeypatch, ui, ocr=True):
     monkeypatch.setattr(c, 'xdo', ui.xdo)
-    monkeypatch.setattr(c, '_open_attach_picker', lambda: (setattr(ui, 'opened', ui.opened + 1), '42')[1])
+    monkeypatch.setattr(c, '_open_attach_picker', lambda *a, **k: (setattr(ui, 'opened', ui.opened + 1), '42')[1])
     monkeypatch.setattr(c, '_active_win_name', lambda: 'Open Files')
     monkeypatch.setattr(c, '_chooser_ocr', lambda wid, save=None, needle=None: ('Location: ' + ui.typed[-1]) if ocr else 'Recent Home Desktop')
     monkeypatch.setattr(c, '_dismiss_open_files', lambda reason='': (setattr(ui, 'cancelled', ui.cancelled + 1), True)[1])
@@ -47,21 +47,22 @@ def test_attach_test_reports_ocr_miss(monkeypatch, files):
 
 def test_real_attach_presses_open_and_waits_chip(monkeypatch, files):
     ui = UI(); wire(monkeypatch, ui)
-    monkeypatch.setattr(c, '_composer_has_chip', lambda n: True)
+    monkeypatch.setattr(c, '_composer_has_chip', lambda n, scope=None: True)
     res = c.attach_files(files)
     assert ui.open_pressed == 4 and all(r['attached'] for r in res)
 
 def test_no_chip_after_open_raises_and_no_browse_retry(monkeypatch, files):
     ui = UI(); wire(monkeypatch, ui)
-    monkeypatch.setattr(c, '_composer_has_chip', lambda n: False)
-    t = [0]; monkeypatch.setattr(c.time, 'time', lambda: (t.__setitem__(0, t[0] + 10), t[0])[1])
+    monkeypatch.setattr(c, '_composer_has_chip', lambda n, scope=None: False)
+    # the clock runs fast only once Open is pressed: the chip never shows, so the per-file limit ends the wait
+    t = [0]; monkeypatch.setattr(c.time, 'time', lambda: (t.__setitem__(0, t[0] + (10 if ui.open_pressed else 0)), t[0])[1])
     called = []; monkeypatch.setattr(c, '_attach_files_impl', lambda fs: called.append(fs))
     with pytest.raises(c.AppError, match='after Open'): c.attach_files(files[:1])
     assert called == [] and ui.cancelled >= 1
 
 def test_location_failure_falls_back_to_browse(monkeypatch, files):
     ui = UI(); wire(monkeypatch, ui)
-    monkeypatch.setattr(c, '_open_attach_picker', lambda: (_ for _ in ()).throw(c.AppError('Open Files dialog did not appear; nothing attached')))
+    monkeypatch.setattr(c, '_open_attach_picker', lambda *a, **k: (_ for _ in ()).throw(c.AppError('Open Files dialog did not appear; nothing attached')))
     called = []; monkeypatch.setattr(c, '_attach_files_impl', lambda fs: called.append(fs[0]['name']))
     res = c.attach_files(files[:2])
     assert called == [files[0]['name'], files[1]['name']] and all(r['via'] == 'browse' for r in res)
