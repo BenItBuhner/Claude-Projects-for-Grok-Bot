@@ -36,8 +36,8 @@ curl -s http://127.0.0.1:8791/healthz    # -> ok
 ```
 
 Restart only the MCP service. The app, the display and the viewer services don't need a restart for a code update.
-If your install still uses an older unit name (`ccp-mcp`, or a hand-built `claude-projects-mcp.service`), restart that
-one instead.
+If your install still uses an older unit name (see [Names before 1.0.2](how-it-works.md#names-before-102), or a hand-built
+`claude-projects-mcp.service`), restart that one instead.
 
 ## xclip
 

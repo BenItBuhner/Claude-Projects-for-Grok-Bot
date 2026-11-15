@@ -7,7 +7,7 @@ guided setup for you (skill Part A). This is the same flow by hand, for people w
 
 - A computer that stays on: **Ubuntu 22.04+ or Debian 12+** (x86_64 or arm64) with user-level systemd and `sudo` for apt.
   On an always-on Mac or Windows PC, run [`hosts/macos/setup.sh`](../hosts/macos/setup.sh) or
-  [`hosts/windows/setup.ps1`](../hosts/windows/setup.ps1) instead of steps 2 and 3's install (see [Hosts](hosts.md)).
+  [`hosts/windows/setup.ps1`](../hosts/windows/setup.ps1) instead of the install in step 2 (see [Hosts](hosts.md)).
 - A Claude account with Claude Code Projects (a beta). `./claude-projects setup check-beta` tells you after sign-in.
 - `git` and `python3` (3.10 or newer). The installer adds the rest: Xvfb, openbox, xdotool, AT-SPI, a VNC/noVNC
   viewport and the official Claude desktop app.
@@ -73,7 +73,7 @@ unit files, run by `cpg_proc.py`, with its own D-Bus session bus. Logs are in `~
 
 ```bash
 python3 cpg_proc.py status                  # what runs
-./claude-projects setup start                           # start everything (also after the host restarted)
+./claude-projects setup start               # start everything (also after the host restarted)
 python3 cpg_proc.py restart cpg-mcp
 ```
 
@@ -98,7 +98,7 @@ For example in Cursor's `~/.cursor/mcp.json`:
   "mcpServers": {
     "claude-projects": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://your-host.example/mcp", "--transport", "http-only",
+      "args": ["-y", "mcp-remote@0.16.5", "https://your-host.example/mcp", "--transport", "http-only",
                "--header", "Authorization:${CPG_AUTH}"],
       "env": { "CPG_AUTH": "Bearer <contents of mcp.token>" }
     }

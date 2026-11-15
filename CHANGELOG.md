@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.0.2 (unreleased)
+## 1.0.2 (2026-11-15)
 
-Not tagged or released yet. Brings the guided setup to the public repo: one copy-paste prompt, an agent-driven
+Brings the guided setup to the public repo: one copy-paste prompt, an agent-driven
 `claude-projects setup` flow, Mac and Windows hosts, the 24th tool `claude_setup`, and hosts without systemd.
 
 ### Attachment reliability

@@ -264,7 +264,7 @@ Invoke-WslScript cpg (Get-FetchScript $Url $Ref) -Login
 def test_docs_explain_the_ref():
     for f in ('docs/hosts.md', 'skill/references/macos.md', 'skill/references/windows.md'):
         t = (REPO / f).read_text()
-        assert 'release-1.0.2' in t and 'CPG_REPO_REF' in t, f
-    assert '--ref release-1.0.2' in (REPO / 'skill/references/macos.md').read_text()
-    assert '-Ref release-1.0.2' in (REPO / 'skill/references/windows.md').read_text()
+        assert 'v1.0.2' in t and 'CPG_REPO_REF' in t, f
+    assert '--ref v1.0.2' in (REPO / 'skill/references/macos.md').read_text()
+    assert '-Ref v1.0.2' in (REPO / 'skill/references/windows.md').read_text()
     assert '--ref' in MAC.read_text().split('set -euo pipefail')[0] and '-Ref REF' in WIN.read_text().split('#>')[0]

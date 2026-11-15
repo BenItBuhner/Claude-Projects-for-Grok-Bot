@@ -8,33 +8,31 @@ mcp.token
 vncpass*
 keyring-pass
 config.json
+
 # python
 .venv/
 venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-# runtime state
+
+# runtime state (also when state_dir points inside the checkout)
 cache/
 logs/
 attachments/
+backups/
+staging/
+scratch/
+next/
 .cpg-idb-*/
 .ccp-idb-*/
+*.dupbackup
 *.log
+
+# host-specific helper binaries (e.g. a user-local xclip)
+local/
+
 # editor / OS
 .DS_Store
 *.swp
 *~
-
-# local runtime state when state_dir points inside the checkout
-cache/
-logs/
-backups/
-scratch/
-.cpg-idb-*/
-.ccp-idb-*/
-*.dupbackup
-next/
-# host-specific helper binaries (e.g. a user-local xclip)
-local/
-staging/

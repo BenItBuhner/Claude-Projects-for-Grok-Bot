@@ -11,7 +11,7 @@ import cpg_core as C
 @pytest.fixture
 def files(tmp_path):
     out = []
-    for n in ('ember-dots.mp4', 'pill.js', 'full.js', 'envelope.js', 'index.html', 'notes.txt'):
+    for n in ('demo.mp4', 'app.js', 'main.js', 'util.js', 'index.html', 'notes.txt'):
         f = tmp_path / n; f.write_bytes(b'x' * 10); out.append({'path': str(f), 'name': n, 'size': 10, 'mime': None, 'staged': False})
     return out
 
@@ -72,12 +72,12 @@ def app(monkeypatch, files):
 
 
 def test_six_files_one_stalls_per_file_timeout_and_clean_composer(app, files):
-    app.stall = 'envelope.js'
+    app.stall = 'util.js'
     with pytest.raises(C.AttachError) as ei:
         C.op_send('Notes', 'see the files', prepared_files=files, deadline_s=420)
     ex = ei.value
-    assert ex.file == 'envelope.js' and 'within 20 s after Open' in str(ex) and 'nothing was sent' in str(ex)
-    assert app.removed == ['ember-dots.mp4', 'pill.js', 'full.js'] and app.chips == [], 'chips already attached are taken out'
+    assert ex.file == 'util.js' and 'within 20 s after Open' in str(ex) and 'nothing was sent' in str(ex)
+    assert app.removed == ['demo.mp4', 'app.js', 'main.js'] and app.chips == [], 'chips already attached are taken out'
     assert ex.cleanup['chips_left'] == [] and ex.cleanup['composer_empty'] is True
     assert app.sent == 0 and app.text == '' and app.home == 1
 
@@ -96,11 +96,11 @@ def test_overall_deadline_is_enforced_inside_the_send(app, files):
 
 
 def test_sigterm_mid_attach_runs_cleanup(app, files):
-    app.term_on = 'full.js'
+    app.term_on = 'main.js'
     with pytest.raises(C.Interrupted) as ei:
         C.op_send('Notes', 'see the files', prepared_files=files)
-    assert app.removed == ['ember-dots.mp4', 'pill.js'] and app.chips == [] and app.dismissed >= 1
-    assert ei.value.cleanup['chips_removed'] == ['ember-dots.mp4', 'pill.js'] and app.home == 1 and app.sent == 0
+    assert app.removed == ['demo.mp4', 'app.js'] and app.chips == [] and app.dismissed >= 1
+    assert ei.value.cleanup['chips_removed'] == ['demo.mp4', 'app.js'] and app.home == 1 and app.sent == 0
 
 
 def test_text_mismatch_also_removes_the_chips(app, files, monkeypatch):
@@ -128,17 +128,17 @@ def test_text_only_send_refuses_with_leftover_chips(app, files):
 
 
 def test_clear_leftovers_removes_them_and_sends_only_the_text(app, files):
-    app.chips = ['old.png', 'old.png', 'pill.js']
+    app.chips = ['old.png', 'old.png', 'app.js']
     r = C.op_send('Notes', 'just text', clear_leftovers=True)
-    assert r['sent'] and r['cleared_leftovers'] == ['old.png', 'old.png', 'pill.js'] and r['attached'] is None
-    assert app.removed == ['old.png', 'old.png', 'pill.js'] and app.sent == 1
+    assert r['sent'] and r['cleared_leftovers'] == ['old.png', 'old.png', 'app.js'] and r['attached'] is None
+    assert app.removed == ['old.png', 'old.png', 'app.js'] and app.sent == 1
     assert app.sent_with[0] == [] and app.sent_with[1].endswith('just text'), 'Send saw no chips, only the text'
 
 
 def test_clear_leftovers_then_attach_sends_only_our_file(app, files):
-    app.chips = ['pill.js']                       # the same name as the file we attach: the leftover still goes first
+    app.chips = ['app.js']                       # the same name as the file we attach: the leftover still goes first
     r = C.op_send('Notes', 'with file', prepared_files=files[1:2], clear_leftovers=True)
-    assert r['sent'] and r['attached'] == ['pill.js'] and app.sent_with[0] == ['pill.js'] and app.removed == ['pill.js']
+    assert r['sent'] and r['attached'] == ['app.js'] and app.sent_with[0] == ['app.js'] and app.removed == ['app.js']
 
 
 def test_extra_chip_before_send_aborts_cleanly(app, files, monkeypatch):
@@ -146,8 +146,8 @@ def test_extra_chip_before_send_aborts_cleanly(app, files, monkeypatch):
     monkeypatch.setattr(C, 'type_text', type_and_stray)
     with pytest.raises(C.AppError, match=r"did not add: \['stray.png'\].*nothing was sent") as ei:
         C.op_send('Notes', 'see the files', prepared_files=files[:2])
-    assert app.sent == 0 and app.text == '' and app.removed == ['ember-dots.mp4', 'pill.js'] and app.chips == ['stray.png']
-    assert ei.value.cleanup['chips_removed'] == ['ember-dots.mp4', 'pill.js']
+    assert app.sent == 0 and app.text == '' and app.removed == ['demo.mp4', 'app.js'] and app.chips == ['stray.png']
+    assert ei.value.cleanup['chips_removed'] == ['demo.mp4', 'app.js']
 
 
 def test_duplicate_chip_names_are_all_detected(monkeypatch):
@@ -175,8 +175,8 @@ def test_attach_test_open_attaches_removes_and_never_types_or_sends(app, files, 
     monkeypatch.setattr(C, 'type_text', lambda e, msg: pytest.fail('the open test must never type the message'))
     r = C.op_send('Notes', 'hi', dry_run=True, attach_test='open', prepared_files=files[:3])
     assert r['attach_test'] == 'open' and r['all_attached'] and r['all_removed'] and r['composer_empty'] is True and r['composer_chips'] == []
-    assert [f['name'] for f in r['files']] == ['ember-dots.mp4', 'pill.js', 'full.js'] and all('seconds' in f for f in r['files'])
-    assert app.removed == ['ember-dots.mp4', 'pill.js', 'full.js'] and app.sent == 0 and app.text == '' and 'timing' in r
+    assert [f['name'] for f in r['files']] == ['demo.mp4', 'app.js', 'main.js'] and all('seconds' in f for f in r['files'])
+    assert app.removed == ['demo.mp4', 'app.js', 'main.js'] and app.sent == 0 and app.text == '' and 'timing' in r
 
 
 def test_attach_test_open_refuses_with_leftovers(app, files):
@@ -187,10 +187,10 @@ def test_attach_test_open_refuses_with_leftovers(app, files):
 
 
 def test_attach_test_open_stall_cleans_up(app, files):
-    app.stall = 'pill.js'
+    app.stall = 'app.js'
     with pytest.raises(C.AttachError):
         C.op_send('Notes', 'hi', dry_run=True, attach_test='open', prepared_files=files[:3])
-    assert app.chips == [] and app.sent == 0 and app.removed == ['ember-dots.mp4']
+    assert app.chips == [] and app.sent == 0 and app.removed == ['demo.mp4']
 
 
 def test_cli_attach_test_modes_and_clear_leftovers(monkeypatch):
@@ -305,10 +305,10 @@ def test_idempotency_key_dedupes_even_with_other_text(jobs, files):
 
 
 def test_failed_before_send_is_reported_and_can_be_retried(jobs, files):
-    e = C.AttachError('envelope.js', 'did not appear in the composer within 20 s after Open'); e.cleanup = {'chips_left': [], 'chips_removed': ['pill.js']}
+    e = C.AttachError('util.js', 'did not appear in the composer within 20 s after Open'); e.cleanup = {'chips_left': [], 'chips_removed': ['app.js']}
     jobs['fail'] = e
     r = send(files, budget=5)
-    assert r['failed'] and not r['sent'] and 'envelope.js' in r['error'] and r['error_type'] == 'AttachError'
+    assert r['failed'] and not r['sent'] and 'util.js' in r['error'] and r['error_type'] == 'AttachError'
     assert 'composer was left clean' in r['note'] and 'nothing was sent' in r['note']
     jobs['fail'] = None
     assert send(files, budget=5)['sent'] and jobs['sends'] == 1
@@ -342,10 +342,10 @@ sys.path.insert(0, {str(pathlib.Path(C.__file__).parent)!r})
 import cpg_core as C
 C.SEND_JOBS = pathlib.Path({str(jobs)!r})
 def fake_send(project, message, thread=None, **k):
-    C._progress('attaching', attached=2, total=6, file='full.js')
+    C._progress('attaching', attached=2, total=6, file='main.js')
     try: time.sleep(30)
     except BaseException as ex:
-        ex.cleanup = {{'chips_removed': ['ember-dots.mp4', 'pill.js'], 'chips_left': [], 'composer_empty': True}}; raise
+        ex.cleanup = {{'chips_removed': ['demo.mp4', 'app.js'], 'chips_left': [], 'composer_empty': True}}; raise
 C.op_send = fake_send
 sys.exit(C.main(['--json', 'send-job', {key!r}]))
 """)
@@ -358,7 +358,7 @@ sys.exit(C.main(['--json', 'send-job', {key!r}]))
     assert st['state'] == 'attaching'
     pr.send_signal(signal.SIGTERM); out, err = pr.communicate(timeout=20)
     st = json.loads((jobs / f'{key}.json').read_text())
-    assert st['state'] == 'failed' and 'SIGTERM' in st['error'] and st['cleanup']['chips_removed'] == ['ember-dots.mp4', 'pill.js'], (st, err)
+    assert st['state'] == 'failed' and 'SIGTERM' in st['error'] and st['cleanup']['chips_removed'] == ['demo.mp4', 'app.js'], (st, err)
     assert not C.job_running(jobs, key)
 
 

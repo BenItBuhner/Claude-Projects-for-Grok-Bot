@@ -114,27 +114,27 @@ def test_single_constant_in_code():
 
 # ---- attachment chips before the bracket (an attachment-first send: the chips came first in the transcript text)
 CHIPPED = [
-    '[MP4 ember-dots.mp4] [JS pill.js] [sent by Grok Bot · CCP Plugin]\nPlease review the dots',
-    'MP4 ember-dots.mp4 JS pill.js\n[sent by Grok Bot] Please review the dots',
-    '[attached image: shot.png]\n[attached file: notes.txt]\n[sent by Grok Bot]\nPlease review the dots',
-    'ember-dots.mp4\n[sent by Grok Bot · CCP Plugin]\nPlease review the dots',
+    '[MP4 demo.mp4] [JS app.js] [sent by Grok Bot · Scout]\nPlease review the demo',
+    'MP4 demo.mp4 JS app.js\n[sent by Grok Bot] Please review the demo',
+    '[attached image: shot.png]\n[attached file: notes.txt]\n[sent by Grok Bot]\nPlease review the demo',
+    'demo.mp4\n[sent by Grok Bot · Scout]\nPlease review the demo',
 ]
 
 
 def test_bot_sent_with_leading_attachment_chips():
     for t in CHIPPED:
         assert O.is_bot_sent(t), t
-        assert O.origin_body(t).strip() == 'Please review the dots', t
+        assert O.origin_body(t).strip() == 'Please review the demo', t
 
 
 def test_bracket_later_in_the_text_still_is_not_bot_sent():
-    for t in ('please look at [sent by Grok Bot] in the docs', 'MP4 ember-dots.mp4 see [sent by Grok Bot]', '[MP4 a.mp4] hello'):
+    for t in ('please look at [sent by Grok Bot] in the docs', 'MP4 demo.mp4 see [sent by Grok Bot]', '[MP4 a.mp4] hello'):
         assert not O.is_bot_sent(t), t
 
 
 def test_summary_strips_the_bracket_after_chips():
-    msgs = [{'index': 169, 'role': 'user', 'text': CHIPPED[0], 'summary': 'MP4 ember-dots.mp4 [sent by Grok Bot · CCP Plugin]'},
+    msgs = [{'index': 169, 'role': 'user', 'text': CHIPPED[0], 'summary': 'MP4 demo.mp4 [sent by Grok Bot · Scout]'},
             {'index': 170, 'role': 'user', 'text': '[MP4 a.mp4]\nlooks good', 'summary': 'looks good'}]
     C.annotate_messages_staleness(msgs)
-    assert msgs[0]['sent_by_bot'] is True and msgs[0]['summary'] == 'Please review the dots'
+    assert msgs[0]['sent_by_bot'] is True and msgs[0]['summary'] == 'Please review the demo'
     assert msgs[1]['sent_by_bot'] is False and msgs[1]['summary'] == 'looks good'
