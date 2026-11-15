@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""cpg_proc - run the plugin's services on a host without user systemd (process mode).
+"""claude_projects.proc - run the plugin's services on a host without user systemd (process mode).
 
 Some hosts have no systemd at all, for example a container whose PID 1 is tini. There the plugin keeps the same unit
-files install.sh renders (~/.config/systemd/user/cpg-*.service) and this small supervisor runs them: it reads
+files install.sh renders (~/.config/systemd/user/claude-projects-*.service) and this small supervisor runs them: it reads
 Environment=, ExecStartPre=, ExecStart=, StandardInput=file:, Restart= and RestartSec=, starts units in dependency
-order, restarts them when they fail, runs cpg-refresh every 10 minutes while cpg-refresh.timer is enabled, and adds
-the one thing systemd would have provided: a private D-Bus session bus (cpg-dbus) for the app, the keyring and the
+order, restarts them when they fail, runs claude-projects-refresh every 10 minutes while claude-projects-refresh.timer is enabled, and adds
+the one thing systemd would have provided: a private D-Bus session bus (claude-projects-dbus) for the app, the keyring and the
 accessibility bus.
 
 The command line mirrors `systemctl --user`, so the setup flow can use either:
 
-  cpg_proc.py up | down | status [--json]
-  cpg_proc.py enable [--now] UNIT... | disable [--now] UNIT... | start UNIT... | stop UNIT... | restart UNIT...
-  cpg_proc.py is-active UNIT | is-enabled UNIT | reset-failed [UNIT] | daemon-reload | show-environment
+  python -m claude_projects.proc up | down | status [--json]
+  python -m claude_projects.proc enable [--now] UNIT... | disable [--now] UNIT... | start UNIT... | stop UNIT... | restart UNIT...
+  python -m claude_projects.proc is-active UNIT | is-enabled UNIT | reset-failed [UNIT] | daemon-reload | show-environment
 
 Nothing here needs root. State lives in <state_dir>/proc (enabled set, wanted set, status, per-unit logs).
 Nothing starts the supervisor at boot on such a host, so the MCP server (stdio, started by the agent) and
@@ -20,19 +20,21 @@ Nothing starts the supervisor at boot on such a host, so the MCP server (stdio, 
 """
 import os, sys, json, time, fcntl, shlex, signal, pathlib, subprocess, argparse
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import cpg_config
+_PKG = pathlib.Path(__file__).resolve().parent   # run as a file (python claude_projects/<module>.py): import from the checkout,
+sys.path[:] = [p for p in sys.path if pathlib.Path(p or '.').resolve() != _PKG]   # not from inside the package
+sys.path.insert(0, str(_PKG.parent))
+from claude_projects import config as cfg_mod
 
-CFG = cpg_config.CFG
+CFG = cfg_mod.CFG
 UNIT_DIR = pathlib.Path(os.environ.get('XDG_CONFIG_HOME') or (pathlib.Path.home() / '.config')) / 'systemd' / 'user'
 PROC = pathlib.Path(CFG['state_dir']) / 'proc'
 LOGS = PROC / 'logs'
 ENABLED, WANTED, STATUS, REQUESTS = PROC / 'enabled.json', PROC / 'wanted.json', PROC / 'status.json', PROC / 'requests'
 LOCK, SUP_LOG = PROC / 'supervisor.lock', PROC / 'supervisor.log'
-DBUS_UNIT = 'cpg-dbus'
-PREFIXES = ('cpg-', 'ccp-')                 # the plugin's units; ccp-* are the names from before 1.0.2
-TIMER_PERIOD = {'cpg-refresh': 600, 'ccp-refresh': 600}   # <prefix>-refresh.timer: OnUnitActiveSec=10min
-TIMER_FIRST = {'cpg-refresh': 300, 'ccp-refresh': 300}    # OnBootSec=5min
+DBUS_UNIT = 'claude-projects-dbus'
+PREFIXES = ('claude-projects-',)            # the plugin's units
+TIMER_PERIOD = {'claude-projects-refresh': 600}   # claude-projects-refresh.timer: OnUnitActiveSec=10min
+TIMER_FIRST = {'claude-projects-refresh': 300}    # OnBootSec=5min
 MAX_RESTARTS, RESTART_WINDOW = 5, 120        # more failures than this inside the window -> 'failed' until started again
 LOG_MAX = 5 * 2**20
 
@@ -65,7 +67,7 @@ SNAP_BIN = '/snap/bin'
 
 
 def runtime_env():
-    rd = pathlib.Path(cpg_config.runtime_dir(CFG)); rd.mkdir(parents=True, exist_ok=True); os.chmod(rd, 0o700)
+    rd = pathlib.Path(cfg_mod.runtime_dir(CFG)); rd.mkdir(parents=True, exist_ok=True); os.chmod(rd, 0o700)
     env = dict(os.environ)
     env['XDG_RUNTIME_DIR'] = str(rd); env['DBUS_SESSION_BUS_ADDRESS'] = f'unix:path={rd}/bus'
     env.setdefault('HOME', str(pathlib.Path.home())); env.setdefault('PATH', '/usr/local/bin:/usr/bin:/bin')
@@ -115,16 +117,14 @@ def parse_unit(name, env):
         elif k in ('After',): u['after'] += [_name(x)[0] for x in v.split()]
     if not u['exec']: return None
     # every service but the bus itself talks D-Bus (keyring, app, AT-SPI); systemd orders them after dbus.socket
-    ours = lambda n: n.startswith(PREFIXES)   # dbus.socket, default.target ...: provided here by cpg-dbus or not needed
-    u['requires'] = [r for r in u['requires'] if ours(r)] + ([DBUS_UNIT] if name not in ('cpg-xvfb', 'ccp-xvfb') else [])
+    ours = lambda n: n.startswith(PREFIXES)   # dbus.socket, default.target ...: provided here by claude-projects-dbus or not needed
+    u['requires'] = [r for r in u['requires'] if ours(r)] + ([DBUS_UNIT] if name != 'claude-projects-xvfb' else [])
     u['after'] = [a for a in u['after'] if ours(a)] + u['requires']
     return u
 
 
 def known_units():
-    # an install from before the rename has only ccp-* units: run those (install.sh moves them to cpg-* names)
-    pre = 'cpg-' if not UNIT_DIR.is_dir() or any(UNIT_DIR.glob('cpg-*.service')) else 'ccp-'
-    names = sorted(_name(p.name)[0] for p in UNIT_DIR.glob(f'{pre}*.service')) if UNIT_DIR.is_dir() else []
+    names = sorted(_name(p.name)[0] for p in UNIT_DIR.glob('claude-projects-*.service')) if UNIT_DIR.is_dir() else []
     return [DBUS_UNIT] + [n for n in names if n != DBUS_UNIT]
 
 
@@ -258,7 +258,7 @@ class Supervisor:
             if not all(self.active(d) for d in u['requires'] if d != name): continue
             if name != DBUS_UNIT and not os.path.exists(self.env['XDG_RUNTIME_DIR'] + '/bus'): continue
             self.restart_at.pop(name, None); self.start(name, u)
-        # timers: cpg-refresh.timer runs cpg-refresh.service (oneshot) every 10 minutes
+        # timers: claude-projects-refresh.timer runs claude-projects-refresh.service (oneshot) every 10 minutes
         for t in timers:
             svc = t[:-6]
             first = self.next_timer.setdefault(svc, self.boot + TIMER_FIRST.get(svc, 300))
@@ -405,7 +405,7 @@ def _full(n):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog='cpg_proc', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(prog='python -m claude_projects.proc', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('verb')
     ap.add_argument('units', nargs='*')
     ap.add_argument('--now', action='store_true')
@@ -417,7 +417,7 @@ def main(argv=None):
     v = a.verb
     if v in ('daemon-reload', 'reset-failed') and not names: return 0
     if v == 'show-environment':
-        if not supervisor_running(): print('supervisor not running (cpg_proc.py up)', file=sys.stderr); return 1
+        if not supervisor_running(): print('supervisor not running (claude_projects/proc.py up)', file=sys.stderr); return 1
         for k in ('XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'): print(f'{k}={runtime_env()[k]}')
         return 0
     if v == 'up':

@@ -1,9 +1,11 @@
-"""cpg_idb.py - print JSON {channels:[...], sessions:[...], channels_updated, sessions_updated} from a COPY of the
+"""claude_projects.idb - print JSON {channels:[...], sessions:[...], channels_updated, sessions_updated} from a COPY of the
 Claude desktop IndexedDB (react-query persisted cache). Read-only; skips account/billing/secrets.
 Run with the python configured as idb_python (needs ccl_chromium_reader; install.sh sets it up)."""
 import sys, os, io, json, re, shutil, tempfile, pathlib, datetime
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from cpg_config import CFG
+_PKG = pathlib.Path(__file__).resolve().parent   # run as a file (python claude_projects/<module>.py): import from the checkout,
+sys.path[:] = [p for p in sys.path if pathlib.Path(p or '.').resolve() != _PKG]   # not from inside the package
+sys.path.insert(0, str(_PKG.parent))
+from claude_projects.config import CFG
 from ccl_chromium_reader import ccl_chromium_indexeddb as idb
 from ccl_chromium_reader.serialization_formats import ccl_v8_value_deserializer as v8d, ccl_blink_value_deserializer as bd
 import ccl_simplesnappy
@@ -31,7 +33,7 @@ def iso(ms):
     except Exception: return None
 def main():
     sd = pathlib.Path(CFG['state_dir']); sd.mkdir(parents=True, exist_ok=True); os.chmod(sd, 0o700)
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix='.cpg-idb-', dir=str(sd)))
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix='.claude-projects-idb-', dir=str(sd)))
     try:
         for d in SRC.iterdir():
             if d.name.startswith('https_claude.ai_0'): shutil.copytree(d, tmp/d.name, ignore=shutil.ignore_patterns('LOCK'))

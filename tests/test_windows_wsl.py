@@ -25,7 +25,7 @@ def fake(tmp_path, replies):
         (d / f'{key}.code').write_text(str(code))
     env = {**os.environ, 'PATH': f"{b}:{os.environ['PATH']}", 'FAKE_WSL_DIR': str(d), 'FAKE_WSL_NO_EXEC': '1',
            'TMPDIR': str(tmp_path)}
-    env.pop('CPG_REPO_REF', None)
+    env.pop('CLAUDE_PROJECTS_REPO_REF', None)
     return env, tmp_path / 'fake-wsl-argv.log'
 
 
@@ -124,7 +124,8 @@ def test_distro_install_failure_is_a_readable_stop(tmp_path):
 
 def test_existing_wsl1_distro_is_converted_and_unexpected_errors_have_no_stack_trace(tmp_path):
     env, log = fake(tmp_path, {'-l_-q': ('list-utf16le.bin', 0), '-l_-v': ('list-v-utf16le.bin', 0),
-                               '--set-version_ClaudeProjects_2': (None, 0)})
+                               '--set-version_ClaudeProjects_2': (None, 0),
+                               '-d_ClaudeProjects_--exec_id_-un': (b'alex\n', 0)})
     r, out = run_setup(env)
     argv = log.read_text()
     assert 'ARG[--set-version]\nARG[ClaudeProjects]\nARG[2]' in argv, out
@@ -132,3 +133,14 @@ def test_existing_wsl1_distro_is_converted_and_unexpected_errors_have_no_stack_t
     # the next step needs the distro, which the fake refuses to run (exit 97): one readable line, exit 1
     assert r.returncode == 1 and 'setup.ps1 stopped: wsl.exe -d ClaudeProjects -u root --exec' in out and 'exited 97' in out
     assert not any(m in out for m in STACK), out
+
+
+def test_existing_distro_without_a_readable_default_user_stops_without_changing_it(tmp_path):
+    # the existing distro's default user can't be read (the fake refuses --exec, exit 97): stop, rename nothing
+    env, log = fake(tmp_path, {'-l_-q': ('list-utf16le.bin', 0), '-l_-v': ('list-v-utf16le.bin', 0),
+                               '--set-version_ClaudeProjects_2': (None, 0)})
+    r, out = run_setup(env)
+    assert r.returncode == 3 and 'unprivileged default user; none was changed' in out and '/etc/wsl.conf' in out, out
+    assert not any(m in out for m in STACK), out
+    argv = log.read_text()
+    assert 'ARG[usermod]' not in argv and 'ARG[-u]\nARG[root]' not in argv

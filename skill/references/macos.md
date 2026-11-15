@@ -3,7 +3,7 @@
 Use this when the plugin should run on an always-on Mac and `hosts/macos/setup.sh` isn't used (you only have a shell
 on the Mac, the script failed halfway, or the user wants to see each step). The script does exactly these steps; if
 it's there, prefer `bash hosts/macos/setup.sh [--bot-name NAME] [--ref REF] [--no-sleep] [--dry-run]`. To pin a release or try
-a branch, add `--ref v1.0.2` or `--ref release-1.0.2` (a tag, a branch or a full commit sha; `CPG_REPO_REF` works too,
+a branch, add `--ref v1.0.2` or `--ref release-1.0.2` (a tag, a branch or a full commit sha; `CLAUDE_PROJECTS_REPO_REF` works too,
 and the flag wins).
 
 Status: this script and these steps haven't been run on a real Mac yet (only checked with ShellCheck and tests on
@@ -65,7 +65,7 @@ cpvm setup status
 
 The single quotes matter: `$@` must expand inside the VM's bash, not on the Mac.
 
-**A release, branch or commit** (what `--ref` / `CPG_REPO_REF` do). Only use a ref made of letters, digits and
+**A release, branch or commit** (what `--ref` / `CLAUDE_PROJECTS_REPO_REF` do). Only use a ref made of letters, digits and
 `. _ / -` (no leading `-`, no `..`), so it can sit inside the single quotes safely. Check the clone is clean first; if
 `git status --porcelain --untracked-files=no` prints anything, stop and ask the user instead of overwriting their changes:
 
@@ -129,8 +129,8 @@ they click "Get started" (older versions: "Sign in"). Then `cpvm setup signin wa
 
 | agent runs | command |
 |---|---|
-| on the Mac | `limactl shell claude-projects -- bash -lc 'exec ~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/cpg_mcp.py --stdio'` |
-| elsewhere, SSH to the Mac (Remote Login on) | `ssh <user>@<mac> "limactl shell claude-projects -- bash -lc 'exec ~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/cpg_mcp.py --stdio'"` |
+| on the Mac | `limactl shell claude-projects -- bash -lc 'exec ~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/claude_projects/mcp_server.py --stdio'` |
+| elsewhere, SSH to the Mac (Remote Login on) | `ssh <user>@<mac> "limactl shell claude-projects -- bash -lc 'exec ~/claude-projects-mcp/.venv/bin/python ~/claude-projects-mcp/claude_projects/mcp_server.py --stdio'"` |
 | HTTP | `http://127.0.0.1:8791/mcp` on the Mac, bearer token from the VM's `~/.config/claude-projects-mcp/mcp.token` |
 
 ```bash
@@ -154,3 +154,7 @@ launchctl print "gui/$(id -u)/com.github.claude-projects-for-grok-bot.vm" | grep
 
 Remove: `cpvm setup uninstall`, then `limactl stop claude-projects && limactl delete claude-projects`, `launchctl bootout` and delete the plist
 (ask the user first; it deletes the VM's sign-in).
+
+Once it runs, using it is the same on every host (SKILL.md Part B). In particular, check every thread of a Project,
+not only the primary: `claude_attention` lists each thread waiting on the user with its latest ask, and an approval ask's
+`requested_line` is relayed to the user exactly, never invented or posted without an explicit standing approval.

@@ -70,7 +70,7 @@ def clipboard_roundtrip(text):
     got = r2.stdout.decode('utf-8', errors='replace') if r2.stdout else ''
     return got == text, got
 
-import cpg_core as C
+from claude_projects import core as C
 
 CASES = [
     ('currency', '£ € é ñ ü'),

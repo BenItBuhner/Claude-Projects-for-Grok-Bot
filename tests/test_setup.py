@@ -1,10 +1,10 @@
-"""Guided setup flow (cpg_setup.py): beta verdicts, host classes, the status state machine, sign-in, tidy, MCP tool.
+"""Guided setup flow (claude_projects/setup.py): beta verdicts, host classes, the status state machine, sign-in, tidy, MCP tool.
 No app, display, systemd or network: RUN (shell) and CLI (`claude-projects --json ...`) are replaced with fakes."""
 import asyncio, json, os, pathlib, re, sys, time
 import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_setup as S
+from claude_projects import setup as S
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -63,7 +63,7 @@ def test_check_beta_no_projects_stays_idle(env):
     r = S.cmd_check_beta(args(force=False))
     assert r['verdict'] == 'no_projects' and r['has_projects'] is False
     assert "doesn't have Claude Code Projects" in r['tell_user'] and 'uninstall' not in r['tell_user'].lower()
-    assert ['systemctl', '--user', 'disable', '--now', 'cpg-refresh.timer'] in env.runs
+    assert ['systemctl', '--user', 'disable', '--now', 'claude-projects-refresh.timer'] in env.runs
     assert S.load_state()['beta']['verdict'] == 'no_projects'
 
 
@@ -71,7 +71,7 @@ def test_check_beta_has_projects_turns_refresh_on(env):
     env.cli['probe-projects'] = {'signed_in': True, 'sidebar_entry': 'Projects Beta', 'browse_route_ok': True, 'project_list_cached': True, 'project_count': 2}
     r = S.cmd_check_beta(args(force=False))
     assert r['verdict'] == 'has_projects' and 'tell_user' not in r
-    assert ['systemctl', '--user', 'enable', '--now', 'cpg-refresh.timer'] in env.runs
+    assert ['systemctl', '--user', 'enable', '--now', 'claude-projects-refresh.timer'] in env.runs
 
 
 def test_check_beta_unknown_takes_screenshot(env):
@@ -224,7 +224,7 @@ def test_signin_start_never_prints_the_password(env):
     blob = json.dumps(r)
     assert 's3cretPW' not in blob and str(S.CONFIG_DIR / 'vncpass.txt') in blob
     assert r['result'] == 'awaiting_signin' and '/vnc.html' in r['links']['on_this_machine'] and 'ssh -N -L' in r['links']['from_another_computer']
-    assert ['systemctl', '--user', 'enable', '--now', 'cpg-novnc.service'] in env.runs
+    assert ['systemctl', '--user', 'enable', '--now', 'claude-projects-novnc.service'] in env.runs
     assert 'claude-open-url' in r['if_stuck_on_claude_link']
 
 
@@ -238,7 +238,7 @@ def test_signin_wait_then_viewport_off(env, monkeypatch):
     S.save_state({'beta': {'verdict': 'no_projects'}})
     r = S.cmd_signin_wait(args(timeout=60, poll=1, close_timeout=60))
     assert r['result'] == 'signed_in' and r['viewport']['viewport'] == 'off' and r['next_action'] == 'claude-projects setup check-beta'
-    assert ['systemctl', '--user', 'disable', '--now', 'cpg-novnc.service'] in env.runs
+    assert ['systemctl', '--user', 'disable', '--now', 'claude-projects-novnc.service'] in env.runs
     assert 'beta' not in S.load_state(), 'a new sign-in (maybe another account) must re-check Projects'
 
 
@@ -259,7 +259,7 @@ def test_viewport_off_refuses_while_watched(env):
 
 def test_tidy_dry_run_then_apply(env):
     (S.STATE_DIR / 'ui.holder').write_text(json.dumps({'pid': 999999999, 'op': 'send'}))
-    old = S.STATE_DIR / '.cpg-idb-abc'; old.mkdir(); os.utime(old, (time.time() - 7200, time.time() - 7200))
+    old = S.STATE_DIR / '.claude-projects-idb-abc'; old.mkdir(); os.utime(old, (time.time() - 7200, time.time() - 7200))
     env.cli['staging'] = {'dry_run': True, 'removed_count': 0}; env.cli['status'] = {'signed_in': True}
     r = S.cmd_tidy(args(apply=False))
     assert r['dry_run'] and (S.STATE_DIR / 'ui.holder').exists() and old.exists()
@@ -267,7 +267,7 @@ def test_tidy_dry_run_then_apply(env):
     r = S.cmd_tidy(args(apply=True))
     assert not (S.STATE_DIR / 'ui.holder').exists() and not old.exists()
     assert ['staging', 'sweep', '--apply'] in env.cli_calls
-    assert not any('cpg-claude-desktop' in ' '.join(c) for c in env.runs), 'tidy never touches the app'
+    assert not any('claude-projects-desktop' in ' '.join(c) for c in env.runs), 'tidy never touches the app'
 
 
 # ---------------------------------------------------------------- uninstall, connect
@@ -288,7 +288,7 @@ def test_connect_box_recommends_same_host(env):
 
 def test_claude_setup_tool(monkeypatch):
     pytest.importorskip('mcp')
-    import cpg_mcp as M
+    from claude_projects import mcp_server as M
     seen = []
     async def fake_run(a, timeout=900, **kw): seen.append(a); return {'ok': True}
     monkeypatch.setattr(M, 'run', fake_run)
@@ -362,7 +362,7 @@ def test_powershell_scripts_parse():
 
 def test_shell_scripts_pass_bash_n():
     import subprocess
-    for p in ('install.sh', 'claude-projects', 'ccp', 'hosts/macos/setup.sh', 'hosts/macos/claude-projects', 'hosts/macos/ccp', 'bin/claude-signin-browser', 'bin/claude-open-url', 'bin/claude-desktop-launch'):
+    for p in ('install.sh', 'claude-projects', 'hosts/macos/setup.sh', 'hosts/macos/claude-projects', 'bin/claude-signin-browser', 'bin/claude-open-url', 'bin/claude-desktop-launch'):
         r = subprocess.run(['bash', '-n', str(REPO / p)], capture_output=True, text=True)
         assert r.returncode == 0, (p, r.stderr)
 
@@ -372,7 +372,7 @@ def test_windows_script_review_items():
     assert '$($BotName -replace' not in ps and '$($OperatorName -replace' not in ps, 'sanitize outside the string'
     assert 'NOPASSWD' not in ps and '-G sudo' not in ps, 'the distro user gets no sudo'
     assert 'conhost.exe' not in ps, 'no undocumented conhost --headless'
-    assert '2.4.4' in ps and '--web-download' in ps and 'enable-linger cpg' in ps and 'seq 1 15' in ps
+    assert '2.4.4' in ps and '--web-download' in ps and 'loginctl enable-linger' in ps and 'seq 1 15' in ps
     assert (REPO / 'hosts' / 'windows' / 'claude-projects.cmd').read_bytes().count(b'\r\n') >= 3, 'claude-projects.cmd uses CRLF'
 
 
@@ -455,7 +455,7 @@ def test_skill_has_mac_and_windows_guidance_with_references():
     assert "limactl shell claude-projects -- cat ~" not in mac and "limactl shell claude-projects -- ~/" not in mac
 
 
-def test_every_tool_count_says_24():
+def test_every_tool_count_says_25():
     files = [REPO / 'README.md', REPO / 'INSTALL.md', REPO / 'CHANGELOG.md', *(REPO / 'docs').glob('*.md'),
              *(REPO / 'skill').rglob('*.md')]
     seen = []
@@ -465,7 +465,7 @@ def test_every_tool_count_says_24():
         if f.name == 'CHANGELOG.md': text = text.split('\n## ', 2)[1]   # only the current release; older ones are history
         for m in re.finditer(r'\b(\d+)\s+(?:MCP\s+)?tools\b|\((\d+) tools\)', text):
             seen.append((f.name, int(m.group(1) or m.group(2))))
-    assert seen and all(n == S.EXPECTED_TOOLS == 24 for _, n in seen), seen
+    assert seen and all(n == S.EXPECTED_TOOLS == 25 for _, n in seen), seen
 
 
 # ---------------------------------------------------------------- findings from a real Windows runner (PR 9)
@@ -492,7 +492,7 @@ def _browser_pick(tmp_path, policies, candidates=None):
     fn = sh[sh.index('apt_browser_pkg() {'):]
     fn = fn[:fn.index('\n}\n') + 3]
     env = dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
-    if candidates: env['CPG_BROWSER_CANDIDATES'] = candidates
+    if candidates: env['CLAUDE_PROJECTS_BROWSER_CANDIDATES'] = candidates
     r = subprocess.run(['bash', '-c', fn + 'apt_browser_pkg'], capture_output=True, text=True, env=env)
     assert r.returncode == 0 and r.stderr == ''
     return r.stdout.strip()

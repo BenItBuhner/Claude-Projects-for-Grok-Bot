@@ -8,7 +8,7 @@ opens in your normal browser at http://127.0.0.1:6179/vnc.html.
 
   powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1 [-BotName NAME] [-OperatorName NAME] [-Timezone Area/City]
                                                                    [-Ref REF] [-AtStartup] [-WebDownload] [-NoSleep] [-DryRun]
-  -Ref REF      install this branch, tag or full commit sha instead of the default branch (also: $env:CPG_REPO_REF;
+  -Ref REF      install this branch, tag or full commit sha instead of the default branch (also: $env:CLAUDE_PROJECTS_REPO_REF;
                 the parameter wins). On a re-run the existing clone fetches REF and checks it out, unless it has local
                 changes. Example: powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1 -Ref release-1.0.2
   -AtStartup    also keep the distro running from boot, before anyone signs in (a second task that runs as you
@@ -19,7 +19,7 @@ opens in your normal browser at http://127.0.0.1:6179/vnc.html.
 Afterwards drive everything from Windows with hosts\windows\claude-projects.cmd (it runs claude-projects inside the distro), e.g.
   hosts\windows\claude-projects.cmd setup status
 
-The distro's user "cpg" has no sudo rights: this script does the few root steps (packages, linger) itself with
+The distro's user "claude" has no sudo rights: this script does the few root steps (packages, linger) itself with
 `wsl -u root`, so nothing inside the distro can become root on its own.
 #>
 param(
@@ -40,9 +40,9 @@ trap { Write-Host "`nsetup.ps1 stopped: $($_.Exception.Message)" -ForegroundColo
 $env:WSL_UTF8 = "1"   # wsl.exe prints UTF-16 otherwise
 $MinWsl = [version]"2.4.4"
 $TaskName = "Claude Projects for Grok Bot"
-# CCP_* are the old names of the CPG_* variables (before 1.0.2) and still work; the CPG_* name wins
-foreach ($n in @("REPO_URL", "REPO_REF")) { if (-not [Environment]::GetEnvironmentVariable("CPG_$n") -and [Environment]::GetEnvironmentVariable("CCP_$n")) { [Environment]::SetEnvironmentVariable("CPG_$n", [Environment]::GetEnvironmentVariable("CCP_$n")) } }
-$RepoUrl = if ($env:CPG_REPO_URL) { $env:CPG_REPO_URL } else { "https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot" }
+# Migration: the short-prefixed names of these variables from releases before 1.0.3 still work; the CLAUDE_PROJECTS_* name wins
+foreach ($n in @("REPO_URL", "REPO_REF")) { foreach ($old in @("CPG_", "CCP_")) { if (-not [Environment]::GetEnvironmentVariable("CLAUDE_PROJECTS_$n") -and [Environment]::GetEnvironmentVariable("$old$n")) { [Environment]::SetEnvironmentVariable("CLAUDE_PROJECTS_$n", [Environment]::GetEnvironmentVariable("$old$n")) } } }
+$RepoUrl = if ($env:CLAUDE_PROJECTS_REPO_URL) { $env:CLAUDE_PROJECTS_REPO_URL } else { "https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot" }
 
 function Say([string]$m) { Write-Host "==> $m" -ForegroundColor White }
 function Note([string]$m) { Write-Host "    note: $m" -ForegroundColor Yellow }
@@ -140,7 +140,7 @@ function Get-RefProblem([string]$Value) {
 # Clone the plugin when it isn't there, then (only with a ref) fetch that ref from origin and check it out. The same
 # text is in hosts/macos/setup.sh; tests/test_setup.py checks they match and runs it.
 $RefCheckout = @'
-# cpg-ref-checkout: begin
+# claude-projects-ref-checkout: begin
 D="$HOME/claude-projects-mcp"
 [ -d "$D" ] || git clone --quiet "$URL" "$D"
 if [ -n "$REF" ]; then
@@ -171,7 +171,7 @@ if [ -n "$REF" ]; then
   fi
   echo "claude-projects-mcp is at $REF ($(git rev-parse --short HEAD))"
 fi
-# cpg-ref-checkout: end
+# claude-projects-ref-checkout: end
 '@
 function Get-FetchScript([string]$Url, [string]$Ref) {
   return "set -e`nURL='$Url'`nREF='$Ref'`n" + $RefCheckout
@@ -195,7 +195,7 @@ function Get-DistroWslVersion([string]$Name) {
 }
 
 # 0. The ref, checked before anything runs
-if (-not $PSBoundParameters.ContainsKey('Ref') -and $env:CPG_REPO_REF) { $Ref = $env:CPG_REPO_REF }
+if (-not $PSBoundParameters.ContainsKey('Ref') -and $env:CLAUDE_PROJECTS_REPO_REF) { $Ref = $env:CLAUDE_PROJECTS_REPO_REF }
 elseif ($PSBoundParameters.ContainsKey('Ref') -and -not $Ref) { Write-Host "-Ref needs a value"; exit 2 }
 if ($Ref) {
   $problem = Get-RefProblem $Ref
@@ -258,10 +258,10 @@ if (-not $have) {
   } catch {
     Exit-Setup "Couldn't create the WSL distro $Distro ($($_.Exception.Message))." (@("Check that WSL2 works: 'wsl --status' should say Default Version: 2.") + $WslHelp)
   }
-  Say "Preparing ${Distro}: user 'cpg' (no sudo), systemd on"
+  Say "Preparing ${Distro}: user 'claude' (no sudo), systemd on"
   $prep = @'
-id cpg >/dev/null 2>&1 || useradd -m -s /bin/bash cpg
-printf '[boot]\nsystemd=true\n[user]\ndefault=cpg\n' > /etc/wsl.conf
+id claude >/dev/null 2>&1 || useradd -m -s /bin/bash claude
+printf '[boot]\nsystemd=true\n[user]\ndefault=claude\n' > /etc/wsl.conf
 '@
   Invoke-WslScript root $prep
   Invoke-Wsl @("--terminate", $Distro)
@@ -272,7 +272,18 @@ if (-not $DryRun -and (Get-DistroWslVersion $Distro) -eq "1") {
   catch { Exit-Setup "Couldn't convert $Distro to WSL 2 ($($_.Exception.Message))." $WslHelp }
 }
 
-# 3. Root steps, done from here so the cpg user needs no sudo: wait for systemd, linger, packages
+# Migration: retain an existing distro's default unprivileged account (and its home/config), rather than creating
+# a second account or renaming a logged-in one. Fresh distros were prepared with the claude account above.
+$RuntimeUser = "claude"
+if (-not $DryRun) {
+  $existingUser = (& wsl.exe -d $Distro --exec id -un 2>$null | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or $existingUser -notmatch '^[a-z_][a-z0-9_-]*$' -or $existingUser -eq "root") {
+    Exit-Setup "The distro needs an unprivileged default user; none was changed." @("Set its default user in /etc/wsl.conf, then rerun setup.")
+  }
+  $RuntimeUser = $existingUser
+}
+
+# 3. Root steps, done from here so the claude user needs no sudo: wait for systemd, linger, packages
 Say "Installing system packages in $Distro (as root)"
 $rootSteps = @'
 set -u
@@ -281,14 +292,14 @@ for i in $(seq 1 30); do
   case "$s" in running|degraded) break;; esac
   sleep 2
 done
-# a distro made before 1.0.2 has the user "ccp": add "cpg" next to it and make it the default
-id cpg >/dev/null 2>&1 || useradd -m -s /bin/bash cpg
-grep -qx 'default=cpg' /etc/wsl.conf 2>/dev/null || printf '[boot]\nsystemd=true\n[user]\ndefault=cpg\n' > /etc/wsl.conf
-for i in $(seq 1 15); do loginctl enable-linger cpg 2>/dev/null && break; sleep 2; done
-loginctl show-user cpg -p Linger --value 2>/dev/null | grep -qx yes || { echo "could not turn on linger for cpg" >&2; exit 1; }
+# Existing distros keep their account, home, sign-in and config; fresh distros use claude.
+id "$RUNTIME_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$RUNTIME_USER"
+for i in $(seq 1 15); do loginctl enable-linger "$RUNTIME_USER" 2>/dev/null && break; sleep 2; done
+loginctl show-user "$RUNTIME_USER" -p Linger --value 2>/dev/null | grep -qx yes || { echo "could not turn on linger for $RUNTIME_USER" >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/null
 '@
+$rootSteps = "RUNTIME_USER='$RuntimeUser'`n" + $rootSteps
 Invoke-WslScript root $rootSteps
 
 if (-not $Timezone) {
@@ -307,20 +318,19 @@ if ($safeBot) { $installArgs += "--bot-name '$safeBot'" }
 if ($safeOp) { $installArgs += "--operator-name '$safeOp'" }
 if ($safeTz) { $installArgs += "--timezone '$safeTz'" }
 
-# 4. The plugin itself, as the unprivileged cpg user
+# 4. The plugin itself, as the unprivileged claude user
 $inner = (Get-FetchScript $safeUrl $Ref) + "`ncd ~/claude-projects-mcp`n" +
-         "C=./claude-projects; [ -x `$C ] || C=./ccp   # a ref from before 1.0.2 has the CLI under its old name`n" +
-         "`$C setup choose windows_runtime --label 'WSL on $safeHost'`n`$C setup preflight --host-kind windows-wsl || true"
+         "./claude-projects setup choose windows_runtime --label 'WSL on $safeHost'`n./claude-projects setup preflight --host-kind windows-wsl || true"
 Say "Fetching the plugin inside $Distro"
-Invoke-WslScript cpg $inner -Login
+Invoke-WslScript $RuntimeUser $inner -Login
 Say "Installing the plugin's system packages and the Claude app (as root)"
-Invoke-WslScript root "/home/cpg/claude-projects-mcp/install.sh --apt-only"
-Say "Installing the plugin (as cpg)"
-Invoke-WslScript cpg "cd ~/claude-projects-mcp && C=./claude-projects && { [ -x `$C ] || C=./ccp; } && `$C setup install --no-apt $($installArgs -join ' ')" -Login
+Invoke-WslScript root "/home/$RuntimeUser/claude-projects-mcp/install.sh --apt-only"
+Say "Installing the plugin (as $RuntimeUser)"
+Invoke-WslScript $RuntimeUser "cd ~/claude-projects-mcp && ./claude-projects setup install --no-apt $($installArgs -join ' ')" -Login
 
 # 5. Keep the distro running (WSL stops idle distros otherwise). A hidden PowerShell starts a sleep inside it.
 Say "Keeping $Distro running (scheduled task '$TaskName')"
-$keep = "-NoProfile -NonInteractive -WindowStyle Hidden -Command `"& wsl.exe -d $Distro -u cpg --exec /bin/sleep infinity`""
+$keep = "-NoProfile -NonInteractive -WindowStyle Hidden -Command `"& wsl.exe -d $Distro -u $RuntimeUser --exec /bin/sleep infinity`""
 if (-not $DryRun) {
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
               -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew

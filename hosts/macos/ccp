@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-# ccp: the old name of hosts/macos/claude-projects (renamed in 1.0.2); runs it with the same arguments.
-exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/claude-projects" "$@"

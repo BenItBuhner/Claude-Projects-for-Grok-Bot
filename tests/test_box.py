@@ -1,12 +1,12 @@
 """Hosts without systemd (the Grok Bot box): process mode, stdio-only installs, box sign-in, legacy layout, honest
 viewport state and next steps. Shell and app calls are faked as in test_setup.py; the supervisor test runs real
-processes (sleep) under cpg_proc.py with a private D-Bus bus when dbus-daemon is installed."""
+processes (sleep) under claude_projects/proc.py with a private D-Bus bus when dbus-daemon is installed."""
 import json, os, pathlib, shutil, subprocess, sys, time
 import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_setup as S
-import cpg_config
+from claude_projects import setup as S
+from claude_projects import config as cfg_mod
 from test_setup import env, args, _installed, _preflight  # noqa: F401  (fixtures and helpers)
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -36,7 +36,7 @@ def test_hosts_with_systemd_wsl_or_lima_are_not_the_box(change):
 
 
 def test_detect_platform_uses_the_box_facts(monkeypatch):
-    monkeypatch.delenv('CPG_HOST_KIND', raising=False)
+    monkeypatch.delenv('CLAUDE_PROJECTS_HOST_KIND', raising=False)
     monkeypatch.setattr(S.platform, 'system', lambda: 'Linux')
     monkeypatch.setattr(S, '_pid1', lambda: 'tini')
     monkeypatch.setattr(S, '_container_facts', lambda: {k: v for k, v in REAL_BOX.items() if k not in ('pid1', 'wsl', 'lima')})
@@ -105,7 +105,7 @@ def test_install_sh_options():
 
 
 def test_keyring_unit_takes_a_private_data_dir():
-    unit = (REPO / 'systemd' / 'cpg-keyring.service').read_text()
+    unit = (REPO / 'systemd' / 'claude-projects-keyring.service').read_text()
     assert '@KEYRING_ENV@' in unit
     src = (REPO / 'install.sh').read_text()
     assert "keyring_data_dir" in src and 'Environment=XDG_DATA_HOME=$KEYRING_DIR' in src
@@ -134,10 +134,10 @@ def test_status_and_verify_on_legacy_layout(env, monkeypatch, tmp_path):
     S.save_state({'host': {'class': 'always_on_linux'}, 'beta': {'verdict': 'has_projects'}})
     st = S.compute_status()
     assert st['installed'] and st['layout'] == 'legacy' and st['state'] == 'connecting'
-    monkeypatch.setattr(S, 'mcp_tool_names', lambda: ['claude_setup'] * 24)
+    monkeypatch.setattr(S, 'mcp_tool_names', lambda: ['claude_setup'] * 25)
     v = {c['id']: c for c in S.cmd_verify(args(live=False))['checks']}
     assert v['layout']['status'] == 'warn' and v['unit:claude-projects-mcp']['status'] == 'pass'
-    assert not any(k.startswith('unit:cpg-') for k in v), 'the legacy layout has no cpg-* units to fail'
+    assert not any(k.startswith('unit:claude-projects-') and k != 'unit:claude-projects-mcp' for k in v), 'the legacy layout has only its one MCP unit'
 
 
 # ---------------------------------------------------------------- viewport and status honesty
@@ -145,7 +145,7 @@ def test_status_and_verify_on_legacy_layout(env, monkeypatch, tmp_path):
 def test_viewport_on_reports_units_that_did_not_start(env):
     env.run_map['enable --now'] = (1, '', 'Failed to connect to bus: No medium found')
     r = S.viewport(True)
-    assert r['viewport'] == 'failed' and r['units'] == {'cpg-vnc': 'inactive', 'cpg-novnc': 'inactive'}
+    assert r['viewport'] == 'failed' and r['units'] == {'claude-projects-vnc': 'inactive', 'claude-projects-novnc': 'inactive'}
     assert 'No medium found' in r['errors'][0] and 'journalctl' in r['fix']
 
 
@@ -157,26 +157,26 @@ def test_signin_start_stops_when_the_viewport_did_not_start(env):
 
 def test_status_next_steps_when_services_are_down(env, monkeypatch):
     _installed(monkeypatch, units=False)
-    (S.UNIT_DIR / 'cpg-wm.service').unlink()
-    r = S.compute_status(); assert r['state'] == 'installed_unhealthy' and r['missing'] == ['cpg-wm'] and r['next_action'].startswith('claude-projects setup install')
-    (S.UNIT_DIR / 'cpg-wm.service').write_text('x')
+    (S.UNIT_DIR / 'claude-projects-wm.service').unlink()
+    r = S.compute_status(); assert r['state'] == 'installed_unhealthy' and r['missing'] == ['claude-projects-wm'] and r['next_action'].startswith('claude-projects setup install')
+    (S.UNIT_DIR / 'claude-projects-wm.service').write_text('x')
     r = S.compute_status(); assert r['next_action'].startswith('claude-projects setup start') and 'journalctl' not in r['next_action'].split('(')[0]
     env.run_map['pgrep -f -a claude-desktop'] = (0, '4242 /usr/lib/claude-desktop/claude-desktop --no-sandbox\n', '')
     r = S.compute_status(); assert r['app_pids'] == [4242] and 'May I close it' in r['ask_user']
 
 
-def test_process_mode_uses_cpg_proc_and_its_logs(env, monkeypatch):
+def test_process_mode_uses_the_supervisor_and_its_logs(env, monkeypatch):
     monkeypatch.setattr(S, 'CFG', dict(S.CFG, service_mode='process'))
-    S._systemctl_user('is-active', 'cpg-xvfb.service')
-    assert env.runs[-1][1].endswith('cpg_proc.py') and env.runs[-1][2:] == ['is-active', 'cpg-xvfb.service']
-    assert S.unit_log_hint('cpg-mcp').endswith('proc/logs/cpg-mcp.log')
+    S._systemctl_user('is-active', 'claude-projects-xvfb.service')
+    assert env.runs[-1][1:3] == ['-m', 'claude_projects.proc'] and env.runs[-1][3:] == ['is-active', 'claude-projects-xvfb.service']
+    assert S.unit_log_hint('claude-projects-mcp').endswith('proc/logs/claude-projects-mcp.log')
 
 
 def test_runtime_env_in_process_mode_overrides_the_bus():
-    cfg = dict(cpg_config.CFG, service_mode='process', state_dir='/tmp/cpg-st')
-    e = cpg_config.apply_runtime_env(cfg, {'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/elsewhere'})
-    assert e['DBUS_SESSION_BUS_ADDRESS'] == 'unix:path=/tmp/cpg-st/run/bus' and e['XDG_RUNTIME_DIR'] == '/tmp/cpg-st/run'
-    e = cpg_config.apply_runtime_env(dict(cfg, service_mode='systemd'), {'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/elsewhere'})
+    cfg = dict(cfg_mod.CFG, service_mode='process', state_dir='/tmp/cp-st')
+    e = cfg_mod.apply_runtime_env(cfg, {'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/elsewhere'})
+    assert e['DBUS_SESSION_BUS_ADDRESS'] == 'unix:path=/tmp/cp-st/run/bus' and e['XDG_RUNTIME_DIR'] == '/tmp/cp-st/run'
+    e = cfg_mod.apply_runtime_env(dict(cfg, service_mode='systemd'), {'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/elsewhere'})
     assert e['DBUS_SESSION_BUS_ADDRESS'] == 'unix:path=/elsewhere'
 
 
@@ -235,48 +235,48 @@ def test_signin_steps_say_get_started(env):
         assert 'Get started' in (REPO / f).read_text(), f
 
 
-# ---------------------------------------------------------------- cpg_proc: the supervisor itself
+# ---------------------------------------------------------------- claude_projects.proc: the supervisor itself
 
 def test_parse_unit_specifiers_and_deps(tmp_path, monkeypatch):
-    import cpg_proc as P
+    from claude_projects import proc as P
     monkeypatch.setattr(P, 'UNIT_DIR', tmp_path)
-    (tmp_path / 'cpg-keyring.service').write_text(
+    (tmp_path / 'claude-projects-keyring.service').write_text(
         '[Unit]\nRequires=dbus.socket\nAfter=dbus.socket\n[Service]\nType=dbus\nStandardInput=file:/c/keyring-pass\n'
         'Environment=XDG_DATA_HOME=/k\nExecStart=/usr/bin/gnome-keyring-daemon --foreground --control-directory=%t/keyring\nRestart=on-failure\nRestartSec=5\n')
-    u = P.parse_unit('cpg-keyring', {'XDG_RUNTIME_DIR': '/rt', 'HOME': '/h'})
+    u = P.parse_unit('claude-projects-keyring', {'XDG_RUNTIME_DIR': '/rt', 'HOME': '/h'})
     assert u['exec'][-1] == '--control-directory=/rt/keyring' and u['env'] == {'XDG_DATA_HOME': '/k'} and u['stdin'] == '/c/keyring-pass'
-    assert u['requires'] == ['cpg-dbus'] and u['restart'] == 'on-failure' and u['restart_sec'] == 5.0
-    assert P.parse_unit('cpg-nope', {'XDG_RUNTIME_DIR': '/rt', 'HOME': '/h'}) is None
+    assert u['requires'] == ['claude-projects-dbus'] and u['restart'] == 'on-failure' and u['restart_sec'] == 5.0
+    assert P.parse_unit('claude-projects-nope', {'XDG_RUNTIME_DIR': '/rt', 'HOME': '/h'}) is None
 
 
 @pytest.mark.skipif(not shutil.which('dbus-daemon'), reason='needs dbus-daemon')
 def test_supervisor_runs_restarts_and_stops_units(tmp_path):
-    """Real processes: a fake cpg-xvfb (sleep), a dependent unit and a crashing one, under a fresh supervisor."""
+    """Real processes: a fake claude-projects-xvfb (sleep), a dependent unit and a crashing one, under a fresh supervisor."""
     units = tmp_path / 'cfg' / 'systemd' / 'user'; units.mkdir(parents=True)
-    (units / 'cpg-xvfb.service').write_text('[Service]\nExecStart=/bin/sleep 300\nRestart=on-failure\n')
-    (units / 'cpg-wm.service').write_text('[Unit]\nRequires=cpg-xvfb.service\nAfter=cpg-xvfb.service\n[Service]\n'
+    (units / 'claude-projects-xvfb.service').write_text('[Service]\nExecStart=/bin/sleep 300\nRestart=on-failure\n')
+    (units / 'claude-projects-wm.service').write_text('[Unit]\nRequires=claude-projects-xvfb.service\nAfter=claude-projects-xvfb.service\n[Service]\n'
                                           'Environment=MARK=wm-ok\nExecStart=/bin/sh -c "echo $MARK; exec sleep 300"\nRestart=on-failure\n')
-    (units / 'cpg-crash.service').write_text('[Service]\nExecStart=/bin/sh -c "exit 3"\nRestart=on-failure\nRestartSec=0\n')
+    (units / 'claude-projects-crash.service').write_text('[Service]\nExecStart=/bin/sh -c "exit 3"\nRestart=on-failure\nRestartSec=0\n')
     cfgf = tmp_path / 'cfg' / 'config.json'; cfgf.write_text(json.dumps({'state_dir': str(tmp_path / 'st'), 'service_mode': 'process'}))
-    env = dict(os.environ, XDG_CONFIG_HOME=str(tmp_path / 'cfg'), CPG_CONFIG=str(cfgf))
+    env = dict(os.environ, XDG_CONFIG_HOME=str(tmp_path / 'cfg'), CLAUDE_PROJECTS_CONFIG=str(cfgf))
     def proc(*a, check=False):
-        return subprocess.run([sys.executable, str(REPO / 'cpg_proc.py'), *a], env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run([sys.executable, str(REPO / 'claude_projects/proc.py'), *a], env=env, capture_output=True, text=True, timeout=60)
     try:
-        assert proc('enable', '--now', 'cpg-xvfb.service', 'cpg-wm.service').returncode == 0
-        assert proc('is-active', 'cpg-wm').stdout.strip() == 'active' and proc('is-enabled', 'cpg-wm').stdout.strip() == 'enabled'
+        assert proc('enable', '--now', 'claude-projects-xvfb.service', 'claude-projects-wm.service').returncode == 0
+        assert proc('is-active', 'claude-projects-wm').stdout.strip() == 'active' and proc('is-enabled', 'claude-projects-wm').stdout.strip() == 'enabled'
         assert (tmp_path / 'st' / 'run' / 'bus').exists(), 'the supervisor brings its own session bus'
-        assert 'wm-ok' in (tmp_path / 'st' / 'proc' / 'logs' / 'cpg-wm.log').read_text()
-        pid = json.loads((tmp_path / 'st' / 'proc' / 'status.json').read_text())['units']['cpg-xvfb']['pid']
+        assert 'wm-ok' in (tmp_path / 'st' / 'proc' / 'logs' / 'claude-projects-wm.log').read_text()
+        pid = json.loads((tmp_path / 'st' / 'proc' / 'status.json').read_text())['units']['claude-projects-xvfb']['pid']
         os.kill(pid, 9)                                   # a crash: Restart=on-failure brings it back
         for _ in range(40):
             st = json.loads((tmp_path / 'st' / 'proc' / 'status.json').read_text())['units']
-            if st['cpg-xvfb'].get('pid') not in (None, pid) and st['cpg-xvfb']['state'] == 'active': break
+            if st['claude-projects-xvfb'].get('pid') not in (None, pid) and st['claude-projects-xvfb']['state'] == 'active': break
             time.sleep(0.25)
-        assert st['cpg-xvfb']['state'] == 'active' and st['cpg-xvfb']['pid'] != pid
-        r = proc('start', 'cpg-crash', '--timeout', '15')  # keeps exiting 3: gives up and says so
+        assert st['claude-projects-xvfb']['state'] == 'active' and st['claude-projects-xvfb']['pid'] != pid
+        r = proc('start', 'claude-projects-crash', '--timeout', '15')  # keeps exiting 3: gives up and says so
         assert r.returncode == 1 and 'failed' in r.stderr
-        assert proc('restart', 'cpg-wm').returncode == 0
-        assert proc('disable', '--now', 'cpg-wm').returncode == 0 and proc('is-active', 'cpg-wm').stdout.strip() == 'inactive'
+        assert proc('restart', 'claude-projects-wm').returncode == 0
+        assert proc('disable', '--now', 'claude-projects-wm').returncode == 0 and proc('is-active', 'claude-projects-wm').stdout.strip() == 'inactive'
         assert proc('up').returncode == 0, 'up is idempotent'
     finally:
         proc('down')
@@ -286,7 +286,7 @@ def test_supervisor_runs_restarts_and_stops_units(tmp_path):
 def test_starting_supervisor_waits_out_a_probe(tmp_path, monkeypatch):
     """The race from the review: a probe holding supervisor.lock for an instant must not make the supervisor quit."""
     import fcntl, threading
-    import cpg_proc as P
+    from claude_projects import proc as P
     lock = tmp_path / 'supervisor.lock'
     probe = open(lock, 'a+'); fcntl.flock(probe, fcntl.LOCK_SH)
     threading.Timer(0.3, lambda: (fcntl.flock(probe, fcntl.LOCK_UN), probe.close())).start()
@@ -298,13 +298,13 @@ def test_starting_supervisor_waits_out_a_probe(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(not shutil.which('dbus-daemon'), reason='needs dbus-daemon')
 def test_up_survives_hammering_probes_and_racing_callers(tmp_path, monkeypatch):
-    """supervisor_running() in a tight loop while three `cpg_proc.py up` race, for several start/stop cycles:
+    """supervisor_running() in a tight loop while three `claude_projects/proc.py up` race, for several start/stop cycles:
     every up succeeds and exactly one supervisor starts per cycle."""
     import threading
-    import cpg_proc as P
+    from claude_projects import proc as P
     (tmp_path / 'cfg' / 'systemd' / 'user').mkdir(parents=True)
     cfgf = tmp_path / 'cfg' / 'config.json'; cfgf.write_text(json.dumps({'state_dir': str(tmp_path / 'st'), 'service_mode': 'process'}))
-    env = dict(os.environ, XDG_CONFIG_HOME=str(tmp_path / 'cfg'), CPG_CONFIG=str(cfgf))
+    env = dict(os.environ, XDG_CONFIG_HOME=str(tmp_path / 'cfg'), CLAUDE_PROJECTS_CONFIG=str(cfgf))
     proc_dir = tmp_path / 'st' / 'proc'
     monkeypatch.setattr(P, 'PROC', proc_dir); monkeypatch.setattr(P, 'LOCK', proc_dir / 'supervisor.lock')
     stop = threading.Event(); probes = [0]
@@ -312,7 +312,7 @@ def test_up_survives_hammering_probes_and_racing_callers(tmp_path, monkeypatch):
         while not stop.is_set(): P.supervisor_running(); probes[0] += 1
     threads = [threading.Thread(target=hammer, daemon=True) for _ in range(2)]
     for t in threads: t.start()
-    cmd = [sys.executable, str(REPO / 'cpg_proc.py')]
+    cmd = [sys.executable, str(REPO / 'claude_projects/proc.py')]
     cycles = 6
     try:
         for _ in range(cycles):

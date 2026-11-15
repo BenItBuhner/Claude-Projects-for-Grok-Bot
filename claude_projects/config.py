@@ -2,28 +2,48 @@
 
 Precedence (lowest to highest): built-in defaults < JSON config file < environment variables.
 
-Config file: $CPG_CONFIG (or the old $CCP_CONFIG), else $XDG_CONFIG_HOME/claude-projects-mcp/config.json
+Config file: $CLAUDE_PROJECTS_CONFIG, else $XDG_CONFIG_HOME/claude-projects-mcp/config.json
 (~/.config/claude-projects-mcp/config.json). install.sh writes it; every key is optional.
-Nothing in this module reads a secret. `token_file` is only a path; cpg_mcp.py reads it at start-up.
+Nothing in this module reads a secret. `token_file` is only a path; claude_projects/mcp_server.py reads it at start-up.
 """
 import os, sys, json, pathlib, shutil
 
 APP = 'claude-projects-mcp'
-ENV_PREFIX, OLD_ENV_PREFIX = 'CPG_', 'CCP_'   # CCP_* is the old spelling of every CPG_* variable and still works
+ENV_PREFIX = 'CLAUDE_PROJECTS_'
+# Migration: installs from before 1.0.3 may still export the variables under their old short prefixes. They are
+# copied to the CLAUDE_PROJECTS_* name when that is not set (the new name wins); nothing else reads them.
+LEGACY_ENV_PREFIXES = ('CPG_', 'CCP_')
 
 
 def env_aliases(environ=None):
-    """Copy each old CCP_* variable to its CPG_* name unless that is set (the new name wins). Runs on import, so every
-    module and every child process sees the CPG_* names."""
+    """Copy each legacy-prefixed variable to its CLAUDE_PROJECTS_* name unless that is set. Runs on import, so every
+    module and every child process sees the CLAUDE_PROJECTS_* names."""
     environ = os.environ if environ is None else environ
-    for k in [k for k in environ if k.startswith(OLD_ENV_PREFIX)]:
-        environ.setdefault(ENV_PREFIX + k[len(OLD_ENV_PREFIX):], environ[k])
+    for old in LEGACY_ENV_PREFIXES:
+        for k in [k for k in environ if k.startswith(old)]:
+            environ.setdefault(ENV_PREFIX + k[len(old):], environ[k])
     return environ
 
 
 env_aliases()
 HOME = pathlib.Path.home()
-REPO_DIR = pathlib.Path(__file__).resolve().parent
+REPO_DIR = pathlib.Path(__file__).resolve().parent.parent   # the checkout; the package is REPO_DIR/claude_projects
+
+
+def _export_pythonpath(environ=None):
+    """Child processes run modules with `python -m claude_projects...`: put the checkout on their PYTHONPATH."""
+    environ = os.environ if environ is None else environ
+    cur = [p for p in (environ.get('PYTHONPATH') or '').split(os.pathsep) if p]
+    if str(REPO_DIR) not in cur: environ['PYTHONPATH'] = os.pathsep.join([str(REPO_DIR), *cur])
+    return environ
+
+
+_export_pythonpath()
+
+
+def module_argv(module, python=None):
+    """argv that runs a plugin module, e.g. module_argv('claude_projects.idb')."""
+    return [str(python or sys.executable), '-m', module]
 
 
 def _xdg(var, fallback):
@@ -31,8 +51,8 @@ def _xdg(var, fallback):
     return pathlib.Path(v) if v else HOME / fallback
 
 
-CONFIG_DIR = pathlib.Path(os.environ.get('CPG_CONFIG_DIR') or (_xdg('XDG_CONFIG_HOME', '.config') / APP))
-CONFIG_FILE = pathlib.Path(os.environ.get('CPG_CONFIG') or (CONFIG_DIR / 'config.json'))
+CONFIG_DIR = pathlib.Path(os.environ.get('CLAUDE_PROJECTS_CONFIG_DIR') or (_xdg('XDG_CONFIG_HOME', '.config') / APP))
+CONFIG_FILE = pathlib.Path(os.environ.get('CLAUDE_PROJECTS_CONFIG') or (CONFIG_DIR / 'config.json'))
 
 DEFAULTS = {
     # where claude-projects keeps its cache, logs, lock and fetched attachments
@@ -74,9 +94,9 @@ DEFAULTS = {
     'token_file': str(CONFIG_DIR / 'mcp.token'),
     'mcp_host': '127.0.0.1',
     'mcp_port': 8791,
-    # False = no HTTP server (cpg-mcp is not started); agents connect over stdio. The Grok Bot box installs this way.
+    # False = no HTTP server (claude-projects-mcp is not started); agents connect over stdio. The Grok Bot box installs this way.
     'mcp_http': True,
-    # how the plugin's services run: 'systemd' (user units) or 'process' (cpg_proc.py, a small supervisor for hosts
+    # how the plugin's services run: 'systemd' (user units) or 'process' (claude_projects/proc.py, a small supervisor for hosts
     # without user systemd, such as a container whose PID 1 is tini). install.sh picks it.
     'service_mode': 'systemd',
     # gnome-keyring data directory for the plugin's own keyring ('' = the default ~/.local/share/keyrings). New installs
@@ -86,7 +106,7 @@ DEFAULTS = {
     'allowed_hosts': [],
     # managed staging / cache for files moving into and out of threads (default: <state_dir>/staging)
     'staging_dir': '',
-    # per-kind TTL in hours: incoming, outgoing, attach-test, msg (see cpg_staging.py)
+    # per-kind TTL in hours: incoming, outgoing, attach-test, msg (see claude_projects/staging.py)
     'staging_ttl_hours': {},
     'staging_max_mb': 2048,
     'staging_sweep_interval_min': 60,
@@ -103,15 +123,15 @@ DEFAULTS = {
 }
 
 ENV_KEYS = {
-    'CPG_STATE_DIR': 'state_dir', 'CPG_DISPLAY': 'display', 'CPG_LAUNCHER': 'launcher',
-    'CPG_CLAUDE_BINARY': 'claude_binary', 'CPG_CLAUDE_CONFIG_DIR': 'claude_config_dir',
-    'CPG_XDOTOOL': 'xdotool', 'CPG_XCLIP': 'xclip', 'CPG_EXTRA_LIB_PATH': 'extra_lib_path',
-    'CPG_GI_TYPELIB_PATH': 'gi_typelib_path', 'CPG_IDB_PYTHON': 'idb_python', 'CPG_UI_LOCK_FILE': 'ui_lock_file',
-    'CPG_VIEWER_PORTS': 'viewer_ports', 'CPG_TIMEZONE': 'timezone', 'CPG_APP_TIMEZONE': 'app_timezone',
-    'CPG_OPERATOR_NAME': 'operator_name', 'CPG_HOST_LABEL': 'host_label', 'CPG_BOT_NAME': 'bot_name',
-    'CPG_TOKEN_FILE': 'token_file', 'CPG_MCP_HOST': 'mcp_host', 'CPG_MCP_PORT': 'mcp_port',
-    'CPG_ALLOWED_HOSTS': 'allowed_hosts', 'CPG_STAGING_DIR': 'staging_dir', 'CPG_STAGING_MAX_MB': 'staging_max_mb',
-    'CPG_ATTACHMENTS_DIR': 'attachments_dir', 'CPG_SKILL_PATH': 'skill_path',
+    'CLAUDE_PROJECTS_STATE_DIR': 'state_dir', 'CLAUDE_PROJECTS_DISPLAY': 'display', 'CLAUDE_PROJECTS_LAUNCHER': 'launcher',
+    'CLAUDE_PROJECTS_CLAUDE_BINARY': 'claude_binary', 'CLAUDE_PROJECTS_CLAUDE_CONFIG_DIR': 'claude_config_dir',
+    'CLAUDE_PROJECTS_XDOTOOL': 'xdotool', 'CLAUDE_PROJECTS_XCLIP': 'xclip', 'CLAUDE_PROJECTS_EXTRA_LIB_PATH': 'extra_lib_path',
+    'CLAUDE_PROJECTS_GI_TYPELIB_PATH': 'gi_typelib_path', 'CLAUDE_PROJECTS_IDB_PYTHON': 'idb_python', 'CLAUDE_PROJECTS_UI_LOCK_FILE': 'ui_lock_file',
+    'CLAUDE_PROJECTS_VIEWER_PORTS': 'viewer_ports', 'CLAUDE_PROJECTS_TIMEZONE': 'timezone', 'CLAUDE_PROJECTS_APP_TIMEZONE': 'app_timezone',
+    'CLAUDE_PROJECTS_OPERATOR_NAME': 'operator_name', 'CLAUDE_PROJECTS_HOST_LABEL': 'host_label', 'CLAUDE_PROJECTS_BOT_NAME': 'bot_name',
+    'CLAUDE_PROJECTS_TOKEN_FILE': 'token_file', 'CLAUDE_PROJECTS_MCP_HOST': 'mcp_host', 'CLAUDE_PROJECTS_MCP_PORT': 'mcp_port',
+    'CLAUDE_PROJECTS_ALLOWED_HOSTS': 'allowed_hosts', 'CLAUDE_PROJECTS_STAGING_DIR': 'staging_dir', 'CLAUDE_PROJECTS_STAGING_MAX_MB': 'staging_max_mb',
+    'CLAUDE_PROJECTS_ATTACHMENTS_DIR': 'attachments_dir', 'CLAUDE_PROJECTS_SKILL_PATH': 'skill_path',
 }
 _LIST_KEYS = {'viewer_ports', 'allowed_hosts'}
 
@@ -139,7 +159,9 @@ def load(path=None, environ=None):
             print(f'{APP}: ignoring unreadable config {p}: {ex}', file=sys.stderr)
     for env, key in ENV_KEYS.items():
         val = environ.get(env)
-        if val in (None, ''): val = environ.get(OLD_ENV_PREFIX + env[len(ENV_PREFIX):])
+        for old in LEGACY_ENV_PREFIXES:
+            if val not in (None, ''): break
+            val = environ.get(old + env[len(ENV_PREFIX):])
         if val not in (None, ''):
             cfg[key] = _coerce(key, val)
     for k in ('state_dir', 'launcher', 'claude_config_dir', 'token_file', 'ui_lock_file', 'staging_dir', 'attachments_dir', 'skill_path', 'xclip', 'xdotool', 'idb_python', 'extra_lib_path', 'gi_typelib_path'):

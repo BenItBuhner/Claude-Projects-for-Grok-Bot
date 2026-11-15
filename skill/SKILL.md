@@ -57,14 +57,14 @@ Linux runtime, with its own copy of the app signed in separately; the user's own
 
 | | macOS 13+ | Windows 10 22H2 / 11 |
 |---|---|---|
-| runtime | Lima VM `claude-projects`: Ubuntu 24.04, 2 CPUs, 4 GB, 20 GB, `--mount-none` | WSL2 distro `ClaudeProjects`: Ubuntu 24.04, user `cpg` without sudo, systemd on in `/etc/wsl.conf` |
+| runtime | Lima VM `claude-projects`: Ubuntu 24.04, 2 CPUs, 4 GB, 20 GB, `--mount-none` | WSL2 distro `ClaudeProjects`: Ubuntu 24.04, user `claude` without sudo, systemd on in `/etc/wsl.conf` |
 | one-shot script | `bash hosts/macos/setup.sh` | `powershell -ExecutionPolicy Bypass -File hosts\windows\setup.ps1` |
-| run claude-projects | `limactl shell claude-projects -- bash -lc 'cd ~/claude-projects-mcp && ./claude-projects setup status'` (or `hosts/macos/claude-projects`) | base64 script via `wsl.exe -d ClaudeProjects -u cpg --exec /bin/bash -c ...` (or `hosts\windows\claude-projects.cmd` from cmd) |
+| run claude-projects | `limactl shell claude-projects -- bash -lc 'cd ~/claude-projects-mcp && ./claude-projects setup status'` (or `hosts/macos/claude-projects`) | base64 script via `wsl.exe -d ClaudeProjects -u claude --exec /bin/bash -c ...` (or `hosts\windows\claude-projects.cmd` from cmd) |
 | root steps | `sudo` inside the VM (Lima's user has it) | from Windows: `wsl.exe -d ClaudeProjects -u root ...` |
 | stays running | LaunchAgent starts the VM at login; linger inside | hidden scheduled task keeps `sleep infinity` running in the distro; optional at-startup task |
 | ports | Lima forwards the guest's localhost to the Mac's `127.0.0.1` | WSL `localhostForwarding` to Windows `127.0.0.1` |
 | viewer link | `http://127.0.0.1:6179/vnc.html` in the Mac browser | `http://127.0.0.1:6179/vnc.html` in the Windows browser |
-| password file | in the VM: `~/.config/claude-projects-mcp/vncpass.txt` | in the distro: `/home/cpg/.config/claude-projects-mcp/vncpass.txt` |
+| password file | in the VM: `~/.config/claude-projects-mcp/vncpass.txt` | in the distro: `/home/claude/.config/claude-projects-mcp/vncpass.txt` |
 | always-on | `pmset -c sleep 0` (ask), auto login | `powercfg /change standby-timeout-ac 0` (ask), auto sign-in or `-AtStartup` |
 
 Prefer the script. When it isn't available or stops halfway, do the same steps by hand: they're spelled out, with
@@ -112,8 +112,9 @@ the box, pass the warning on to the user before you install.
   8791; `--mcp-port N` moves it and `--no-http` turns it off.
 - Without systemd, nothing restarts the services after the box restarts until the MCP server starts (it brings the
   supervisor up) or you run `./claude-projects setup start`. `status` does it too.
-- Installs from before 1.0.2 use older names for the CLI, services and variables. They still work and count as a normal
-  install; the next `install.sh` renames them (table: "Names before 1.0.2" in `docs/how-it-works.md`).
+- Installs from 1.0.2 and earlier have their services under older names, so `status` reports them as not installed
+  yet. `install` migrates them in place (old services removed, `claude-projects-*` installed, config, sign-in and state
+  kept); see "Migration from older names" in `docs/how-it-works.md`.
 - An older hand-built install (`claude-projects-mcp.service` with `venv/`) is recognized as installed. `install` leaves
   it alone (`legacy_layout`); migrating needs `--migrate` and the user's OK.
 
@@ -159,8 +160,8 @@ has a project list. Verdicts:
 
 `./claude-projects setup connect` lists the options and recommends one:
 
-- **same host** (the box): stdio, `<repo>/.venv/bin/python <repo>/cpg_mcp.py --stdio`. No token involved.
-- **ssh**: the same command over `ssh user@host ...` (Mac: `limactl shell claude-projects -- bash -lc '...'`; Windows: `wsl.exe -d ClaudeProjects -u cpg --exec ...`; `claude-projects setup connect` prints the exact line).
+- **same host** (the box): stdio, `<repo>/.venv/bin/python <repo>/claude_projects/mcp_server.py --stdio`. No token involved.
+- **ssh**: the same command over `ssh user@host ...` (Mac: `limactl shell claude-projects -- bash -lc '...'`; Windows: `wsl.exe -d ClaudeProjects -u claude --exec ...`; `claude-projects setup connect` prints the exact line).
 - **tunnel**: the user's own tunnel or VPN to `127.0.0.1:8791`, `allowed_hosts` in config, a private copy of the
   token file, and `bin/grok-bot-bridge <url> <token-file>`. Nothing here sets up a tunnel for them.
 
@@ -173,7 +174,7 @@ If your tool discovery shows fewer tools than the server has, call them by name 
 - the services are running and start at boot, with linger on and no sleep expected (process mode: the supervisor runs);
 - `/healthz` answers (when the HTTP server is on) and the secret files are chmod 600;
 - `viewer_ports` is set;
-- 24 MCP tools load, and the skill's sha256 matches;
+- 25 MCP tools load, and the skill's sha256 matches;
 - the app is reachable and signed in, with no dialogs, no viewer and a free lock;
 - Projects access is there and the project list loads;
 - one Project's primary thread reads;
@@ -241,6 +242,25 @@ error; the tools never fall back to the primary silently.
   thread a precondition for anything (new env vars apply to new sessions, including the primary).
 - Continue an existing child only when that child is already the workstream or the user named it; pass its `cmsg_`.
 
+## Check every thread, not just the primary
+
+Sending defaults to the primary; **watching does not**. Claude asks for things in child threads too, and a child that
+needs the user sits in the sidebar's **Waiting on you** group while the primary looks idle. So:
+
+1. Check all threads of a Project, never only the primary. `claude_attention()` lists, across every Project, each thread
+   (primary and child) in *Waiting on you* with its latest ask; `claude_thread_status` and `claude_project_get` return the
+   same list for one Project as `waiting_threads`. These are cached reads (no UI); `claude_attention(refresh=true)`
+   live-reads the waiting threads whose cached ask is stale (`ask_stale`), a few at a time, within about 45 s.
+2. Surface every Waiting-on-you child thread to the user, and read its latest ask first (`latest_ask`, or
+   `claude_thread_read(project, thread=<cmsg_>)` when `ask_stale` is true).
+3. `ask_kind` says what Claude wants: `approval` (a line in the user's own words, an approval line, an exact reply),
+   `permission` (a card or a permission stall, see below), `question`, or `action` (something for the user to do).
+4. **Approval asks.** Relay `requested_line` to the user **exactly as Claude wrote it**, and say which Project and thread
+   asked. Post it in the thread on the user's behalf only when the user has already given an explicit standing approval
+   that covers that exact action; otherwise ask the user and wait. When `requested_line` is null, Claude described the line
+   without giving it: ask the user for their words. **Never invent, complete or reword the user's words**, and never present a
+   line you wrote as theirs.
+
 ## Tools
 
 | tool | what it does | UI? |
@@ -248,7 +268,8 @@ error; the tools never fall back to the primary silently.
 | `claude_projects_list(refresh=false)` | Projects: name, `chan_`, primary `cse_`, last activity, unread | only with refresh |
 | `claude_project_get(project)` | primary transcript + child threads with per-thread state | yes (refresh=false: cache) |
 | `claude_thread_read(project, thread)` | transcript, `current_state`, `permission_cards`, `machine`, `address` | yes (refresh=false: cache) |
-| `claude_thread_status(project, thread, refresh=false)` | compact triage from cache; refresh=true for live | only with refresh |
+| `claude_thread_status(project, thread, refresh=false)` | compact triage from cache, plus `ask` and `waiting_threads` (every thread waiting on the user); refresh=true for live | only with refresh |
+| `claude_attention(projects, refresh=false, max_reads=2)` | every thread in *Waiting on you* across Projects (child threads too) with its latest ask, `approval_asks` with the exact `requested_line`, and `permission_cards` | only with refresh |
 | `claude_thread_wait(project, thread)` | poll until Claude replies (prefer polling `claude_thread_read`) | yes |
 | `claude_thread_send(project, message, thread, dry_run, attachments, attach_test, idempotency_key, job_id, clear_leftovers)` | type + Send + verify; answers within ~45 s (`pending` + `job_id` while it still runs: call again, it never sends twice; a repeat within 30 min says `joined_existing_send`, a new `idempotency_key` sends again on purpose). Refuses when the box holds attachment chips it didn't add (`composer_chips`); `clear_leftovers=true` removes them first. `attach_test="open"` (dry run) attaches each file and removes it again, never Send | yes |
 | `claude_thread_forward(source_project, target_project, ..., dry_run=true)` | relay one message verbatim (+ files) | yes |
@@ -265,11 +286,11 @@ error; the tools never fall back to the primary silently.
 
 **Stale tool list.** Some MCP clients keep the tool list they saw when the connector was first added; Grok Bot's tool
 discovery (`GetDynamicTools`) can still show an older, shorter tool list with old descriptions even after the server
-was updated and the connector re-added. The server serves all 24 tools regardless: call any of them by name (in Grok Bot,
+was updated and the connector re-added. The server serves all 25 tools regardless: call any of them by name (in Grok Bot,
 `CallDynamicTool` on the connector's namespace) with the arguments in the table above. Tools that older connector lists often miss:
 `claude_thread_permissions`, `claude_thread_permission`, `claude_thread_forward`, `claude_staging`, `claude_skill_get`,
 `claude_policy_get`, `claude_policy_propose`, `claude_project_add_repo` and `claude_project_remove_repo` (1.0.0), and
-`claude_setup` (1.0.2). A missing tool in
+`claude_setup` (1.0.2), and `claude_attention` (1.0.3). A missing tool in
 discovery is not a missing tool on the server; `claude_skill_get` returning this file proves the connection is current.
 
 ## Reading and reporting
@@ -288,6 +309,8 @@ discovery is not a missing tool on the server; `claude_skill_get` returning this
 4. Where a thread runs = `machine.resolved`. If it is unknown, say "unknown (not shown in the app)". Never guess.
 5. Cached results carry `cache_age_min`; refresh before treating anything older than ~15 minutes as fact.
 6. When `sidebar_disagrees` is true, report the live status, not the sidebar label.
+7. `current_state.ask` (and `ask` on status results) classifies the latest reply; an `approval` ask carries `requested_line`.
+   Report waiting child threads (`waiting_threads`) along with the primary; see "Check every thread" above.
 
 ## Auto permission mode and permission cards
 
@@ -377,10 +400,12 @@ with `claude_policy_propose`; only the user applies them.
 - Creating a child thread or a Project, changing Project settings, environments, repos or pins.
 - Changing the plugin's host setup: reconfigure, sign-in switch, viewport on, sudo commands, sleep settings, uninstall.
 - Denying a card (`Not now`, `Deny`) when the user did not say to.
+- Posting a line Claude asked for in the user's own words (an approval ask), unless the user gave an explicit standing approval covering that exact action: relay the exact `requested_line` and ask.
 
 ### Never
 - Test messages, test threads or test Projects.
 - Pause, Restart Claude, Archive, Import CLI sessions, re-verify, Get more usage.
 - Forcing past a connected VNC viewer or overwriting an unsent draft.
 - Changing a thread's model.
+- Inventing, completing or rewording the user's words, or presenting a line you wrote as theirs.
 <!-- POLICY:END -->

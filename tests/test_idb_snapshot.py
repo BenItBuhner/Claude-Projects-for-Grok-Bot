@@ -3,14 +3,14 @@ import json, pathlib, subprocess, sys, threading, time
 import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_core as C
+from claude_projects import core as C
 
 SNAP = {'channels': [{'id': 'chan_A', 'name': 'Docs'}], 'sessions': []}
 
 
 @pytest.fixture
 def reader(tmp_path, monkeypatch):
-    """Fake cpg_idb.py: counts runs, takes `delay` seconds, returns `snap`."""
+    """Fake claude_projects/idb.py: counts runs, takes `delay` seconds, returns `snap`."""
     monkeypatch.setattr(C, 'CACHE', tmp_path)
     st = {'runs': 0, 'delay': 0.0, 'snap': SNAP, 'active': 0, 'max_active': 0}
     lock = threading.Lock()

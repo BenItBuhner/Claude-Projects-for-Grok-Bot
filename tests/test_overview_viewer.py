@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_core as C
+from claude_projects import core as C
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 32
 

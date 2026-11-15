@@ -1,13 +1,13 @@
 """The sign-in browser pick (bin/claude-signin-browser): a real chromium snap, the Ubuntu deb stub, and nothing.
 
-Snap layout faked in a temp dir: CPG_SNAP_BIN stands in for /snap/bin, a fake `snap` answers `snap list <name>`, and
+Snap layout faked in a temp dir: CLAUDE_PROJECTS_SNAP_BIN stands in for /snap/bin, a fake `snap` answers `snap list <name>`, and
 PATH never contains the snap dir, as under a systemd user manager or `wsl -u root` (the bug: verify said "no usable
 browser" with the chromium snap installed)."""
 import pathlib, shutil, subprocess
 import pytest
 
 import conftest  # noqa: F401
-import cpg_proc, cpg_setup as S
+from claude_projects import proc as proc_mod, setup as S
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'bin' / 'claude-signin-browser'
@@ -37,7 +37,7 @@ def box(tmp_path):
 
         def check(self, path_has_snap=False):
             path = f'{usr}:{tools}' + (f':{snapbin}' if path_has_snap else '')
-            env = {'PATH': path, 'HOME': str(tmp_path), 'CPG_SNAP_BIN': str(snapbin)}
+            env = {'PATH': path, 'HOME': str(tmp_path), 'CLAUDE_PROJECTS_SNAP_BIN': str(snapbin)}
             return subprocess.run([str(SCRIPT), '--check'], env=env, capture_output=True, text=True)
     b = Box(); b.snapbin = snapbin
     return b
@@ -108,14 +108,14 @@ def test_snap_bin_on_path_for_cli_supervisor_and_units(monkeypatch, tmp_path):
     cli = (REPO / 'claude-projects').read_text()
     assert 'PATH="$PATH:/snap/bin"' in cli
     monkeypatch.setenv('PATH', '/usr/bin:/bin')
-    assert '/snap/bin' in cpg_proc.runtime_env()['PATH'].split(':')
+    assert '/snap/bin' in proc_mod.runtime_env()['PATH'].split(':')
     monkeypatch.setenv('PATH', '/usr/bin:/snap/bin:/bin')
-    assert cpg_proc.runtime_env()['PATH'].split(':').count('/snap/bin') == 1
-    for u in ('cpg-claude-desktop', 'cpg-mcp', 'cpg-refresh'):
+    assert proc_mod.runtime_env()['PATH'].split(':').count('/snap/bin') == 1
+    for u in ('claude-projects-desktop', 'claude-projects-mcp', 'claude-projects-refresh'):
         txt = (REPO / 'systemd' / f'{u}.service').read_text()
         line = next(ln for ln in txt.splitlines() if ln.startswith('Environment=PATH='))
         assert line.endswith(':/snap/bin') and '/usr/bin' in line, u
     # the process supervisor reads the same unit files: %h expands, /snap/bin stays
-    monkeypatch.setattr(cpg_proc, 'UNIT_DIR', REPO / 'systemd')
-    u = cpg_proc.parse_unit('cpg-mcp', {'XDG_RUNTIME_DIR': str(tmp_path), 'HOME': '/home/someone'})
+    monkeypatch.setattr(proc_mod, 'UNIT_DIR', REPO / 'systemd')
+    u = proc_mod.parse_unit('claude-projects-mcp', {'XDG_RUNTIME_DIR': str(tmp_path), 'HOME': '/home/someone'})
     assert u['env']['PATH'].startswith('/home/someone/.local/bin:') and u['env']['PATH'].endswith(':/snap/bin')

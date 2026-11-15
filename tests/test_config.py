@@ -2,7 +2,7 @@
 import json, os, pathlib, re, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_config as K
+from claude_projects import config as K
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -21,16 +21,16 @@ def test_file_then_env(tmp_path):
     f.write_text(json.dumps({'display': ':42', 'bot_name': 'FromFile', 'mcp_port': 9000}))
     c = K.load(f, environ={})
     assert c['display'] == ':42' and c['bot_name'] == 'FromFile' and c['viewer_ports'] == [5942, 6122]
-    c = K.load(f, environ={'CPG_DISPLAY': ':7', 'CPG_BOT_NAME': 'FromEnv', 'CPG_MCP_PORT': '9100', 'CPG_VIEWER_PORTS': '1,2'})
+    c = K.load(f, environ={'CLAUDE_PROJECTS_DISPLAY': ':7', 'CLAUDE_PROJECTS_BOT_NAME': 'FromEnv', 'CLAUDE_PROJECTS_MCP_PORT': '9100', 'CLAUDE_PROJECTS_VIEWER_PORTS': '1,2'})
     assert c['display'] == ':7' and c['bot_name'] == 'FromEnv' and c['mcp_port'] == 9100 and c['viewer_ports'] == [1, 2]
 
 
-# /home/cpg/ is allowed: it is the plugin's own user in its WSL distro, the same on every PC
-GENERIC = (r'/home/(?!cpg/)[a-z][a-z0-9_-]*/|/Users/[A-Za-z]|env_01[0-9A-Za-z]{8}|chan_01[0-9A-Za-z]{8}|cse_01[0-9A-Za-z]{8}|'
+# /home/claude/ is allowed: it is the plugin's own user in its WSL distro, the same on every PC
+GENERIC = (r'/home/(?!claude/)[a-z][a-z0-9_-]*/|/Users/[A-Za-z]|env_01[0-9A-Za-z]{8}|chan_01[0-9A-Za-z]{8}|cse_01[0-9A-Za-z]{8}|'
            r'cmsg_01[0-9A-Za-z]{8}|\b100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+\b|Bearer [A-Za-z0-9_-]{24,}')
 # Maintainers: put deployment-specific words (hostnames, user names, domains) one per line in a file outside the repo and
-# point CPG_PRIVATE_PATTERNS at it, so the check covers them without publishing them here.
-_extra = os.environ.get('CPG_PRIVATE_PATTERNS')
+# point CLAUDE_PROJECTS_PRIVATE_PATTERNS at it, so the check covers them without publishing them here.
+_extra = os.environ.get('CLAUDE_PROJECTS_PRIVATE_PATTERNS')
 _words = [re.escape(w.strip()) for w in (open(_extra).read().splitlines() if _extra and os.path.isfile(_extra) else []) if w.strip()]
 PRIVATE = re.compile('|'.join([GENERIC] + _words), re.I)
 

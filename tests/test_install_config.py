@@ -15,8 +15,8 @@ def _run(tmp_path, display, existing=None):
     cfg = tmp_path / 'config.json'
     if existing is not None: cfg.write_text(json.dumps(existing))
     n = int(display[1:])
-    env = dict(os.environ, CPG_REPO=str(REPO), CPG_CFG=str(cfg), CPG_DISP=display, CPG_BN='', CPG_OP='', CPG_TZ='',
-               CPG_VNC_PORT=str(5900 + n), CPG_NOVNC_PORT=str(6080 + n))
+    env = dict(os.environ, CLAUDE_PROJECTS_REPO=str(REPO), CLAUDE_PROJECTS_CFG=str(cfg), CLAUDE_PROJECTS_DISP=display, CLAUDE_PROJECTS_BN='', CLAUDE_PROJECTS_OP='', CLAUDE_PROJECTS_TZ='',
+               CLAUDE_PROJECTS_VNC_PORT=str(5900 + n), CLAUDE_PROJECTS_NOVNC_PORT=str(6080 + n))
     subprocess.run([sys.executable, '-'], input=_config_step(), text=True, env=env, check=True)
     return json.loads(cfg.read_text())
 

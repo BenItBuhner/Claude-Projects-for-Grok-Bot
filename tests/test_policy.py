@@ -2,7 +2,7 @@
 import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_policy as P
+from claude_projects import policy as P
 
 SKILL = pathlib.Path(__file__).resolve().parents[1]/'skill'/'SKILL.md'
 

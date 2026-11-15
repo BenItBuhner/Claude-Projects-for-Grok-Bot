@@ -5,5 +5,5 @@
 set -euo pipefail
 URL="${1:?usage: grok-bot-bridge <https://host/mcp> <token-file>}"; TOKEN_FILE="${2:?token file}"
 [ -r "$TOKEN_FILE" ] || { echo "grok-bot-bridge: cannot read $TOKEN_FILE" >&2; exit 2; }
-CPG_AUTH="Bearer $(tr -d '\r\n' < "$TOKEN_FILE")"; export CPG_AUTH
-exec npx -y mcp-remote@0.16.5 "$URL" --transport http-only --header 'Authorization:${CPG_AUTH}'
+CLAUDE_PROJECTS_AUTH="Bearer $(tr -d '\r\n' < "$TOKEN_FILE")"; export CLAUDE_PROJECTS_AUTH
+exec npx -y mcp-remote@0.16.5 "$URL" --transport http-only --header 'Authorization:${CLAUDE_PROJECTS_AUTH}'

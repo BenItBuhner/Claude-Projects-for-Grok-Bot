@@ -1,7 +1,7 @@
 [Unit]
 Description=claude-projects-mcp: Openbox window manager on @DISPLAY@
-After=cpg-xvfb.service
-Requires=cpg-xvfb.service
+After=claude-projects-xvfb.service
+Requires=claude-projects-xvfb.service
 [Service]
 Environment=DISPLAY=@DISPLAY@
 ExecStartPre=/bin/sleep 1

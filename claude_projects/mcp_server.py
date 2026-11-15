@@ -2,22 +2,24 @@
 
 Every tool runs `claude-projects --json ...` in a subprocess (fresh accessibility connection each call; UI work is serialized by claude-projects's lock).
 Transports:
-  python cpg_mcp.py            Streamable HTTP on CPG_MCP_HOST:CPG_MCP_PORT (default 127.0.0.1:8791) at /mcp,
-                               Authorization: Bearer <contents of token_file> (see cpg_config.py)
-  python cpg_mcp.py --stdio    stdio (for an MCP client on the same machine or over `ssh host ... --stdio`); no token
+  python claude_projects/mcp_server.py            Streamable HTTP on CLAUDE_PROJECTS_MCP_HOST:CLAUDE_PROJECTS_MCP_PORT (default 127.0.0.1:8791) at /mcp,
+                               Authorization: Bearer <contents of token_file> (see claude_projects/config.py)
+  python claude_projects/mcp_server.py --stdio    stdio (for an MCP client on the same machine or over `ssh host ... --stdio`); no token
 """
 import os, sys, json, hmac, asyncio, tempfile, pathlib
 from typing import Optional, Union
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from cpg_config import CFG
-from cpg_origin import ORIGIN_PREFIX, origin_header
-import cpg_config, cpg_policy, cpg_staging
+_PKG = pathlib.Path(__file__).resolve().parent   # run as a file (python claude_projects/<module>.py): import from the checkout,
+sys.path[:] = [p for p in sys.path if pathlib.Path(p or '.').resolve() != _PKG]   # not from inside the package
+sys.path.insert(0, str(_PKG.parent))
+from claude_projects.config import CFG
+from claude_projects.origin import ORIGIN_PREFIX, origin_header
+from claude_projects import config as cfg_mod, policy as policy_mod, staging as staging_mod
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent, ImageContent
-HERE = pathlib.Path(__file__).resolve().parent
-CLI = os.environ.get('CPG_BIN') or str(HERE/'claude-projects')
-STAGE = cpg_staging.from_config(CFG); TMPD = STAGE.dir('msg')   # temp message / attachment-list files (deleted after each call)
-POLICY = cpg_policy.Policy(CFG['skill_path'], cpg_config.CONFIG_DIR)
+HERE = pathlib.Path(__file__).resolve().parent.parent   # the checkout
+CLI = os.environ.get('CLAUDE_PROJECTS_BIN') or str(HERE/'claude-projects')
+STAGE = staging_mod.from_config(CFG); TMPD = STAGE.dir('msg')   # temp message / attachment-list files (deleted after each call)
+POLICY = policy_mod.Policy(CFG['skill_path'], cfg_mod.CONFIG_DIR)
 STDIO = '--stdio' in sys.argv[1:]
 HOST = CFG['mcp_host']; PORT = int(CFG['mcp_port'])
 OPERATOR = CFG.get('operator_name') or 'the user'
@@ -52,15 +54,19 @@ mcp = FastMCP('claude-projects', instructions=(
     "Before acting, read claude_skill_get (or claude_policy_get): the user's POLICY says what is pre-approved to send or permit "
     "and what to surface first, so routine in-policy actions need no extra confirmation. Threads waiting on a permission show "
     "current_state.waiting_on='permission' and permission_cards; act on them with claude_thread_permission. Every thread has a stable "
-    "address <chan_>/<cse_|cmsg_>. Files go through the managed staging dir (claude_staging)."), **kw)
+    "address <chan_>/<cse_|cmsg_>. Files go through the managed staging dir (claude_staging). "
+    "Claude asks for things in CHILD threads too, not just the primary: check every thread. claude_attention lists every thread "
+    "in 'Waiting on you' across Projects with its latest ask; for an approval ask (ask_kind='approval') relay requested_line to the "
+    "user exactly, post it for them only under an explicit standing approval covering that exact action, otherwise ask; never "
+    "invent the user's words."), **kw)
 def _is_busy(res):
     if not isinstance(res, dict): return False
     if res.get('error') == 'Busy' or res.get('code') == 3 or res.get('exit_code') == 3: return True
     msg = (res.get('message') or '').lower()
     return 'busy' in msg and res.get('error') in ('Busy', 'ToolError', None)
 
-ATTACH_BUDGET = float(os.environ.get('CPG_ATTACH_BUDGET', '40'))   # MCP clients give up near 60 s
-SEND_BUDGET = float(os.environ.get('CPG_SEND_BUDGET', '40'))
+ATTACH_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_BUDGET', '40'))   # MCP clients give up near 60 s
+SEND_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_SEND_BUDGET', '40'))
 
 
 async def run(args, timeout=900, msg=None, attach=None, busy_budget=None):
@@ -71,10 +77,10 @@ async def run(args, timeout=900, msg=None, attach=None, busy_budget=None):
     tmp = None; tmp2 = None
     try:
         if msg is not None:
-            fd, tmp = tempfile.mkstemp(prefix='cpg-msg-', dir=str(TMPD)); os.write(fd, msg.encode()); os.close(fd)
+            fd, tmp = tempfile.mkstemp(prefix='claude-projects-msg-', dir=str(TMPD)); os.write(fd, msg.encode()); os.close(fd)
             args = args + ['--file', tmp]
         if attach:
-            fd, tmp2 = tempfile.mkstemp(prefix='cpg-att-', suffix='.json', dir=str(TMPD)); os.write(fd, json.dumps(attach).encode()); os.close(fd)
+            fd, tmp2 = tempfile.mkstemp(prefix='claude-projects-att-', suffix='.json', dir=str(TMPD)); os.write(fd, json.dumps(attach).encode()); os.close(fd)
             args = args + ['--attach-json', tmp2]
         t0 = _time.monotonic(); delay = 2.0; attempt = 0; last = None; lock_waited_s = 0.0
         while True:
@@ -256,14 +262,29 @@ async def claude_thread_status(project: str, thread: Optional[str] = None, refre
     """Compact triage for a primary or child thread: current_state (working/waiting_on_user/paused/done/idle),
     latest message summary with local time and age, what it is waiting on, and machine/environment_info.
     refresh=false (default) is fast: serves the on-disk cache with freshness stamps (cache_age_min). refresh=true
-    does a live UI read. Prefer this for 'what is going on' questions; use claude_thread_read for the full transcript."""
+    does a live UI read. Prefer this for 'what is going on' questions; use claude_thread_read for the full transcript.
+    Also returns ask (approval | permission | question | action, with requested_line for an approval ask) and waiting_threads:
+    EVERY thread of the project in the sidebar's 'Waiting on you' group, child threads included, each with its latest ask."""
     a = (flags(force) + ['thread-status', project] + (['--thread', thread] if thread else []) + (['--refresh'] if refresh else []) + (['--stay'] if refresh else []))
     return await run(a, 300 if refresh else 60)
 
 @mcp.tool()
+async def claude_attention(projects: Optional[list[str]] = None, refresh: bool = False, max_reads: int = 2, force: bool = False) -> dict:
+    """What needs the user across Projects, in one pass: every thread (primary AND child threads) whose sidebar state is
+    'Waiting on you', each with its latest ask and ask_kind; approval_asks lists the threads where Claude asked for a line in
+    the user's own words, with requested_line exactly as Claude wrote it; permission_cards lists cards seen in any thread.
+    refresh=false (default) uses cached reads only (fast, no UI). refresh=true also live-reads up to max_reads waiting threads
+    whose cached ask is stale (ask_stale), one short UI lock each, and answers within about 45 s. Nothing is pressed or sent.
+    Relay an approval ask's requested_line to the user; post it for them only under an explicit standing approval covering that
+    exact action. Never invent the user's words."""
+    a = flags(force) + ['attention'] + list(projects or []) + (['--refresh', '--max-reads', str(max_reads), '--budget', '35'] if refresh else [])
+    return await run(a, 60)
+
+@mcp.tool()
 async def claude_refresh(projects: Optional[list[str]] = None, max_projects: int = 3, force: bool = False) -> dict:
     """Refresh now: re-read the project list and re-open the primary thread of the named projects (or of up to max_projects whose
-    activity changed since the last read), updating the cache used by refresh=false reads. A background timer does this every 10 min."""
+    activity changed since the last read), updating the cache used by refresh=false reads. The same pass reads their child threads in
+    'Waiting on you' (latest ask, permission cards); see claude_attention. A background timer does this every 10 min."""
     return await run(flags(force) + ['refresh', '--max', str(max_projects)] + list(projects or []), 900)
 
 @mcp.tool()
@@ -461,7 +482,7 @@ if __name__ == '__main__':
     if CFG.get('service_mode') == 'process':
         # no systemd on this host: nothing else brings the display and the app back after a restart of the box,
         # so the MCP server (started by the agent) starts the plugin's supervisor when it isn't running
-        import cpg_proc; cpg_proc.ensure_up()
+        from claude_projects import proc as proc_mod; proc_mod.ensure_up()
     if STDIO:
         mcp.run('stdio')
     else:

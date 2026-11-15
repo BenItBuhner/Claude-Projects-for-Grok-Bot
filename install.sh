@@ -14,7 +14,7 @@
 #                [--service-mode auto|systemd|process] [--claude-md] [--dry-run] [--uninstall] [--apt-only]
 #   --no-http    no HTTP MCP server (agents connect over stdio); remembered in the config until --http
 #   --mcp-port   port for the HTTP MCP server (default 8791; remembered in the config)
-#   --service-mode  auto (default): user systemd when it is running, else the process supervisor (cpg_proc.py)
+#   --service-mode  auto (default): user systemd when it is running, else the process supervisor (claude_projects/proc.py)
 #   --claude-md  also add the origin-bracket note (AGENTS.md) to ~/.claude/CLAUDE.md for local Claude Code sessions
 #   --apt-only   only install the system packages and the Claude app, then stop (run it with sudo when sudo needs a
 #                password the agent can't type: sudo ./install.sh --apt-only; then the agent runs ./install.sh --no-apt)
@@ -23,15 +23,16 @@ set -euo pipefail
 USER="${USER:-$(id -un)}"   # unset in some containers (docker exec)
 
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-# CCP_* are the old names of the CPG_* variables (before 1.0.2) and still work; the CPG_* name wins
-for k in $(compgen -e); do case "$k" in CCP_*) n="CPG_${k#CCP_}"; [ -n "${!n+x}" ] || export "$n=${!k}";; esac; done
-CONFIG_DIR="${CPG_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp}"
-CONFIG_FILE="${CPG_CONFIG:-$CONFIG_DIR/config.json}"
+# Migration: variables exported under the short prefixes of releases before 1.0.3 still work; the CLAUDE_PROJECTS_* name wins
+for k in $(compgen -e); do case "$k" in CPG_*|CCP_*) n="CLAUDE_PROJECTS_${k#???_}"; [ -n "${!n+x}" ] || export "$n=${!k}";; esac; done
+CONFIG_DIR="${CLAUDE_PROJECTS_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-projects-mcp}"
+CONFIG_FILE="${CLAUDE_PROJECTS_CONFIG:-$CONFIG_DIR/config.json}"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 DISPLAY_ID=":99"; BOT_NAME=""; OPERATOR=""; TZ_NAME=""; SCREEN="540x1170"; VIEWPORT_BIND="127.0.0.1"
 DO_APT=1; HTTP_OPT=""; MCP_PORT_OPT=""; MODE_OPT=auto; DRY=0; UNINSTALL=0; CLAUDE_MD=0; APT_ONLY=0
-UNITS=(cpg-xvfb cpg-wm cpg-keyring cpg-claude-desktop cpg-vnc cpg-novnc cpg-mcp)
-OLD_UNITS=(ccp-xvfb ccp-wm ccp-keyring ccp-claude-desktop ccp-vnc ccp-novnc ccp-mcp ccp-refresh)   # the names before 1.0.2
+UNITS=(claude-projects-xvfb claude-projects-wm claude-projects-keyring claude-projects-desktop claude-projects-vnc claude-projects-novnc claude-projects-mcp)
+# Migration: the service names of releases before 1.0.3 (two generations of short prefixes)
+OLD_UNITS=(); for p in cpg ccp; do for u in xvfb wm keyring claude-desktop vnc novnc mcp refresh; do OLD_UNITS+=("$p-$u"); done; done
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -64,7 +65,7 @@ say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 run() { if [ "$DRY" = 1 ]; then echo "    [dry-run] $*"; else "$@"; fi; }
 cfg_get() { python3 -c "import json,sys;v=json.load(open(sys.argv[1])).get(sys.argv[2]);print('' if v is None else (str(v).lower() if isinstance(v,bool) else v))" "$CONFIG_FILE" "$1" 2>/dev/null || true; }
 
-# How the services run: user systemd when its manager answers, else the plugin's own supervisor (cpg_proc.py).
+# How the services run: user systemd when its manager answers, else the plugin's own supervisor (claude_projects/proc.py).
 # A machine that boots with systemd but whose user manager isn't up yet is fixed by logging in once (or linger),
 # not by switching modes.
 pid1="$(cat /proc/1/comm 2>/dev/null || echo unknown)"
@@ -77,28 +78,36 @@ if [ "$MODE" = auto ]; then
     else MODE=process; fi
   fi
 fi
-SVC() { if [ "$MODE" = process ]; then python3 "$REPO/cpg_proc.py" "$@"; else systemctl --user "$@"; fi; }
-# An install from before 1.0.2 has the same services as ccp-*: stop and remove those before the cpg-* ones start, so
-# the two sets never run side by side (same display and ports). Config, sign-in and state are shared and kept.
+SVC() { if [ "$MODE" = process ]; then PYTHONPATH="$REPO" python3 -m claude_projects.proc "$@"; else systemctl --user "$@"; fi; }
+# Migration: an install from before 1.0.3 runs the same services under older names. Stop and remove those before the
+# claude-projects-* ones start, so the two sets never run side by side (same display and ports), and delete the
+# old module and CLI shims that a checkout may still have lying around. Config, sign-in and state are kept.
 remove_old_units() {
   local u found=0
   for u in "${OLD_UNITS[@]}"; do [ -f "$UNIT_DIR/$u.service" ] && found=1; done
-  [ "$found" = 1 ] || return 0
-  say "Moving the services to their new names (ccp-* -> cpg-*)"
-  run SVC disable --now ccp-refresh.timer 2>/dev/null || true
-  for u in "${OLD_UNITS[@]}"; do
-    [ -f "$UNIT_DIR/$u.service" ] || continue
-    run SVC disable --now "$u.service" 2>/dev/null || true; run rm -f "$UNIT_DIR/$u.service"
+  if [ "$found" = 1 ]; then
+    say "Moving the services to their new names (claude-projects-*)"
+    for u in "${OLD_UNITS[@]}"; do
+      if [ -f "$UNIT_DIR/$u.timer" ]; then run SVC disable --now "$u.timer" 2>/dev/null || true; run rm -f "$UNIT_DIR/$u.timer"; fi
+      [ -f "$UNIT_DIR/$u.service" ] || continue
+      run SVC disable --now "$u.service" 2>/dev/null || true; run rm -f "$UNIT_DIR/$u.service"
+    done
+    if [ "$MODE" = systemd ]; then run SVC daemon-reload || true; fi
+  fi
+  local f
+  for f in "$REPO"/ccp "$REPO"/ccp_*.py "$REPO"/cpg_*.py "$REPO"/hosts/macos/ccp "$REPO"/hosts/windows/ccp.cmd; do
+    [ -e "$f" ] && ! git -C "$REPO" ls-files --error-unmatch "${f#"$REPO"/}" >/dev/null 2>&1 && run rm -f "$f"
   done
-  run rm -f "$UNIT_DIR/ccp-refresh.timer"
-  if [ "$MODE" = systemd ]; then run SVC daemon-reload || true; fi
+  f="$HOME/.local/bin/ccp"
+  if [ -L "$f" ]; then case "$(readlink -f "$f" 2>/dev/null)" in "$REPO"/*|"") run rm -f "$f";; esac; fi
+  return 0
 }
-unit_log_hint() { if [ "$MODE" = process ]; then echo "tail -n 50 ${CPG_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-projects-mcp}/proc/logs/$1.log"; else echo "journalctl --user -u $1 -n 50"; fi; }
+unit_log_hint() { if [ "$MODE" = process ]; then echo "tail -n 50 ${CLAUDE_PROJECTS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-projects-mcp}/proc/logs/$1.log"; else echo "journalctl --user -u $1 -n 50"; fi; }
 
 if [ "$UNINSTALL" = 1 ]; then
   say "Stopping and removing user services (config, sign-in and state are kept)"
   for u in "${UNITS[@]}"; do run SVC disable --now "$u.service" 2>/dev/null || true; run rm -f "$UNIT_DIR/$u.service"; done
-  run SVC disable --now cpg-refresh.timer 2>/dev/null || true; run rm -f "$UNIT_DIR/cpg-refresh.service" "$UNIT_DIR/cpg-refresh.timer"
+  run SVC disable --now claude-projects-refresh.timer 2>/dev/null || true; run rm -f "$UNIT_DIR/claude-projects-refresh.service" "$UNIT_DIR/claude-projects-refresh.timer"
   remove_old_units
   if [ "$MODE" = process ]; then run SVC down || true; else run SVC daemon-reload || true; fi
   echo "Remove $CONFIG_DIR and ~/.local/state/claude-projects-mcp yourself if you also want the config and cache gone."
@@ -115,10 +124,10 @@ PKGS=(xvfb xauth xfonts-base fonts-dejavu-core fonts-liberation openbox x11vnc n
       poppler-utils curl gnupg git ca-certificates)
 APT_INSTALL=(apt-get install -y -qq --no-install-recommends)
 # The first of firefox-esr / chromium that apt can really install here (a candidate other than "(none)"), or nothing.
-# CPG_BROWSER_CANDIDATES overrides the list (tests).
+# CLAUDE_PROJECTS_BROWSER_CANDIDATES overrides the list (tests).
 apt_browser_pkg() {
   local p c
-  for p in ${CPG_BROWSER_CANDIDATES:-firefox-esr chromium}; do
+  for p in ${CLAUDE_PROJECTS_BROWSER_CANDIDATES:-firefox-esr chromium}; do
     c="$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
     if [ -n "$c" ] && [ "$c" != "(none)" ]; then echo "$p"; return 0; fi
   done
@@ -171,7 +180,7 @@ if [ "$MODE" = systemd-unreachable ]; then
   exit 3
 fi
 if [ "$MODE" = process ]; then
-  say "Service mode: process (no user systemd here; PID 1 is $pid1). cpg_proc.py runs the services."
+  say "Service mode: process (no user systemd here; PID 1 is $pid1). claude_projects/proc.py runs the services."
   command -v dbus-daemon >/dev/null 2>&1 || [ "$DRY" = 1 ] || { echo "dbus-daemon is missing (apt package dbus)" >&2; exit 3; }
 else
   say "Service mode: systemd (user units)"
@@ -189,13 +198,13 @@ say "Writing $CONFIG_FILE"
 run mkdir -p "$CONFIG_DIR"; run chmod 700 "$CONFIG_DIR"
 if [ "$DRY" = 0 ]; then
   [ -z "$TZ_NAME" ] && TZ_NAME="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
-  CPG_REPO="$REPO" CPG_CFG="$CONFIG_FILE" CPG_DISP="$DISPLAY_ID" CPG_BN="$BOT_NAME" CPG_OP="$OPERATOR" CPG_TZ="$TZ_NAME" \
-  CPG_VNC_PORT="$VNC_PORT" CPG_NOVNC_PORT="$NOVNC_PORT" CPG_SCREEN="$SCREEN" CPG_VBIND="$VIEWPORT_BIND" \
-  CPG_HTTP="$HTTP_OPT" CPG_MCPPORT="$MCP_PORT_OPT" CPG_MODE="$MODE" \
+  CLAUDE_PROJECTS_REPO="$REPO" CLAUDE_PROJECTS_CFG="$CONFIG_FILE" CLAUDE_PROJECTS_DISP="$DISPLAY_ID" CLAUDE_PROJECTS_BN="$BOT_NAME" CLAUDE_PROJECTS_OP="$OPERATOR" CLAUDE_PROJECTS_TZ="$TZ_NAME" \
+  CLAUDE_PROJECTS_VNC_PORT="$VNC_PORT" CLAUDE_PROJECTS_NOVNC_PORT="$NOVNC_PORT" CLAUDE_PROJECTS_SCREEN="$SCREEN" CLAUDE_PROJECTS_VBIND="$VIEWPORT_BIND" \
+  CLAUDE_PROJECTS_HTTP="$HTTP_OPT" CLAUDE_PROJECTS_MCPPORT="$MCP_PORT_OPT" CLAUDE_PROJECTS_MODE="$MODE" \
   "$REPO/.venv/bin/python" - <<'PY'
 import json, os, pathlib
-p = pathlib.Path(os.environ['CPG_CFG']); cfg = json.loads(p.read_text()) if p.is_file() else {}
-repo = os.environ['CPG_REPO']
+p = pathlib.Path(os.environ['CLAUDE_PROJECTS_CFG']); cfg = json.loads(p.read_text()) if p.is_file() else {}
+repo = os.environ['CLAUDE_PROJECTS_REPO']
 # viewer_ports: the ports this installer gives x11vnc and noVNC, so the "pause while someone watches" check is explicit in
 # the config. Ports set by hand are kept; ports that were the old display's defaults follow a --display change.
 def _defaults(disp):
@@ -204,18 +213,18 @@ def _defaults(disp):
     return [5900 + n, 6080 + n]
 old_ports = [int(x) for x in (cfg.get('viewer_ports') or [])]
 if not old_ports or old_ports == _defaults(cfg.get('display')):
-    cfg['viewer_ports'] = [int(os.environ['CPG_VNC_PORT']), int(os.environ['CPG_NOVNC_PORT'])]
-cfg.update({'display': os.environ['CPG_DISP'], 'launcher': f'{repo}/bin/claude-desktop-launch', 'idb_python': f'{repo}/.venv/bin/python'})
-cfg.update({'screen': os.environ.get('CPG_SCREEN') or '540x1170', 'viewport_bind': os.environ.get('CPG_VBIND') or '127.0.0.1'})
+    cfg['viewer_ports'] = [int(os.environ['CLAUDE_PROJECTS_VNC_PORT']), int(os.environ['CLAUDE_PROJECTS_NOVNC_PORT'])]
+cfg.update({'display': os.environ['CLAUDE_PROJECTS_DISP'], 'launcher': f'{repo}/bin/claude-desktop-launch', 'idb_python': f'{repo}/.venv/bin/python'})
+cfg.update({'screen': os.environ.get('CLAUDE_PROJECTS_SCREEN') or '540x1170', 'viewport_bind': os.environ.get('CLAUDE_PROJECTS_VBIND') or '127.0.0.1'})
 # new installs keep the noVNC viewport off except while someone signs in (claude-projects setup signin); existing ones keep theirs
 cfg.setdefault('viewport_mode', 'on-demand' if not p.is_file() else 'always')
 # new installs get their own keyring folder, so an existing desktop login.keyring is never asked to unlock; existing
 # installs keep theirs (the app's sign-in is stored in it)
 cfg.setdefault('keyring_data_dir', str(pathlib.Path.home() / '.local/share/claude-projects-mcp/keyring') if not p.is_file() else '')
-if os.environ.get('CPG_MODE'): cfg['service_mode'] = os.environ['CPG_MODE']
-if os.environ.get('CPG_HTTP'): cfg['mcp_http'] = os.environ['CPG_HTTP'] == '1'
-if os.environ.get('CPG_MCPPORT'): cfg['mcp_port'] = int(os.environ['CPG_MCPPORT'])
-for env, key in (('CPG_BN', 'bot_name'), ('CPG_OP', 'operator_name'), ('CPG_TZ', 'timezone')):
+if os.environ.get('CLAUDE_PROJECTS_MODE'): cfg['service_mode'] = os.environ['CLAUDE_PROJECTS_MODE']
+if os.environ.get('CLAUDE_PROJECTS_HTTP'): cfg['mcp_http'] = os.environ['CLAUDE_PROJECTS_HTTP'] == '1'
+if os.environ.get('CLAUDE_PROJECTS_MCPPORT'): cfg['mcp_port'] = int(os.environ['CLAUDE_PROJECTS_MCPPORT'])
+for env, key in (('CLAUDE_PROJECTS_BN', 'bot_name'), ('CLAUDE_PROJECTS_OP', 'operator_name'), ('CLAUDE_PROJECTS_TZ', 'timezone')):
     if os.environ.get(env): cfg[key] = os.environ[env]
 cfg.setdefault('environment_labels', {}); cfg.setdefault('environment_ids', {})
 p.write_text(json.dumps(cfg, indent=2) + '\n'); os.chmod(p, 0o600)
@@ -252,11 +261,11 @@ for f in "$REPO"/systemd/*; do
 done
 [ "$MODE" = process ] && { run SVC up || { echo "the process supervisor did not start; see its log under the state dir (proc/supervisor.log)" >&2; exit 4; }; }
 run SVC daemon-reload
-START=(cpg-xvfb cpg-wm cpg-keyring cpg-vnc cpg-novnc cpg-claude-desktop); [ "$DO_HTTP" = 1 ] && START+=(cpg-mcp)
+START=(claude-projects-xvfb claude-projects-wm claude-projects-keyring claude-projects-vnc claude-projects-novnc claude-projects-desktop); [ "$DO_HTTP" = 1 ] && START+=(claude-projects-mcp)
 FAILED=()
 for u in "${START[@]}"; do run SVC enable --now "$u.service" || FAILED+=("$u"); done
-if [ "$DO_HTTP" = 0 ]; then run SVC disable --now cpg-mcp.service >/dev/null 2>&1 || true; fi   # stdio only: no HTTP server
-run SVC enable --now cpg-refresh.timer || FAILED+=(cpg-refresh.timer)
+if [ "$DO_HTTP" = 0 ]; then run SVC disable --now claude-projects-mcp.service >/dev/null 2>&1 || true; fi   # stdio only: no HTTP server
+run SVC enable --now claude-projects-refresh.timer || FAILED+=(claude-projects-refresh.timer)
 if [ "$MODE" = systemd ]; then
   command -v loginctl >/dev/null && run loginctl enable-linger "$USER" 2>/dev/null || true   # keep services up without a login session
 fi
@@ -279,7 +288,7 @@ if [ "$DRY" = 0 ]; then
   for u in "${START[@]}"; do printf '    %-22s %s\n' "$u" "$(SVC is-active "$u.service" 2>/dev/null || true)"; done
   "$REPO/claude-projects" --json origin --message "self-check" >/dev/null && echo "    origin bracket          ok"
   if [ "$DO_HTTP" = 1 ]; then
-    curl -fsS "http://127.0.0.1:$MCP_PORT/healthz" >/dev/null 2>&1 && echo "    mcp /healthz            ok" || echo "    mcp /healthz            not up yet (check: $(unit_log_hint cpg-mcp))"
+    curl -fsS "http://127.0.0.1:$MCP_PORT/healthz" >/dev/null 2>&1 && echo "    mcp /healthz            ok" || echo "    mcp /healthz            not up yet (check: $(unit_log_hint claude-projects-mcp))"
   fi
 fi
 if [ ${#FAILED[@]} -gt 0 ] && [ "$DRY" = 0 ]; then
@@ -305,6 +314,6 @@ Installed (services: $MODE). Two steps need you:
 Then check:  $REPO/claude-projects status       (signed_in: true)
 
 Connect an MCP client:
-  stdio (same machine or over SSH):  $REPO/.venv/bin/python $REPO/cpg_mcp.py --stdio
+  stdio (same machine or over SSH):  env PYTHONPATH=$REPO $REPO/.venv/bin/python -m claude_projects.mcp_server --stdio
 $HTTP_LINE
 MSG

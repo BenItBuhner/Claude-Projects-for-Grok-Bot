@@ -3,7 +3,7 @@ import sys, pathlib, pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401  (isolated config)
-import cpg_core as c
+from claude_projects import core as c
 
 class FakeX:
     def __init__(self, open_wids, escapes_to_close=2):
@@ -54,6 +54,6 @@ def test_home_fallback_is_y40(monkeypatch):
     assert clicks == [(60, 241)]
 
 def test_patched_source_markers():
-    src = (pathlib.Path(__file__).resolve().parent.parent / "cpg_core.py").read_text()
+    src = (pathlib.Path(__file__).resolve().parent.parent / "claude_projects/core.py").read_text()
     assert "_click_xy(g['X'] + 70, g['Y'] + 120)" not in src
     assert "if _open_files_wids():" in src and "_attach_files_impl(files)" in src

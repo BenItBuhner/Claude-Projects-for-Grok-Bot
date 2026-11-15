@@ -4,7 +4,7 @@ import pathlib, sys
 import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_core as C
+from claude_projects import core as C
 
 
 @pytest.fixture
@@ -80,4 +80,4 @@ def test_deeplink_passes_display_and_binary_to_the_launcher(clock, monkeypatch):
     class R: returncode = 0
     monkeypatch.setattr(C.subprocess, 'run', lambda argv, **k: seen.update(k) or R())
     C.deeplink('claude://code/new')
-    assert seen['env']['CPG_DISPLAY'] and seen['env']['CPG_CLAUDE_BINARY']
+    assert seen['env']['CLAUDE_PROJECTS_DISPLAY'] and seen['env']['CLAUDE_PROJECTS_CLAUDE_BINARY']

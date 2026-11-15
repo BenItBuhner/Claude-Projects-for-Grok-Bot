@@ -2,8 +2,8 @@
 import json, pathlib, re, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import conftest  # noqa: F401
-import cpg_origin as O
-import cpg_core as C
+from claude_projects import origin as O
+from claude_projects import core as C
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -95,7 +95,7 @@ def test_op_send_applies_bracket_before_anything(monkeypatch):
 
 
 def test_cli_origin_preview_no_app():
-    r = subprocess.run([sys.executable, str(REPO / 'cpg_core.py'), '--json', 'origin', '--message', 'hello', '--bot-name', 'Scout'],
+    r = subprocess.run([sys.executable, str(REPO / 'claude_projects/core.py'), '--json', 'origin', '--message', 'hello', '--bot-name', 'Scout'],
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     d = json.loads(r.stdout)
@@ -106,10 +106,10 @@ def test_cli_origin_preview_no_app():
 def test_single_constant_in_code():
     """The literal prefix is defined once in code; everything else imports it (docs and tests may quote it)."""
     hits = []
-    for f in REPO.glob('*.py'):
+    for f in REPO.glob('claude_projects/*.py'):
         for n, line in enumerate(f.read_text().splitlines(), 1):
-            if "'[sent by Grok Bot'" in line or '"[sent by Grok Bot"' in line: hits.append((f.name, n))
-    assert hits == [('cpg_origin.py', hits[0][1])], hits
+            if "'[sent by Grok Bot'" in line or '"[sent by Grok Bot"' in line: hits.append((f'claude_projects/{f.name}', n))
+    assert hits == [('claude_projects/origin.py', hits[0][1])], hits
 
 
 # ---- attachment chips before the bracket (an attachment-first send: the chips came first in the transcript text)
