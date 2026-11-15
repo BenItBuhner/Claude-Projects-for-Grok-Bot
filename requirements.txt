@@ -5,5 +5,7 @@ uvicorn==0.54.0
 pillow==13.0.0
 brotli==1.2.1
 pypdf==6.21.4
-ccl_chromium_reader @ git+https://github.com/cclgroupltd/ccl_chromium_reader.git@ad37443541dd91dac3ac1fb2eecaeb8693f36815
+zstd==1.5.7.2
 ccl_simplesnappy @ git+https://github.com/cclgroupltd/ccl_simplesnappy.git@3d085230baa8c46cf2090ebba29bf6e8eab31087
+# ccl_chromium_reader is in requirements-nodeps.txt: it declares an unpinned git dependency on ccl_simplesnappy, which
+# pip refuses to combine with the pinned one above (ResolutionImpossible), so it is installed with --no-deps after this file.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1 (2026-11-14)
+
+### Fixed
+- Fresh installs failed at the pip step with `ResolutionImpossible`: `ccl_chromium_reader` declares an unpinned git
+  dependency on `ccl_simplesnappy` that pip won't combine with our pinned one. It's now installed with `--no-deps` from
+  `requirements-nodeps.txt`, and its other dependency (`zstd`) is pinned in `requirements.txt`.
+
 ## 1.0.0 (2026-11-14)
 
 ### Compatibility

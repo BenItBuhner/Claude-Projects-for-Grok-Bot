@@ -100,6 +100,6 @@ Flags: `--display :N`, `--bot-name`, `--operator-name`, `--timezone`, `--no-apt`
 ## Development
 
 ```bash
-python3 -m venv .venv --system-site-packages && .venv/bin/pip install -r requirements.txt pytest
+python3 -m venv .venv --system-site-packages && .venv/bin/pip install -r requirements.txt pytest && .venv/bin/pip install --no-deps -r requirements-nodeps.txt
 .venv/bin/python -m pytest -q           # no app, display or network needed
 ```

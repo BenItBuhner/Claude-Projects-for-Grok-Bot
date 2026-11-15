@@ -88,6 +88,7 @@ say "Creating the Python environment in $REPO/.venv"
 run python3 -m venv --system-site-packages "$REPO/.venv"
 run "$REPO/.venv/bin/pip" install -q --upgrade pip
 run "$REPO/.venv/bin/pip" install -q -r "$REPO/requirements.txt"
+run "$REPO/.venv/bin/pip" install -q --no-deps -r "$REPO/requirements-nodeps.txt"
 
 # ---------------------------------------------------------------- 3. config + local secrets (never printed)
 say "Writing $CONFIG_FILE"
