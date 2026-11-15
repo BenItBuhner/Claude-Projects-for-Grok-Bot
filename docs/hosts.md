@@ -62,5 +62,5 @@ Or HTTP through your own tunnel or VPN to `127.0.0.1:8791`, with `bin/grok-bot-b
 
 ## Why not drive the native Mac or Windows app directly?
 
-That would need a second and third UI driver (macOS Accessibility, Windows UI Automation) for all 24 tools, each
+That would need a second and third UI driver (macOS Accessibility, Windows UI Automation) for all 25 tools, each
 tracking its own app build. One Linux driver behind a small runtime keeps every host on the same, tested code.

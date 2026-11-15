@@ -10,7 +10,7 @@
 you, pick up results, and unblock threads stuck on a permission card. It runs on your own Claude subscription, through
 the real Claude app on an always-on computer of yours.
 
-An MCP server with 24 tools. Works with Grok Bot or any agent that speaks MCP and can run shell commands.
+An MCP server with 25 tools. Works with Grok Bot or any agent that speaks MCP and can run shell commands.
 Latest release: [v1.0.3](https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot/releases/latest).
 
 ## Set it up
@@ -75,7 +75,7 @@ Claude app update can break it. Sends spend your Claude usage. More in [Limits](
 - [Hosts](docs/hosts.md): Linux, Mac, Windows and the agent's box
 - [Manual install](docs/manual-install.md): the same setup by hand, configuration, connecting other MCP clients
 - [Updating a running install](docs/deploy.md): the busy check to run before restarting the server
-- [How it works](docs/how-it-works.md): architecture, ids, permission cards, files, transports, all 24 tools
+- [How it works](docs/how-it-works.md): architecture, ids, permission cards, files, transports, all 25 tools
 - [Agent skill and policy](skill/SKILL.md)
 - [The `[sent by Grok Bot]` tag](docs/origin-bracket.md) · [Limits](docs/limits.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)
 

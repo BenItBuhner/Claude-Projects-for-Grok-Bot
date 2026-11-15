@@ -134,7 +134,7 @@ def test_status_and_verify_on_legacy_layout(env, monkeypatch, tmp_path):
     S.save_state({'host': {'class': 'always_on_linux'}, 'beta': {'verdict': 'has_projects'}})
     st = S.compute_status()
     assert st['installed'] and st['layout'] == 'legacy' and st['state'] == 'connecting'
-    monkeypatch.setattr(S, 'mcp_tool_names', lambda: ['claude_setup'] * 24)
+    monkeypatch.setattr(S, 'mcp_tool_names', lambda: ['claude_setup'] * 25)
     v = {c['id']: c for c in S.cmd_verify(args(live=False))['checks']}
     assert v['layout']['status'] == 'warn' and v['unit:claude-projects-mcp']['status'] == 'pass'
     assert not any(k.startswith('unit:claude-projects-') and k != 'unit:claude-projects-mcp' for k in v), 'the legacy layout has only its one MCP unit'

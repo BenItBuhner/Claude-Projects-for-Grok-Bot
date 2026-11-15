@@ -455,7 +455,7 @@ def test_skill_has_mac_and_windows_guidance_with_references():
     assert "limactl shell claude-projects -- cat ~" not in mac and "limactl shell claude-projects -- ~/" not in mac
 
 
-def test_every_tool_count_says_24():
+def test_every_tool_count_says_25():
     files = [REPO / 'README.md', REPO / 'INSTALL.md', REPO / 'CHANGELOG.md', *(REPO / 'docs').glob('*.md'),
              *(REPO / 'skill').rglob('*.md')]
     seen = []
@@ -465,7 +465,7 @@ def test_every_tool_count_says_24():
         if f.name == 'CHANGELOG.md': text = text.split('\n## ', 2)[1]   # only the current release; older ones are history
         for m in re.finditer(r'\b(\d+)\s+(?:MCP\s+)?tools\b|\((\d+) tools\)', text):
             seen.append((f.name, int(m.group(1) or m.group(2))))
-    assert seen and all(n == S.EXPECTED_TOOLS == 24 for _, n in seen), seen
+    assert seen and all(n == S.EXPECTED_TOOLS == 25 for _, n in seen), seen
 
 
 # ---------------------------------------------------------------- findings from a real Windows runner (PR 9)

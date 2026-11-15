@@ -21,7 +21,7 @@ sys.path[:] = [p for p in sys.path if pathlib.Path(p or '.').resolve() != _PKG] 
 sys.path.insert(0, str(_PKG.parent))
 from claude_projects.config import CFG, tool as _cfg_tool
 from claude_projects.origin import add_origin, strip_origin, has_origin, is_bot_sent, origin_header, origin_body, ORIGIN_PREFIX
-from claude_projects import staging as staging_mod, permissions as PERM
+from claude_projects import staging as staging_mod, permissions as PERM, attention as ATT
 STAGE = staging_mod.from_config(CFG)
 ROOT = pathlib.Path(CFG['state_dir']); CACHE = ROOT/'cache'; LOGD = ROOT/'logs'
 LOCKP = pathlib.Path(CFG['ui_lock_file'])
@@ -406,7 +406,12 @@ def build_current_state(msgs, busy=False, thread_meta=None, info=None, ref=None,
         waiting_on = None
 
     # Auto permission mode: a visible permission card (or a reply that stalls asking for an OK) blocks the thread.
-    perm_hint = PERM.stalled_on_permission_text(text_l) if (latest_role == 'assistant' and not busy) else None
+    # An approval ask (Claude wants a line in the user's own words) is the user's to answer, not a permission card.
+    ask = ATT.classify_ask(latest.get('text'), latest.get('blocks')) if (latest and latest_role == 'assistant') else None
+    if ask and ask['kind'] == 'approval' and not busy:
+        st = 'waiting_on_user'; waiting_on = 'user'
+    perm_hint = (PERM.stalled_on_permission_text(text_l) if (latest_role == 'assistant' and not busy and not (ask and ask['kind'] == 'approval'))
+                 else None)
     if permission_cards:
         st = 'waiting_on_user'; waiting_on = 'permission'
     elif perm_hint:
@@ -439,6 +444,8 @@ def build_current_state(msgs, busy=False, thread_meta=None, info=None, ref=None,
         'sidebar_group': group or None,
         'note': note,
     }
+    if ask and ask['kind'] != 'update':
+        out['ask'] = ask
     if disagree:
         out['sidebar_disagrees'] = True
         out['sidebar_suggested_status'] = sidebar_suggested
@@ -651,6 +658,10 @@ def read_cache(chan, thread=None):
     except Exception: return None
 def write_cache(chan, thread, data):
     p = cache_key(chan, thread); t = p.with_suffix('.tmp'); t.write_text(json.dumps(data, ensure_ascii=False, indent=1)); t.replace(p)
+def waiting_threads_for(chan, project_cache=None, primary_thread_id=None):
+    """Every thread of the project in the sidebar's 'Waiting on you' group (child threads too), with its latest cached ask."""
+    pc = project_cache if project_cache is not None else read_cache(chan)
+    return ATT.waiting_threads(pc, lambda tid: read_cache(chan, tid), lambda tid: thread_address(chan, tid, primary_thread_id), ct)
 
 # ---------------------------------------------------------------- AT-SPI
 _A = None
@@ -2738,6 +2749,8 @@ def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0
                     trow['current_state'] = build_current_state([], False, trow, None)
                     trow['current_state']['summary'] = None
                     trow['current_state']['note'] = 'Sidebar-only status from cache; call claude_thread_read/thread-status for live latest-message summary.'
+        if not tid:
+            cached['waiting_threads'] = waiting_threads_for(chan, read_cache(chan), p.get('primary_thread_id'))
         return cached
     with ui_lock(f'read {p["name"]} {thread or "primary"}', force):
         try:
@@ -2806,6 +2819,9 @@ def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0
                     for at in m.get('attachments') or []: at.pop('thumbnail', None)
                 write_cache(chan, tid, cres)
             else: write_cache(chan, tid, res)
+            if not tid:
+                pc = res if threads is not None else read_cache(chan)
+                res['waiting_threads'] = waiting_threads_for(chan, pc, p.get('primary_thread_id'))
             return res
         finally:
             if not stay: go_home()
@@ -4044,7 +4060,8 @@ def op_thread_status(project, thread=None, refresh=False, force=False, stay=True
             'permission_cards': cached.get('permission_cards'),
             'latest_message': ({'index': latest['index'], 'role': latest.get('role'), 'summary': latest.get('summary') or (latest.get('text') or '')[:240],
                                 'time_local': latest.get('time_local'), 'age_hours': latest.get('age_hours'), 'is_latest': True} if latest else None),
-            'waiting_on': cs.get('waiting_on'),
+            'waiting_on': cs.get('waiting_on'), 'ask': cs.get('ask'),
+            'waiting_threads': waiting_threads_for(chan, None, p.get('primary_thread_id')),
             'machine': env_block.get('machine'), 'environment_info': env_block,
             'claude_working': cached.get('claude_working'),
             'from_cache': True, 'cache_age_min': age_cache,
@@ -4066,7 +4083,8 @@ def _triage_from_read(r):
         'permission_cards': r.get('permission_cards'),
         'latest_message': ({'index': latest['index'], 'role': latest.get('role'), 'summary': latest.get('summary') or (latest.get('text') or '')[:240],
                             'time_local': latest.get('time_local'), 'age_hours': latest.get('age_hours'), 'is_latest': True} if latest else None),
-        'waiting_on': cs.get('waiting_on'),
+        'waiting_on': cs.get('waiting_on'), 'ask': cs.get('ask'),
+        'waiting_threads': r.get('waiting_threads') if r.get('waiting_threads') is not None else (waiting_threads_for(r['project_id'], None, r.get('primary_thread_id')) if r.get('project_id') else None),
         'machine': r.get('machine'), 'environment_info': r.get('environment_info'),
         'claude_working': r.get('claude_working'),
         'from_cache': False, 'cache_age_min': 0,
@@ -4074,6 +4092,53 @@ def _triage_from_read(r):
         'note': 'Live triage from the app UI.',
     }
 
+def op_attention(projects=None, refresh=False, max_reads=2, budget_s=40.0, force=False):
+    """Everything that needs the user across Projects, in one pass: every thread (primary and child) in a 'Waiting on you'
+    group with its latest ask (approval asks carry the exact requested_line), plus permission cards seen in any thread.
+    refresh=False (default) uses cached reads only (no UI, no lock). refresh=True also live-reads up to max_reads waiting
+    threads whose cached ask is stale, one short UI lock per read, stopping at budget_s; it never presses or sends anything."""
+    t0 = time.time()
+    snap = idb_snapshot(max_age=120)
+    rows = project_rows(snap)
+    if projects:
+        want = {resolve_project(q, snap)['id'] for q in projects}
+        rows = [r for r in rows if r['id'] in want]
+    reads = []; out = []; cards = []
+    if refresh:   # live-read stale waiting threads first: one short lock per read, never queued behind another holder
+        todo = [(r, w) for r in rows if read_cache(r['id']) for w in waiting_threads_for(r['id'], None, r.get('primary_thread_id')) if w['ask_stale']][:max(0, max_reads)]
+        for i, (r, w) in enumerate(todo):
+            item = {'project': r['name'], 'thread_id': w['thread_id'], 'title': w['title']}
+            h = ui_lock_holder()
+            if time.time() - t0 > budget_s: item['skipped'] = 'time budget'; reads.append(item); continue
+            if h: item['skipped'] = f"UI busy ({h.get('op')}); try again later"; reads.append(item); break
+            try: op_read(r['id'], w['thread_id'], True, 6, force=force, stay=(i < len(todo) - 1)); item['read'] = True
+            except Busy as ex: item['skipped'] = str(ex)[:160]
+            except Exception as ex: item['error'] = str(ex)[:160]
+            reads.append(item)
+            if 'read' not in item: break
+    for r in rows:
+        chan = r['id']; pc = read_cache(chan)
+        if not pc: continue
+        wt = waiting_threads_for(chan, pc, r.get('primary_thread_id'))
+        # the primary thread itself waiting on the user
+        prim = pc.get('current_state') or {}
+        for tid in [None] + [t.get('thread_id') for t in (pc.get('threads') or []) if t.get('thread_id')]:
+            c = pc if tid is None else read_cache(chan, tid)
+            for card in (c or {}).get('permission_cards') or []:
+                cards.append({'project': r['name'], 'project_id': chan, 'thread_id': tid or 'primary', **card})
+        if wt or prim.get('waiting_on') in ('user', 'permission'):
+            out.append({'project': r['name'], 'project_id': chan, 'project_read_at_local': ct(pc.get('read_at')),
+                        'threads_waiting_on_you': pc.get('threads_waiting'),
+                        'primary': ({'status': prim.get('status'), 'waiting_on': prim.get('waiting_on'), 'summary': prim.get('summary'),
+                                     'ask': prim.get('ask')} if prim.get('waiting_on') in ('user', 'permission') else None),
+                        'waiting_threads': wt})
+    asks = [{'project': p['project'], 'thread_id': w['thread_id'], 'title': w['title'], 'requested_line': w['requested_line']}
+            for p in out for w in p['waiting_threads'] if w['ask_kind'] == 'approval']
+    return {'projects': out, 'count_threads': sum(len(p['waiting_threads']) for p in out), 'approval_asks': asks,
+            'permission_cards': cards, 'live_reads': reads if refresh else None, 'elapsed_s': round(time.time() - t0, 1),
+            'note': ('Check every listed thread, not just the primary. For an approval ask relay requested_line to the user exactly; '
+                     'post it for them only under an explicit standing approval covering that exact action, otherwise ask. '
+                     'Never invent the user\'s words. ask_stale=true: read that thread before relaying.')}
 def op_refresh(projects=None, background=False, max_projects=3, force=False):
     """Refresh the project list (opens Projects view) and re-read the primary thread of changed / named projects."""
     if background:
@@ -4102,7 +4167,17 @@ def op_refresh(projects=None, background=False, max_projects=3, force=False):
                                                                 'current_state': r.get('current_state')})
         except Busy: break
         except Exception as ex: done.append({'project': t, 'error': str(ex)[:200]})
-    return {'list_fetched_by_app_local': res['list_fetched_by_app_local'], 'previous_fetch_local': res['previous_fetch_local'], 'refreshed': done}
+    # the same pass also reads the child threads those projects show as 'Waiting on you' (their asks, permission cards)
+    att = None
+    ids = [d['project'] for d in done if 'error' not in d]
+    if ids:
+        try:
+            a = op_attention(ids, refresh=True, max_reads=max_projects, budget_s=120.0, force=force)
+            att = {'count_threads': a['count_threads'], 'approval_asks': a['approval_asks'], 'permission_cards': len(a['permission_cards']),
+                   'live_reads': a['live_reads']}
+        except Exception as ex: att = {'error': str(ex)[:200]}
+    return {'list_fetched_by_app_local': res['list_fetched_by_app_local'], 'previous_fetch_local': res['previous_fetch_local'], 'refreshed': done,
+            'attention': att}
 def _pkg_version(pkg='claude-desktop'):
     """Installed and candidate apt versions of the Claude desktop package (None when apt/dpkg is unavailable)."""
     out = {'installed': None, 'candidate': None}
@@ -4261,6 +4336,7 @@ def main(argv=None):
     s = sp.add_parser('project-set-env', help="set cloud environment variables (values never printed); prefer --env-name for a dedicated env"); s.add_argument('project'); s.add_argument('--set', action='append', default=[], help='NAME=value (non-secret)'); s.add_argument('--secret-file', action='append', default=[], help='NAME=/path/on/host (chmod 600)'); s.add_argument('--env-name'); s.add_argument('--no-copy', action='store_true'); s.add_argument('--allow-shared', action='store_true'); s.add_argument('--dry-run', action='store_true')
     s = sp.add_parser('project-menu', help="list or press an item in a project's ... menu"); s.add_argument('project'); s.add_argument('--item'); s.add_argument('--confirm')
     s = sp.add_parser('refresh', help='refresh list + changed projects'); s.add_argument('projects', nargs='*'); s.add_argument('--background', action='store_true'); s.add_argument('--max', type=int, default=3)
+    s = sp.add_parser('attention', help="every thread waiting on you across Projects (child threads too), approval asks, permission cards (cache by default)"); s.add_argument('projects', nargs='*'); s.add_argument('--refresh', action='store_true', help='live-read stale waiting threads (bounded, short locks)'); s.add_argument('--max-reads', type=int, default=2); s.add_argument('--budget', type=float, default=40.0)
     s = sp.add_parser('thread-status', help='compact triage: state, latest message, machine (cache by default)'); s.add_argument('project'); s.add_argument('--thread'); s.add_argument('--refresh', action='store_true', help='live UI read instead of cache')
     sp.add_parser('tidy-ui', help='cancel stray file-picker windows and return the app home (presses Cancel only)')
     sp.add_parser('probe-projects', help='READ-ONLY: does this account have Claude Code Projects (beta)?')
@@ -4326,6 +4402,7 @@ def main(argv=None):
         elif a.cmd == 'project-set-env': res = op_project_set_env(a.project, dict(x.split('=', 1) for x in a.set), dict(x.split('=', 1) for x in a.secret_file), a.env_name, not a.no_copy, a.allow_shared, a.dry_run, **F, stay=a.stay)
         elif a.cmd == 'project-menu': res = op_project_menu(a.project, a.item, a.confirm, **F, stay=a.stay, shot=a.shot)
         elif a.cmd == 'refresh': res = op_refresh(a.projects, a.background, a.max, **F)
+        elif a.cmd == 'attention': res = op_attention(a.projects or None, a.refresh, a.max_reads, a.budget, force=F.get('force', False))
         elif a.cmd == 'thread-status': res = op_thread_status(a.project, a.thread, a.refresh, **F, stay=a.stay)
         elif a.cmd == 'status': res = op_status()
         elif a.cmd == 'probe-projects': res = op_probe_projects(**F)

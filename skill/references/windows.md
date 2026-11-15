@@ -167,3 +167,7 @@ curl.exe -s http://127.0.0.1:8791/healthz            # ok (when the HTTP server 
 Remove: `./claude-projects setup uninstall` inside the distro, then
 `Get-ScheduledTask -TaskName "Claude Projects for Grok Bot*" | Unregister-ScheduledTask -Confirm:$false` and
 `wsl --unregister ClaudeProjects` (ask the user first; it deletes the distro and its sign-in).
+
+Once it runs, using it is the same on every host (SKILL.md Part B). In particular, check every thread of a Project,
+not only the primary: `claude_attention` lists each thread waiting on the user with its latest ask, and an approval ask's
+`requested_line` is relayed to the user exactly, never invented or posted without an explicit standing approval.

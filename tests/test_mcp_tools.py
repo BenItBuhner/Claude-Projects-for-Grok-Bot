@@ -17,6 +17,8 @@ EXPECTED = {
     'claude_skill_get', 'claude_policy_get', 'claude_policy_propose',
     # 1.1: guided setup
     'claude_setup',
+    # 1.0.3: threads waiting on the user across Projects
+    'claude_attention',
 }
 
 

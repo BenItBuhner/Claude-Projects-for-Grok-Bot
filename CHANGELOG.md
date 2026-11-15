@@ -4,7 +4,7 @@
 
 ### One package, plain names
 - The code is one Python package, `claude_projects/` (`core`, `config`, `mcp_server`, `permissions`, `policy`,
-  `staging`, `setup`, `origin`, `proc`, `idb`, plus `__main__`). Nothing in the tree carries an internal short prefix
+  `staging`, `setup`, `origin`, `proc`, `idb`, `attention`, plus `__main__`). Nothing in the tree carries an internal short prefix
   any more, and the compatibility shims of 1.0.2 (the old CLI name, the old module files and host wrappers) are gone.
 - One entry point: `claude-projects` (the checkout's wrapper, or `python -m claude_projects`; `pyproject.toml` also
   declares it as a console script). The MCP server is `python -m claude_projects.mcp_server` (`--stdio` for stdio);
@@ -12,6 +12,22 @@
 - The services are `claude-projects-xvfb`, `-wm`, `-keyring`, `-desktop`, `-vnc`, `-novnc`, `-mcp`, and
   `-refresh` (+ `.timer`); the environment variables are `CLAUDE_PROJECTS_*`; the Windows distro's plugin user is
   `claude`.
+
+### Threads waiting on you, in every thread
+- Claude asks for things in child threads, not only in a Project's primary thread. `claude_thread_status` and
+  `claude_project_get` now return `waiting_threads`: every thread in the sidebar's *Waiting on you* group, child threads
+  included, each with its latest ask from its own cached read (`ask_stale` when that read predates the sidebar state).
+- New tool `claude_attention` (25 tools): one pass across Projects listing every waiting thread with its latest ask,
+  `approval_asks`, and the permission cards seen in any thread. Cached by default (no UI); `refresh=true` live-reads a
+  few stale waiting threads, one short UI lock each, skipped while another caller holds the lock, within about 45 s.
+  The background refresh does the same for the Projects it re-reads. CLI: `claude-projects attention [--refresh]`.
+- Approval asks: when Claude asks for a line in the user's own words, an approval line or an exact reply, the ask is
+  classified `approval` and `requested_line` is that line exactly as Claude wrote it. `current_state.ask` carries the
+  classification (`approval` | `permission` | `question` | `action`), and an approval ask sets `waiting_on = "user"`
+  rather than `permission`.
+- The skill and the default policy: check every thread, surface every *Waiting on you* child thread with its latest
+  ask, relay an approval ask's exact line to the user, post it on their behalf only under an explicit standing approval
+  covering that exact action, and never invent the user's words.
 
 ### Migration
 - `claude-projects setup install` / `install.sh` on an older install stops and removes the services of 1.0.2 and
@@ -27,6 +43,12 @@
 - Computer-use permission cards ("Claude wants to use: …", "Allow for this session" / "Allow once"): detected as type
   `computer_use` with the apps (`displayName`, `bundleId`, `tier`) parsed; an Allow presses the app's "Background
   computer use" Continue when it appears, then checks that the card is gone and reports diagnostics when it is not.
+
+### Known issue
+- A computer-use card is bound to the device that asked for it: the Claude app on another machine can only send Deny,
+  so "Allow for this session" pressed from the plugin's host does not land when the request targets another computer
+  (for example a laptop). Allow it in the Claude app on that computer. A fix that answers within about 45 s and saves
+  diagnostics is planned for 1.0.4.
 
 ## 1.0.2 (2026-11-15)
 

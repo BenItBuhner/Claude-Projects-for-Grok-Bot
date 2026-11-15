@@ -18,7 +18,8 @@ Grok Bot ──MCP──▶ claude_projects/mcp_server.py ──▶ claude-proje
 | `claude_projects_list` | Projects with ids, primary thread id, last activity, unread. Served from cache unless `refresh` |
 | `claude_project_get` | Primary thread messages and child threads (group, status, PRs) |
 | `claude_thread_read` | Transcript of the primary or a child thread, with attachments, blocks and `sent_by_bot` |
-| `claude_thread_status` | Compact triage: state, latest message, what it's waiting on, machine |
+| `claude_thread_status` | Compact triage: state, latest message, what it's waiting on, machine, the ask, and every thread waiting on you |
+| `claude_attention` | Every thread (primary and child) in *Waiting on you* across Projects, its latest ask, approval asks with the exact requested line, permission cards |
 | `claude_thread_attachment_get` | An image, file or output file from a message |
 | `claude_thread_send` | **Write.** Types a message (with the origin bracket) and sends it. `dry_run` checks targeting only |
 | `claude_thread_wait` | Polls until Claude has replied and stopped working |
@@ -54,6 +55,20 @@ data and finds cards generically: the nearest container of option buttons whose 
 (see [`claude_projects/permissions.py`](../claude_projects/permissions.py)). Cards appear in `permission_cards` on reads and status, and
 `current_state.waiting_on` becomes `permission`. A reply that stalls in prose ("should I proceed?") sets the same flag
 with `permission_hint`. Whether to press anything is the agent's call under the user's policy.
+
+## Threads waiting on you, and approval asks
+
+Claude asks for things in child threads as well as the primary, and a child that needs the user lands in the sidebar's
+*Waiting on you* group. Every project read records the sidebar rows; `waiting_threads` (on `claude_project_get` and
+`claude_thread_status`) and `claude_attention` (across Projects) list each thread in that group with the latest reply
+from its own cached read. `ask_stale` is true when that read is older than the project read that saw it waiting;
+`claude_attention(refresh=true)` and the background refresh then re-read a few such threads, one short UI lock each
+(skipped while another caller holds the lock). The latest reply is classified (see
+[`claude_projects/attention.py`](../claude_projects/attention.py)): `approval` when Claude asks for a line in the user's
+own words, an approval line or an exact reply, with `requested_line` copied exactly from Claude's message (a code block
+or quote after the ask, a quoted span, or the line after an ask that ends with a colon); `permission`, `question`,
+`action` or `update` otherwise. An approval ask sets `waiting_on = "user"`, not `permission`. The plugin never posts the
+line itself; the skill tells agents to relay it and to post it only under an explicit standing approval.
 
 ## Skill and policy
 

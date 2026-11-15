@@ -37,7 +37,7 @@ def viewport_units(): return [U('vnc'), U('novnc')]
 def mcp_unit(): return U('mcp')
 def all_units(): return core_units() + viewport_units() + [mcp_unit()]
 PUBLIC_REPO = 'https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot'
-EXPECTED_TOOLS = 24
+EXPECTED_TOOLS = 25
 CLAUDE_KEY_URL = 'https://downloads.claude.ai/claude-desktop/key.asc'
 STATES = ['start', 'preflight_failed', 'installing', 'needs_sudo', 'installed_unhealthy', 'awaiting_signin',
           'close_viewer', 'beta_check', 'app_outdated', 'no_projects_beta', 'connecting', 'verifying', 'ready']

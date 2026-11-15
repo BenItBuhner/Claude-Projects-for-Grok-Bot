@@ -154,3 +154,7 @@ launchctl print "gui/$(id -u)/com.github.claude-projects-for-grok-bot.vm" | grep
 
 Remove: `cpvm setup uninstall`, then `limactl stop claude-projects && limactl delete claude-projects`, `launchctl bootout` and delete the plist
 (ask the user first; it deletes the VM's sign-in).
+
+Once it runs, using it is the same on every host (SKILL.md Part B). In particular, check every thread of a Project,
+not only the primary: `claude_attention` lists each thread waiting on the user with its latest ask, and an approval ask's
+`requested_line` is relayed to the user exactly, never invented or posted without an explicit standing approval.

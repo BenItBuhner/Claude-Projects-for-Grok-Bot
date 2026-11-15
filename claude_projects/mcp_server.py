@@ -54,7 +54,11 @@ mcp = FastMCP('claude-projects', instructions=(
     "Before acting, read claude_skill_get (or claude_policy_get): the user's POLICY says what is pre-approved to send or permit "
     "and what to surface first, so routine in-policy actions need no extra confirmation. Threads waiting on a permission show "
     "current_state.waiting_on='permission' and permission_cards; act on them with claude_thread_permission. Every thread has a stable "
-    "address <chan_>/<cse_|cmsg_>. Files go through the managed staging dir (claude_staging)."), **kw)
+    "address <chan_>/<cse_|cmsg_>. Files go through the managed staging dir (claude_staging). "
+    "Claude asks for things in CHILD threads too, not just the primary: check every thread. claude_attention lists every thread "
+    "in 'Waiting on you' across Projects with its latest ask; for an approval ask (ask_kind='approval') relay requested_line to the "
+    "user exactly, post it for them only under an explicit standing approval covering that exact action, otherwise ask; never "
+    "invent the user's words."), **kw)
 def _is_busy(res):
     if not isinstance(res, dict): return False
     if res.get('error') == 'Busy' or res.get('code') == 3 or res.get('exit_code') == 3: return True
@@ -258,14 +262,29 @@ async def claude_thread_status(project: str, thread: Optional[str] = None, refre
     """Compact triage for a primary or child thread: current_state (working/waiting_on_user/paused/done/idle),
     latest message summary with local time and age, what it is waiting on, and machine/environment_info.
     refresh=false (default) is fast: serves the on-disk cache with freshness stamps (cache_age_min). refresh=true
-    does a live UI read. Prefer this for 'what is going on' questions; use claude_thread_read for the full transcript."""
+    does a live UI read. Prefer this for 'what is going on' questions; use claude_thread_read for the full transcript.
+    Also returns ask (approval | permission | question | action, with requested_line for an approval ask) and waiting_threads:
+    EVERY thread of the project in the sidebar's 'Waiting on you' group, child threads included, each with its latest ask."""
     a = (flags(force) + ['thread-status', project] + (['--thread', thread] if thread else []) + (['--refresh'] if refresh else []) + (['--stay'] if refresh else []))
     return await run(a, 300 if refresh else 60)
 
 @mcp.tool()
+async def claude_attention(projects: Optional[list[str]] = None, refresh: bool = False, max_reads: int = 2, force: bool = False) -> dict:
+    """What needs the user across Projects, in one pass: every thread (primary AND child threads) whose sidebar state is
+    'Waiting on you', each with its latest ask and ask_kind; approval_asks lists the threads where Claude asked for a line in
+    the user's own words, with requested_line exactly as Claude wrote it; permission_cards lists cards seen in any thread.
+    refresh=false (default) uses cached reads only (fast, no UI). refresh=true also live-reads up to max_reads waiting threads
+    whose cached ask is stale (ask_stale), one short UI lock each, and answers within about 45 s. Nothing is pressed or sent.
+    Relay an approval ask's requested_line to the user; post it for them only under an explicit standing approval covering that
+    exact action. Never invent the user's words."""
+    a = flags(force) + ['attention'] + list(projects or []) + (['--refresh', '--max-reads', str(max_reads), '--budget', '35'] if refresh else [])
+    return await run(a, 60)
+
+@mcp.tool()
 async def claude_refresh(projects: Optional[list[str]] = None, max_projects: int = 3, force: bool = False) -> dict:
     """Refresh now: re-read the project list and re-open the primary thread of the named projects (or of up to max_projects whose
-    activity changed since the last read), updating the cache used by refresh=false reads. A background timer does this every 10 min."""
+    activity changed since the last read), updating the cache used by refresh=false reads. The same pass reads their child threads in
+    'Waiting on you' (latest ask, permission cards); see claude_attention. A background timer does this every 10 min."""
     return await run(flags(force) + ['refresh', '--max', str(max_projects)] + list(projects or []), 900)
 
 @mcp.tool()
