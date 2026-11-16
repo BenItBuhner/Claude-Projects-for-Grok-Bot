@@ -32,6 +32,19 @@
   reads log their steps (`lock`, `settle`, `messages`, `ui_snapshot`, `busy`, `cards`), so cache hits and live reads
   can be measured apart.
 
+### Follow-up after the first live samples
+- Identical reads from different bots share one UI pass even when they start at the same moment (a per-read
+  single-flight file lock keyed by project, thread and read options). Joiners get the same answer, stamped
+  `coalesced`, or the same error. Reads with different options never share.
+- The thread list is found and parsed without walking the transcripts (it took 32.5 s on a long Project).
+- The Stop check after the last message is one pruned pass (it took 14.3 s).
+- A background read gives way to a waiting send or read as soon as its messages are in, rather than finishing threads
+  and cards first. It does not give way to other bulk work.
+- A preempted bulk op skips its trip back to the home page.
+- An attachment fetch that keeps getting preempted gets one last try with a 60 s cap
+  (`CLAUDE_PROJECTS_ATTACH_FINAL_CAP_S`). If it is preempted again it fails with `Busy` and can be retried later.
+  Before, it could hold the app for minutes.
+
 ## 1.0.5 (2026-11-15)
 
 ### Sends: verified, or loudly not

@@ -106,3 +106,68 @@ def test_one_page_snapshot_serves_pane_info_dialogs_and_busy(monkeypatch):
     assert info['environment'] == 'Running on Desktop-PC' and info['threads_waiting'] == 2
     assert c.dialogs(snap) == ['Heads up'] and c.busy_state(None, snap) is True
     assert VISITS == [], 'no second walk of the page'
+
+# ---- read single-flight: simultaneous identical reads share one UI pass, even when they start together
+def test_simultaneous_identical_reads_share_one_pass(monkeypatch, tmp_path):
+    import threading
+    monkeypatch.setattr(c, 'CACHE', tmp_path)
+    monkeypatch.setattr(c, 'resolve_project', lambda q, snap=None: {'id': 'chan_X', 'name': 'Sketchpad', 'primary_thread_id': None})
+    monkeypatch.setattr(c, 'resolve_thread', lambda chan, t, ths=None: None)
+    calls = []
+    def dispatch(*a, **k):
+        calls.append(1); time.sleep(0.4); return {'read_at': c.now().isoformat(), 'messages': [], 'freshness': {'source': 'live'}}
+    monkeypatch.setattr(c, '_read_dispatch', dispatch)
+    out = []
+    ts = [threading.Thread(target=lambda: out.append(c.op_read('Sketchpad', None, True, 20))) for _ in range(4)]
+    for t in ts: t.start()
+    for t in ts: t.join()
+    assert len(calls) == 1 and len(out) == 4
+    assert sorted(o['freshness']['source'] for o in out) == ['coalesced'] * 3 + ['live']
+
+def test_different_read_shapes_do_not_share(monkeypatch, tmp_path):
+    monkeypatch.setattr(c, 'CACHE', tmp_path)
+    monkeypatch.setattr(c, 'resolve_project', lambda q, snap=None: {'id': 'chan_X', 'name': 'Sketchpad', 'primary_thread_id': None})
+    monkeypatch.setattr(c, 'resolve_thread', lambda chan, t, ths=None: None)
+    calls = []
+    monkeypatch.setattr(c, '_read_dispatch', lambda *a, **k: (calls.append(a[3]), {'read_at': c.now().isoformat(), 'freshness': {'source': 'live'}})[1])
+    c.op_read('Sketchpad', None, True, 20); c.op_read('Sketchpad', None, True, 5)
+    assert calls == [20, 5]
+
+def test_shared_failure_reaches_joiners(monkeypatch, tmp_path):
+    import threading
+    monkeypatch.setattr(c, 'CACHE', tmp_path)
+    monkeypatch.setattr(c, 'resolve_project', lambda q, snap=None: {'id': 'chan_X', 'name': 'Sketchpad', 'primary_thread_id': None})
+    monkeypatch.setattr(c, 'resolve_thread', lambda chan, t, ths=None: None)
+    calls = []
+    def boom(*a, **k): calls.append(1); time.sleep(0.4); raise c.Busy('app busy')
+    monkeypatch.setattr(c, '_read_dispatch', boom)
+    errs = []
+    def run():
+        try: c.op_read('Sketchpad')
+        except c.Busy as ex: errs.append(str(ex))
+    ts = [threading.Thread(target=run) for _ in range(3)]
+    for t in ts: t.start()
+    for t in ts: t.join()
+    assert len(calls) == 1 and len(errs) == 3
+
+def test_background_read_yields_only_to_interactive_waiters(monkeypatch):
+    monkeypatch.setattr(c, 'others_waiting', lambda: [{'pid': 1, 'priority': 2}])
+    assert not c.interactive_waiting()
+    monkeypatch.setattr(c, 'others_waiting', lambda: [{'pid': 1, 'priority': 2}, {'pid': 2, 'priority': 1}])
+    assert c.interactive_waiting()
+
+def test_final_attachment_try_has_a_longer_but_bounded_cap(monkeypatch):
+    monkeypatch.setattr(c, '_HELD', {'op': 'attachment get 1.1', 'since': time.time() - 30})
+    monkeypatch.setattr(c, 'others_waiting', lambda: [{'pid': 1}])
+    monkeypatch.setattr(c, '_PREEMPT', {'armed': True, 'off': False})
+    assert c.bulk_over_cap()
+    c._PREEMPT['cap'] = c.ATT_FINAL_CAP_S
+    assert not c.bulk_over_cap()
+    monkeypatch.setattr(c, '_HELD', {'op': 'attachment get 1.1', 'since': time.time() - c.ATT_FINAL_CAP_S - 1})
+    assert c.bulk_over_cap()
+
+def test_go_home_skipped_when_preempted(monkeypatch):
+    monkeypatch.setattr(c, '_HELD', {'op': 'refresh x', 'since': time.time() - 60})
+    monkeypatch.setattr(c, '_PREEMPT', {'armed': True, 'off': False, 'fired': 1})
+    monkeypatch.setattr(c, 'route', lambda: (_ for _ in ()).throw(AssertionError('no navigation')))
+    assert c.go_home() is False

@@ -678,6 +678,9 @@ _PREEMPT = {'armed': False, 'off': False}
 def others_waiting():
     """Live waiters for the UI lock from other processes (any lane)."""
     return [d for _, d in _tickets() if int(d.get('pid') or 0) != os.getpid()]
+def interactive_waiting():
+    """Waiters from other processes in the urgent or normal lane (sends, reads, presses), not other bulk work."""
+    return [d for d in others_waiting() if int(d.get('priority', 1)) < 2]
 def preemptible(op):
     k = op_kind(op)
     if k in URGENT_KINDS or k == 'wait': return False
@@ -685,7 +688,7 @@ def preemptible(op):
 def bulk_over_cap(t=None):
     """True when this process holds the UI lock for a preemptible bulk op past the cap while someone else waits."""
     if _PREEMPT.get('off') or not _HELD or not preemptible(_HELD.get('op')): return False
-    if (t or time.time()) - float(_HELD.get('since') or time.time()) < BULK_HARD_CAP_S: return False
+    if (t or time.time()) - float(_HELD.get('since') or time.time()) < float(_PREEMPT.get('cap') or BULK_HARD_CAP_S): return False
     return bool(others_waiting())
 def _preempt_signal(signum, frame):
     # stays armed: if a broad except swallowed the last one, or a slow AT-SPI call held it, the watcher fires again in 2 s
@@ -746,7 +749,7 @@ def ui_lock(op, force=False, timeout=None):
         raise Busy(_busy_detail(time.time() - t0, 'another claude-projects operation in this process is running'))
     try:
         f = _acquire_flock(op, None, timeout, t0)
-        _HELD.update(f=f, op=op, since=time.time())
+        _HELD.update(f=f, op=op, since=time.time()); _PREEMPT['fired'] = 0
         log(f'lock acquired for {op} (waited {time.time()-t0:.1f}s)')
         guard = _bulk_guard_start(op)
         try: yield
@@ -965,6 +968,8 @@ def dialogs(snap=None):
         snap = ui_snapshot(d)
     return [text_of(e)[:120] or x for e, r, x in snap if r in ('dialog', 'alert', 'alert dialog')]
 def go_home():
+    # Preemption must release the app, not spend another 5-25 s navigating home in a finally block.
+    if _HELD and preemptible(_HELD.get('op')) and (_PREEMPT.get('fired') or bulk_over_cap()): return False
     if re.fullmatch(r'/epitaxy/?(\?.*)?', route() or ''): return True
     deeplink('claude://code/new?source=desktop_action')
     ok = re.fullmatch(r'/epitaxy/?(\?.*)?', wait_route(lambda u: re.fullmatch(r'/epitaxy/?(\?.*)?', u or '') is not None, 20) or '') is not None
@@ -1177,11 +1182,15 @@ def busy_state(thread=None, snap=None):
     if any(r == 'push button' and re.match(r'^(Stop|Stop response|Stop generating|Interrupt|Cancel response)$', x or '') for _, r, x in snap): return True
     p = msg_panel(thread)
     if not p: return False
-    arts = kids_deep_articles(p); tail = []
-    started = not arts
-    for e in walk_pruned(p, is_message_article, 20000):
-        if arts and e == arts[-1]: started = True; continue
-        if started and role(e) in ('static', 'status bar', 'progress bar'):
+    tail = []   # one pruned pass: whatever follows the last article (reset at each article)
+    seen = {}
+    def art(e):
+        k = id(e)
+        if k not in seen: seen[k] = is_message_article(e)
+        return seen[k]
+    for e in walk_pruned(p, art, 20000):
+        if art(e): tail = []; continue
+        if role(e) in ('static', 'status bar', 'progress bar'):
             tail.append(text_of(e).strip())
     return any(re.match(r'^(Thinking|Working|Claude is (thinking|working)|Responding|Running .*)…?\.{0,3}$', t) for t in tail)
 def pane_info(thread, snap=None):
@@ -1284,21 +1293,21 @@ def composer_text(e):
 
 # ---------------------------------------------------------------- threads panel
 def ensure_threads_panel(open_=True):
-    d, _ = main_doc(); tb = find(d, 'toggle button', pred=lambda e: nm(e).startswith('Threads'))
+    d, _ = main_doc(); tb = next((e for e in walk_ui(d) if role(e) == 'toggle button' and nm(e).startswith('Threads')), None)
     if not tb: return False
-    on = has_state(tb, 'CHECKED') or has_state(tb, 'PRESSED') or find(d, 'landmark', 'Overview') is not None
+    on = has_state(tb, 'CHECKED') or has_state(tb, 'PRESSED') or any(role(e) == 'landmark' and nm(e) == 'Overview' for e in walk_ui(d))
     if on != open_: act(tb); time.sleep(2)
     return True
 def parse_threads(chan, include_resolved=False, show_all=False):
     if not ensure_threads_panel(True): return []
-    d, _ = main_doc(); ov = find(d, 'landmark', 'Overview') or d
+    d, _ = main_doc(); ov = next((e for e in walk_ui(d) if role(e) == 'landmark' and nm(e) == 'Overview'), None) or d
     if include_resolved or show_all:
         for b in find_all(ov, 'push button', lambda e: (show_all and nm(e) == 'Show more') or (include_resolved and re.match(r'^Resolved · \d+$', nm(e)))):
             try: act(b); time.sleep(1.5)
             except Exception: pass
-        ov = find(main_doc()[0], 'landmark', 'Overview') or ov
+        ov = next((e for e in walk_ui(main_doc()[0]) if role(e) == 'landmark' and nm(e) == 'Overview'), None) or ov
     out = []; group = None; cur = None
-    for e in walk(ov, 30000):
+    for e in walk_ui(ov, 30000):
         r = role(e); x = nm(e)
         if r in ('heading', 'push button', 'toggle button'):
             m = re.match(r'^(.+?) · (\d+)$', x)
@@ -2088,6 +2097,7 @@ def _att_cached(key, since=None, fresh=False):
     if not fresh and m.get('available') and m.get('path_on_host') and pathlib.Path(m['path_on_host']).is_file() and _att_identity_ok(m): return r
     return None
 ATT_PREEMPT_MAX = int(os.environ.get('CLAUDE_PROJECTS_ATTACH_PREEMPT_MAX', '3'))
+ATT_FINAL_CAP_S = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_FINAL_CAP_S', '60'))
 ATT_NEG_TTL = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_NEG_TTL_S', '21600'))    # "not available" answers are reused this long
 def _att_unavailable_cached(key):
     """A recent 'not available' result for key (the app has no Download control and no readable preview for it). Fetching it
@@ -2114,13 +2124,16 @@ def _att_run_job(key, job):
             except Preempted as ex:
                 preempted += 1
                 log(f'attachment job {key}: preempted ({ex}); re-queued behind the waiters ({preempted}/{ATT_PREEMPT_MAX})')
-                if preempted >= ATT_PREEMPT_MAX: _PREEMPT['off'] = True      # last try runs to the end: bulk work is delayed, never starved
+                if preempted > ATT_PREEMPT_MAX:
+                    r = {'status': 'failed', 'error': f'attachment fetch yielded {preempted} times to sends and reads; retry later', 'error_type': 'Busy', 'code': 4}
+                    break
+                if preempted == ATT_PREEMPT_MAX: _PREEMPT['cap'] = ATT_FINAL_CAP_S   # one last try with a longer (still bounded) cap
                 time.sleep(1.0); continue
             except ClaudeProjectsError as ex: r = {'status': 'failed', 'error': str(ex), 'error_type': type(ex).__name__, 'code': getattr(ex, 'code', 1)}
             except Exception as ex: r = {'status': 'failed', 'error': repr(ex), 'error_type': 'AppError', 'code': 6}
             except Interrupted as ex: r = {'status': 'failed', 'error': f'interrupted ({ex})', 'error_type': 'AppError', 'code': 6}
             break
-        _PREEMPT['off'] = False
+        _PREEMPT['off'] = False; _PREEMPT.pop('cap', None)
         r.update(job_id=key, finished_ts=time.time(), seconds=round(time.time() - t0, 1), preempted=preempted or None)
         job_write(ATT_JOBS, key, r)
         return r
@@ -3289,6 +3302,7 @@ def _read(chan, thread, max_messages, history_pages, expand, with_threads=False,
     open_target(chan, thread); ok = settle(thread)
     reuse = None if (expand or history_pages or include_images or markdown) else reusable_messages(read_cache(chan, thread))
     msgs = read_messages(thread, max_messages, history_pages, expand, include_images, markdown, reuse=reuse) if ok else []; _mark('messages')
+    if _BULK_CTX and interactive_waiting(): raise Preempted('background read yields after messages to waiting interactive work')
     try: annotate_known(msgs, chan, thread)
     except Exception: pass
     threads = None
@@ -3322,6 +3336,44 @@ def same_read_inflight(op):
         if d.get('op') == op and int(d.get('pid') or 0) != me: return d
     return None
 def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0, expand=False, force=False, stay=False, shot=None, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None):
+    args = (project, thread, refresh, max_messages, history_pages, expand, force, stay, shot, with_threads, include_resolved, show_all, include_images, markdown, cache_if_busy, lock_wait)
+    if not refresh or force or shot: return _read_dispatch(*args)
+    # Canonical ids + requested representation: aliases share one flight; incompatible history/images/limits do not.
+    p = resolve_project(project); tid = resolve_thread(p['id'], thread)
+    key = hashlib.sha256(json.dumps([p['id'], tid, max_messages, history_pages, expand, with_threads, include_resolved, show_all, include_images, markdown]).encode()).hexdigest()[:32]
+    folder = CACHE/'read-flights'; folder.mkdir(parents=True, exist_ok=True)
+    result_path = folder/(key + '.json'); t0 = time.time(); joined = False
+    with open(folder/(key + '.lock'), 'a+') as lf:
+        while True:
+            try: fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+            except BlockingIOError:
+                joined = True
+                if time.time() - t0 > (float(lock_wait) if lock_wait else READ_COALESCE_WAIT):
+                    raise Busy('same-thread read is still in flight; no extra UI pass queued; retry later')
+                time.sleep(.1)
+        try:
+            try: saved = json.loads(result_path.read_text())
+            except Exception: saved = {}
+            if joined and saved.get('completed_ts', 0) >= t0:
+                if saved.get('error'):
+                    exc = {e.__name__: e for e in (Busy, Refused, NotFound, AppError)}.get(saved.get('error_type'), AppError)
+                    raise exc(saved['error'])
+                out = saved['out']; orig = (out.get('freshness') or {}).get('source', 'cache')
+                out['coalesced_with_pid'] = saved.get('pid'); out['coalesced_wait_s'] = round(time.time() - t0, 1)
+                out['coalesced_original_source'] = orig
+                _log_read(project, thread, 'coalesced', t0)
+                return stamp_freshness(out, 'coalesced')
+            try:
+                out = _read_dispatch(*args)
+                saved = {'out': out, 'pid': os.getpid(), 'completed_ts': time.time()}
+            except Exception as ex:
+                saved = {'error': str(ex), 'error_type': type(ex).__name__, 'pid': os.getpid(), 'completed_ts': time.time()}
+                tmp = result_path.with_suffix(f'.{os.getpid()}.tmp'); tmp.write_text(json.dumps(saved)); tmp.replace(result_path)
+                raise
+            tmp = result_path.with_suffix(f'.{os.getpid()}.tmp'); tmp.write_text(json.dumps(saved)); tmp.replace(result_path)
+            return out
+        finally: fcntl.flock(lf, fcntl.LOCK_UN)
+def _read_dispatch(project, thread=None, refresh=True, max_messages=20, history_pages=0, expand=False, force=False, stay=False, shot=None, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None):
     """Read a thread. Live reads of the same thread by several callers at once are coalesced: a caller that finds the same
     read already running (or queued) waits for it and answers from the transcript it wrote, instead of queueing a second
     UI pass. Every answer carries freshness (source, read_at, age_s, stale)."""
