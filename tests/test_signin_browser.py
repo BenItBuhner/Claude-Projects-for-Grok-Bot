@@ -6,7 +6,6 @@ browser" with the chromium snap installed)."""
 import pathlib, shutil, subprocess
 import pytest
 
-import conftest  # noqa: F401
 from claude_projects import proc as proc_mod, setup as S
 
 REPO = pathlib.Path(__file__).resolve().parents[1]

@@ -1,9 +1,6 @@
 """Backward compatibility with consumers written for the pre-1.0 releases:
 legacy status words, old on-disk caches, and the origin bracket in summaries."""
-import pathlib, sys
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import core as C
 from claude_projects import origin as O
 

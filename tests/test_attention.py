@@ -1,8 +1,6 @@
 """Threads waiting on the user (child threads too), approval-ask classification, claude_attention (no app, no UI)."""
-import datetime, pathlib, sys
+import datetime, pathlib
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import attention as ATT
 from claude_projects import core as C
 
@@ -171,6 +169,5 @@ def test_attention_refresh_reads_only_stale_waiting_threads_and_respects_the_loc
 
 
 def test_attention_cli_and_mcp_tool_exist():
-    import argparse
     src = (pathlib.Path(C.__file__)).read_text()
     assert "sp.add_parser('attention'" in src and "a.cmd == 'attention'" in src

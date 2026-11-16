@@ -1,8 +1,6 @@
 """Forwarding: header + verbatim content, origin bracket once, dry run sends nothing, attachments staged."""
-import pathlib, sys
+import pathlib
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import core as C
 from claude_projects import staging as S
 
@@ -41,7 +39,7 @@ def test_forward_dry_run_default(wired):
 
 
 def test_forward_specific_message_with_note(wired):
-    r = C.op_forward('Docs', 'Release', message_index=4, note='FYI from the docs side', bot_name='Scout')
+    C.op_forward('Docs', 'Release', message_index=4, note='FYI from the docs side', bot_name='Scout')
     msg = wired[-1]['message']
     assert msg.startswith('[sent by Grok Bot \u00b7 Scout]\nFYI from the docs side\nForwarded from') and 'message #4 by' in msg
     assert msg.count('[sent by Grok Bot') == 1

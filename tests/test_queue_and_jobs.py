@@ -1,8 +1,6 @@
 """The UI lock queue (fair FIFO, position + ETA), cache-first reads while busy, and permission jobs that answer in budget."""
 import json, os, pathlib, subprocess, sys, textwrap, time
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import core as C
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -84,6 +82,7 @@ def test_busy_timeout_names_queue_position(clean_queue):
 
 # ---- cache-first reads
 def test_read_answers_from_cache_while_another_run_holds_the_app(monkeypatch, clean_queue):
+    monkeypatch.setattr(C, 'READ_FRESH_S', 0)   # the cache here is seconds old; this test is about the other paths
     cached = {'project': 'Demo', 'project_id': 'chan_TEST', 'thread_id': 'primary', 'read_at': C.now().isoformat(), 'messages': [
         {'index': 1, 'role': 'assistant', 'text': 'hello', 'time_local': 'x'}]}
     monkeypatch.setattr(C, 'resolve_project', lambda p: {'id': 'chan_TEST', 'name': 'Demo', 'primary_thread_id': 'cse_TEST'})

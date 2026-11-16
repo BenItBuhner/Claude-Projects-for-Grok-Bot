@@ -18,8 +18,8 @@ REPO = pathlib.Path(__file__).resolve().parent.parent   # the checkout
 _PKG = REPO / 'claude_projects'   # run as a file: import from the checkout, not from inside the package
 sys.path[:] = [p for p in sys.path if pathlib.Path(p or '.').resolve() != _PKG]
 sys.path.insert(0, str(REPO))
-from claude_projects import config as cfg_mod  # noqa: E402  (stdlib only)
-from claude_projects.origin import ORIGIN_PREFIX  # noqa: E402
+from claude_projects import config as cfg_mod
+from claude_projects.origin import ORIGIN_PREFIX
 
 CFG = cfg_mod.CFG
 CONFIG_DIR = cfg_mod.CONFIG_DIR

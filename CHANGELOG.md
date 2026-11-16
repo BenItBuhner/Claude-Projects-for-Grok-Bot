@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.0.7 (2026-11-16)
+
+### Sends report what really happened
+- A long post that the app shows collapsed (only its first line, then "Show more") now counts as posted. The visible
+  part, from the origin bracket on, must be the start of the sent text, at a new message index. Before, such sends were
+  reported `not_posted` although they were in the thread, and callers resent them.
+- Verify and the post check read only the start of each new message (400 characters), not the whole body. Verifying a
+  13,700-character post took 294 s.
+- A send whose message is only a send job id (with or without the origin bracket) is never typed. The CLI and the MCP
+  tool answer with that job's result, or refuse when no such job exists. Two job ids were posted into a Project.
+  `claude_thread_send` accepts `job_id` without `message`.
+- Settle stays inside its time limit: the page walks inside it are bounded by the time left. A cold open used to spend
+  75-80 s there.
+
+### Less time on the app per call
+- A read answers from the cached read when it is at most 45 s old and no send went to the project since (source
+  `fresh`; `CLAUDE_PROJECTS_READ_FRESH_S`, 0 turns it off). No UI pass.
+- Live reads scan for permission cards only when the last two messages or the working state changed, a card showed
+  last time, or the last scan is over 5 minutes old (`CLAUDE_PROJECTS_CARD_SCAN_S`). The page-state pass (environment,
+  dialogs, Stop button) is reused the same way for up to 2 minutes (`CLAUDE_PROJECTS_STATE_SCAN_S`); answers say
+  `state_reused` and `state_observed_at`. `force` always rescans.
+- Sends and their post checks queue in the first lane, ahead of reads; bulk work steps aside for them.
+- A send job looks for its post for 8 s under the lock (`CLAUDE_PROJECTS_VERIFY_JOB_S`), then releases it. The
+  re-checks run off the lock: first in the cached transcript, then a short post check.
+
+### Cached reads answer the asked size
+- `refresh=false` reads return the last `max_messages` messages instead of everything in the cache.
+
+### Checks
+- CI runs ruff (pyflakes rules), mypy, the tests and a payload budget (`tools/payload_budget.py`). The budget replays a
+  synthetic Project through the real MCP tool handlers, records response bytes and message counts, and fails over a
+  ceiling or on more than 10% growth over `main`.
+- Tests import their shared setup fixtures from `conftest.py`. There are no `noqa` comments left. The settle tests that
+  ran on a fake clock against mocks of the walk were removed.
+
 ## 1.0.6 (2026-11-15)
 
 ### Reads and sends stop walking message bodies

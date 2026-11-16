@@ -1,8 +1,6 @@
 """1.0.3 layout: one package (claude_projects/), one CLI (claude-projects), claude-projects-* units, CLAUDE_PROJECTS_* env.
 No file or module carries an internal short prefix, and the only places the old names appear are the migration code."""
 import os, pathlib, re, subprocess, sys
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import config as cfg_mod
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -37,7 +35,7 @@ def test_old_names_only_in_migration_code():
 
 def test_package_layout_and_entry_points():
     pkg = REPO / 'claude_projects'
-    for m in ('__init__', '__main__', 'core', 'config', 'idb', 'mcp_server', 'origin', 'permissions', 'policy', 'proc', 'setup', 'staging', 'attention', 'computer_cards'):
+    for m in ('__init__', '__main__', 'core', 'config', 'idb', 'mcp_server', 'origin', 'permissions', 'policy', 'proc', 'setup', 'staging', 'attention', 'computer_cards', 'ids'):
         assert (pkg / f'{m}.py').is_file(), m
     assert not list(REPO.glob('*.py')), 'no modules at the top level'
     assert 'claude-projects = "claude_projects.__main__:main"' in (REPO / 'pyproject.toml').read_text()

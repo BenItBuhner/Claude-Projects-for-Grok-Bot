@@ -20,7 +20,9 @@ _PKG = pathlib.Path(__file__).resolve().parent   # run as a file (python claude_
 sys.path[:] = [p for p in sys.path if pathlib.Path(p or '.').resolve() != _PKG]   # not from inside the package
 sys.path.insert(0, str(_PKG.parent))
 from claude_projects.config import CFG, tool as _cfg_tool
-from claude_projects.origin import add_origin, strip_origin, has_origin, is_bot_sent, origin_header, origin_body, ORIGIN_PREFIX
+from typing import Any
+from claude_projects.origin import add_origin, strip_origin, is_bot_sent, origin_header, origin_body, ORIGIN_PREFIX
+from claude_projects.ids import is_job_id
 from claude_projects import staging as staging_mod, permissions as PERM, attention as ATT
 STAGE = staging_mod.from_config(CFG)
 ROOT = pathlib.Path(CFG['state_dir']); CACHE = ROOT/'cache'; LOGD = ROOT/'logs'
@@ -574,10 +576,10 @@ def expected_op_seconds(op, durations=None):
     d = _op_durations() if durations is None else durations; k = op_kind(op)
     try: return float(d[k])
     except Exception: return float(DEFAULT_OP_SECONDS.get(k, 30.0))
-URGENT_KINDS = ('permission', 'permissions', 'card-watch')
+URGENT_KINDS = ('permission', 'permissions', 'card-watch', 'send', 'verify')
 BULK_KINDS = ('attachment', 'projects-refresh', 'refresh', 'attention', 'probe-projects', 'wait', 'tidy-ui')
 def op_priority(op):
-    """Lane of an op: 0 urgent (permission presses, card listing, the card watcher), 1 normal (reads, sends),
+    """Lane of an op: 0 urgent (sends, permission presses, card listing, the card watcher), 1 normal (reads),
     2 bulk (attachment fetches, refreshes, waits). The queue serves lane 0 first, then 1, then 2, FIFO in each lane,
     and long bulk ops step aside at their checkpoints while an urgent op waits."""
     k = op_kind(op)
@@ -668,7 +670,7 @@ def _release_flock(f):
     except Exception: pass
     try: fcntl.flock(f, fcntl.LOCK_UN); f.close()
     except Exception: pass
-_HELD = {}   # this process's held lock: {'f', 'op', 'since'}
+_HELD: dict[str, Any] = {}   # this process's held lock: {'f', 'op', 'since'}
 # ---- bulk hard cap: a background fetch / refresh that holds the UI lock longer than BULK_HARD_CAP_S while anyone else
 # waits is stopped (Preempted), releases the lock and is retried behind the waiters. Sends, reads and presses never wait
 # minutes behind a fetch again. Waits (op_wait polls) are never preempted.
@@ -985,7 +987,7 @@ def is_primary_route(u, chan):
     if path.rstrip('/') != f'/epitaxy/project/{chan}': return False
     m = re.search(r'thread=([\w]+)', q)
     return not m or m.group(1).startswith(('session_', 'cse_'))
-_OVERVIEW = {}
+_OVERVIEW: dict[str, str] = {}
 def _already_on(chan, thread):
     """The app already shows this target (route check only): skip the 25-80 s deep link."""
     try: u = route()
@@ -1051,8 +1053,8 @@ def _thread_view_real(thread, secs=6):
         time.sleep(.4)
     return False
 PANEL = {None: 'Chat messages', 'thread': 'Thread messages'}
-_PANEL = {}
-def msg_panel(thread):
+_PANEL: dict[tuple[str, str], Any] = {}
+def msg_panel(thread, max_s=None):
     d, u = main_doc()
     want = 'Thread messages' if thread else 'Chat messages'
     if not d: return None
@@ -1062,7 +1064,7 @@ def msg_panel(thread):
             if role(c) == 'panel' and nm(c) == want and has_state(c, 'SHOWING') and not has_state(c, 'DEFUNCT'): return c
         except Exception: pass
         _PANEL.pop((u, want), None)
-    for e in walk_ui(d):                                   # the other transcript (primary vs thread pane) is never walked
+    for e in walk_ui(d, max_s=max_s):                      # the other transcript (primary vs thread pane) is never walked
         if role(e) == 'panel' and nm(e) == want: _PANEL[(u, want)] = e; return e
     return None
 SETTLE_POLL_S = float(os.environ.get('CLAUDE_PROJECTS_SETTLE_POLL_S', '0.25'))
@@ -1071,9 +1073,10 @@ def settle(thread, maxs=25):
     """wait until the transcript panel exists, 'Loading...' is gone and the message count is stable"""
     t0 = time.time(); prev = None; since = t0; seen = 0
     while time.time() - t0 < maxs:
-        p = msg_panel(thread)
+        left = max(0.5, maxs - (time.time() - t0))
+        p = msg_panel(thread, max_s=left)
         if p:
-            arts = [a for a in kids_deep_articles(p)]; loading = any(nm(e) == 'Loading...' or text_of(e) == 'Loading...' for e in kids(p))
+            arts = [e for e in walk_pruned(p, is_message_article, 20000, max_s=left) if is_message_article(e)]; loading = any(nm(e) == 'Loading...' or text_of(e) == 'Loading...' for e in kids(p))
             sig = (len(arts), nm(arts[-1]) if arts else '')
             if arts and not loading and sig == prev:
                 seen += 1
@@ -1081,7 +1084,7 @@ def settle(thread, maxs=25):
                 if seen >= 2 and time.time() - since >= SETTLE_STABLE_S: _mark('settle'); return True
             else: prev, since, seen = sig, time.time(), 0
         time.sleep(SETTLE_POLL_S)
-    ok = msg_panel(thread) is not None; _mark('settle'); return ok
+    ok = msg_panel(thread, max_s=5) is not None; _mark('settle'); return ok
 def kids_deep_articles(p):
     """The transcript's message articles, without walking into any message body."""
     return [e for e in walk_pruned(p, is_message_article, 20000) if is_message_article(e)]
@@ -1094,15 +1097,18 @@ def last_index(thread):
     return max([article_index(a) for a in kids_deep_articles(p)], default=0)
 TIME_RE = re.compile(r'^(\d{1,2}:\d{2}\s?[AP]M|\d+\s?[smhdw]( ago)?|\d+ (sec|min|hour|day|week)s? ago|just now|now|yesterday|[A-Z][a-z]+day, [A-Z][a-z]+ \d{1,2}, \d{4}( at \d{1,2}:\d{2}\s?[AP]M)?)$')
 CHROME = re.compile(r'^(Show message actions for .*|Load the rest of this message|Show more|Show less|Add reaction|Reply|Copy message|Edit message|More options|Retry|Download .*|Use the up and down arrow keys.*|Output list available.*|Quick reply and approval controls.*|Arrow keys move the tile.*|\d+ outputs? added by Claude)$')
-def parse_article(a, expand=False, include_images=False, markdown=False):
+def parse_article(a, expand=False, include_images=False, markdown=False, head_chars=None):
+    """head_chars: stop once that much text is read (role, index and the start of the text only; no time, links or
+    attachments). A send's verify needs only that, and a long post is thousands of nodes."""
     if expand:
         for b in find_all(a, 'push button', lambda e: nm(e) in ('Load the rest of this message', 'Show more')):
             try: act(b)
             except Exception: pass
         if expand: time.sleep(.6)
-    groups = []; times = []; heading = ''; truncated = False; links = []
+    groups = []; times = []; heading = ''; truncated = False; links = []; got = [0]
     def rec(o, parent_key, depth):
         nonlocal heading, truncated
+        if head_chars and got[0] >= head_chars: return
         r = role(o); ch = kids(o)
         if r == 'heading' and not heading: heading = norm(text_of(o))
         if r == 'push button' and nm(o) in ('Load the rest of this message', 'Show more'): truncated = True; return
@@ -1116,6 +1122,7 @@ def parse_article(a, expand=False, include_images=False, markdown=False):
             if not x.strip(): return
             if TIME_RE.match(x.strip()): times.append(x.strip()); return
             if CHROME.match(x.strip()): return
+            got[0] += len(x)
             if groups and groups[-1][0] == parent_key: groups[-1][1].append(x)
             else: groups.append([parent_key, [x]])
             return
@@ -1143,6 +1150,8 @@ def parse_article(a, expand=False, include_images=False, markdown=False):
     mm = re.match(r'^Message (\d+)$', nm(a) or '')
     if not mm: raise AppError(f'article name not Message N: {nm(a)!r}')
     n = int(mm.group(1))
+    if head_chars:
+        return {'index': n, 'role': who, 'text': body[:12000], 'truncated_in_app': truncated, 'partial': True}
     dt = None
     for e in walk(a, 4000):
         if _tag(e) == 'time':
@@ -1174,7 +1183,7 @@ def app_time_local(times):
             try: return ct(datetime.datetime.strptime(dm.group(1) + ' ' + m.group(1) + m.group(2), '%B %d, %Y %I:%M%p').replace(tzinfo=APP_TZ).isoformat())
             except Exception: pass
     return None
-_PANEL_PASS = {}   # the last pruned transcript pass (busy_state), reused by the read's card scan a moment later
+_PANEL_PASS: dict[str, Any] = {}   # the last pruned transcript pass (busy_state), reused by the read's card scan a moment later
 def busy_state(thread=None, snap=None):
     """True if Claude is visibly still responding in the open transcript (Stop button, or a working indicator after the last message)."""
     d, _ = main_doc()
@@ -1217,7 +1226,7 @@ def pane_info(thread, snap=None):
     info['threads_waiting'] = int(m.group(1)) if m else (0 if 'threads_button' in info else None)
     return info
 READ_STATS = {'parsed': 0, 'reused': 0}
-def read_messages(thread, max_messages=20, history_pages=0, expand=False, include_images=False, markdown=False, min_index=None, reuse=None):
+def read_messages(thread, max_messages=20, history_pages=0, expand=False, include_images=False, markdown=False, min_index=None, reuse=None, head_chars=None):
     """Messages rendered in the transcript, newest last. Only the articles that will be returned are parsed: the last
     max_messages (0 = all), or those after min_index. reuse = {index: message} from the last read: finished messages
     (not the latest of that read, not truncated) are taken from it instead of being parsed again."""
@@ -1230,11 +1239,11 @@ def read_messages(thread, max_messages=20, history_pages=0, expand=False, includ
         if max_messages and not history_pages: arts = arts[-max_messages:]
         for a in arts:
             if article_index(a) in seen: continue
-            r0 = (reuse or {}).get(article_index(a))
+            r0 = None if head_chars else (reuse or {}).get(article_index(a))
             if r0 is not None and not expand and not include_images and not markdown:
                 seen[r0['index']] = dict(r0); READ_STATS['reused'] += 1; continue
             READ_STATS['parsed'] += 1
-            try: m = parse_article(a, expand, include_images, markdown)
+            try: m = parse_article(a, expand, include_images, markdown, head_chars=head_chars)
             except Exception as ex: log(f'parse error {ex}'); continue
             seen[m['index']] = m
     grab()
@@ -1839,9 +1848,9 @@ def _fetch_from_overview(att, ov, steps):
     if im is not None:
         try: im.get_component_iface().scroll_to(0); time.sleep(.4)
         except Exception: pass
-        ex = extents(im); crop = screen_crop(ex) if ex else None
+        box = extents(im); crop = screen_crop(box) if box else None
         if crop:
-            return crop, os.path.splitext(name)[0] + '.png', 'image/png', f'screen crop of the Overview viewer image ({ex[2]}x{ex[3]} px; the download failed, see failed_steps)', dict(extra, original=False, rendered_size=[ex[2], ex[3]], failed_steps=steps)
+            return crop, os.path.splitext(name)[0] + '.png', 'image/png', f'screen crop of the Overview viewer image ({box[2]}x{box[3]} px; the download failed, see failed_steps)', dict(extra, original=False, rendered_size=[box[2], box[3]], failed_steps=steps)
         steps.append('screen crop of the Overview image: empty')
     else:
         txt = _viewer_text(ov['region'])
@@ -3304,14 +3313,14 @@ def op_projects(refresh=False, include_archived=False, force=False, stay=False):
     snap = idb_snapshot(); rows = project_rows(snap, include_archived)
     return {'projects': rows, 'count': len(rows), 'list_fetched_by_app_at': snap.get('channels_updated'), 'list_fetched_by_app_local': ct(snap.get('channels_updated')),
             'previous_fetch_local': ct(before) if refresh else None, 'source': 'app cache (IndexedDB copy)' + (' after opening the Projects view' if refresh else '')}
-_LAST_SNAP = {}
+_LAST_SNAP: dict[str, Any] = {}
 def reusable_messages(cached):
     """Finished messages of the last read: everything before that read's latest message, unless cut short in the app."""
     msgs = (cached or {}).get('messages') or []
     if not msgs: return {}
     top = max(int(m.get('index') or 0) for m in msgs)
     return {m['index']: m for m in msgs if int(m.get('index') or 0) < top and not m.get('truncated_in_app') and m.get('text') is not None}
-def _read(chan, thread, max_messages, history_pages, expand, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False):
+def _read(chan, thread, max_messages, history_pages, expand, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False, state_force=False):
     open_target(chan, thread); ok = settle(thread)
     reuse = None if (expand or history_pages or include_images or markdown) else reusable_messages(read_cache(chan, thread))
     msgs = read_messages(thread, max_messages, history_pages, expand, include_images, markdown, reuse=reuse) if ok else []; _mark('messages')
@@ -3320,9 +3329,16 @@ def _read(chan, thread, max_messages, history_pages, expand, with_threads=False,
     except Exception: pass
     threads = None
     if with_threads and not thread: threads = parse_threads(chan, include_resolved, show_all); ensure_threads_panel(False); _mark('threads')
-    snap = ui_snapshot(); _mark('ui_snapshot')
-    info = pane_info(thread, snap); dl = dialogs(snap)
-    _LAST_SNAP['snap'] = snap
+    cached = read_cache(chan, thread) or {}
+    state_scan = cached.get('state_scan') or {}
+    if state_force or _state_due(state_scan, _cards_sig(msgs, False)):
+        snap = ui_snapshot(); _mark('ui_snapshot')
+        info = pane_info(thread, snap); dl = dialogs(snap)
+        _LAST_SNAP['snap'] = snap
+    else:
+        info = {k: cached.get(v) for k, v in [('environment', 'environment'), ('thread_title', 'thread_title'), ('threads_waiting', 'threads_waiting')]}
+        info['_state_reused'] = True; dl = []
+        _LAST_SNAP.pop('snap', None)
     return msgs, info, threads, dl
 READ_STALE_S = float(os.environ.get('CLAUDE_PROJECTS_READ_STALE_S', '300'))
 READ_COALESCE_WAIT = float(os.environ.get('CLAUDE_PROJECTS_READ_COALESCE_S', '150'))
@@ -3330,7 +3346,7 @@ def _age_s(iso):
     try: return max(0.0, round((now() - datetime.datetime.fromisoformat(str(iso).replace('Z', '+00:00'))).total_seconds(), 1))
     except Exception: return None
 def stamp_freshness(out, source):
-    """Every read answer says where it came from and how old it is: source (live | coalesced | cache | cache_busy),
+    """Every read answer says where it came from and how old it is: source (live | fresh | coalesced | cache | cache_busy),
     read_at, age_s, and stale=true with a warning when a cached answer is older than READ_STALE_S."""
     if not isinstance(out, dict): return out
     age = _age_s(out.get('read_at'))
@@ -3392,6 +3408,12 @@ def _read_dispatch(project, thread=None, refresh=True, max_messages=20, history_
     UI pass. Every answer carries freshness (source, read_at, age_s, stale)."""
     if refresh and not force and not expand and not history_pages and not shot and not (with_threads and thread):
         p = resolve_project(project); op = f'read {p["name"]} {thread or "primary"}'; t0 = time.time()
+        if not include_images and not markdown:
+            fresh = _fresh_cache(p['id'], resolve_thread(p['id'], thread), with_threads)
+            if fresh:
+                out = _op_read_impl(project, thread, False, max_messages)
+                _log_read(project, thread, 'fresh', t0)
+                return stamp_freshness(out, 'fresh')
         other = same_read_inflight(op)
         if other:
             log(f'coalescing {op!r} with pid {other.get("pid")}')
@@ -3410,6 +3432,26 @@ def _read_dispatch(project, thread=None, refresh=True, max_messages=20, history_
     src = 'cache_busy' if out.get('served_from_cache_because_busy') else ('cache' if out.get('from_cache') else 'live')
     _log_read(project, thread, src, t0, r0)
     return stamp_freshness(out, src)
+READ_FRESH_S = float(os.environ.get('CLAUDE_PROJECTS_READ_FRESH_S', '45'))
+def _sent_since(chan, ts, project_name=None):
+    """A send job for this project started at or after ts (epoch s): a read from before it may miss the post or reply."""
+    for f in (CACHE/'send-jobs').glob('*.json'):
+        try:
+            if f.stat().st_mtime < ts: continue
+            d = json.loads(f.read_text())
+        except Exception: continue
+        if (d.get('spec') or {}).get('project') in (chan, project_name or chan) or d.get('project') in (chan, project_name or chan) or d.get('project_id') == chan:
+            if float(d.get('started_ts') or 0) >= ts: return True
+    return False
+def _fresh_cache(chan, tid, with_threads=False):
+    """The cached read of this thread when it is at most READ_FRESH_S old and no send went to the project since:
+    answering from it costs no UI pass. -> cached dict or None."""
+    if READ_FRESH_S <= 0 or (tid and str(tid).startswith('LOOKUP:')): return None
+    c = read_cache(chan, tid)
+    a = _age_s((c or {}).get('read_at'))
+    if not c or a is None or a > READ_FRESH_S or (with_threads and not c.get('threads')): return None
+    if _sent_since(chan, time.time() - a, c.get('project')): return None
+    return c
 def _log_read(project, thread, src, t0, r0=None):
     """One line per read answer (any source) for latency stats: 'timing readsrc <source> ...: total S'."""
     r0 = r0 or {}
@@ -3437,7 +3479,8 @@ def _op_read_impl(project, thread=None, refresh=True, max_messages=20, history_p
         if not cached: raise NotFound('nothing cached yet for this target; call again with refresh=true')
         cached = dict(cached); cached['from_cache'] = True
         msgs = list(cached.get('messages') or [])
-        annotate_messages_staleness(msgs, now()); cached['messages'] = msgs
+        if max_messages: msgs = msgs[-int(max_messages):]       # the cache holds the last read's window; answer the asked size
+        annotate_messages_staleness(msgs, now()); cached['messages'] = msgs; cached['message_count_returned'] = len(msgs)
         # Re-resolve machine: primaries often lack UI label; pick up env_id from idb when present.
         look_id = (None if (cached.get('thread_id') in (None, 'primary')) else cached.get('thread_id')) or p.get('primary_thread_id')
         eid, cst = idb_env_fields_for_thread(look_id)
@@ -3475,14 +3518,22 @@ def _op_read_impl(project, thread=None, refresh=True, max_messages=20, history_p
                 c = read_cache(chan) or {}; c['threads'] = ths; write_cache(chan, None, c) if c.get('project') else None
                 tid = resolve_thread(chan, tid[7:], ths)
                 if str(tid).startswith('LOOKUP:'): raise NotFound(f'no thread titled {tid[7:]!r} in {p["name"]}; see claude_project_get threads')
-            msgs, info, threads, dl = _read(chan, tid, max_messages, history_pages, expand, with_threads and not tid, include_resolved, show_all, include_images, markdown)
+            msgs, info, threads, dl = _read(chan, tid, max_messages, history_pages, expand, with_threads and not tid, include_resolved, show_all, include_images, markdown, state_force=force)
             if tid and str(tid).startswith('cmsg_'):
                 title = (info.get('thread_title') or '').strip()
                 if title in ('', 'Thread') and not msgs:
                     raise NotFound(f'thread {tid!r} opened no transcript (title={title!r}); not falling back to primary')
             snap = _LAST_SNAP.pop('snap', None)
-            busy = busy_state(tid, snap); _mark('busy')
-            pcards = _safe_detect_cards(tail_only=True, snap=snap); _mark('cards')
+            reused_state = info.pop('_state_reused', False)
+            busy = (cached or {}).get('claude_working', False) if reused_state else busy_state(tid, snap)
+            _mark('busy')
+            state_scan = ((cached or {}).get('state_scan') or {}) if reused_state else {'sig': _cards_sig(msgs, False), 'ts': time.time()}
+            sig = _cards_sig(msgs, busy); prev = (cached or {}).get('cards_scan') or {}
+            if force or _cards_due(prev, sig, (cached or {}).get('permission_cards')):
+                pcards = _safe_detect_cards(tail_only=True, snap=snap); scan = {'sig': sig, 'ts': time.time()}
+            else:
+                pcards = (cached or {}).get('permission_cards') or []; scan = prev
+            _mark('cards')
             if shot: screenshot(shot)
             read_ts = now().isoformat()
             annotate_messages_staleness(msgs, now())
@@ -3516,7 +3567,9 @@ def _op_read_impl(project, thread=None, refresh=True, max_messages=20, history_p
                    'messages': msgs, 'message_count_returned': len(msgs), 'latest_message_index': msgs[-1]['index'] if msgs else None,
                    'current_state': build_current_state(msgs, busy, th_meta, info, now(), permission_cards=pcards),
                    'address': thread_address(chan, tid, p.get('primary_thread_id')),
-                   'permission_cards': PERM.public(pcards) or None,
+                   'permission_cards': PERM.public(pcards) or None, 'cards_scan': scan, 'state_scan': state_scan,
+                   'state_observed_at': datetime.datetime.fromtimestamp(state_scan['ts'], datetime.timezone.utc).isoformat(),
+                   'state_reused': reused_state,
                    'note': 'Only the messages the app has rendered are returned (newest last); pass history_pages>0 to scroll further back. '
                            'Use current_state + the latest message (is_latest=true) as live fact; older messages are historical/superseded. '
                            f'Use machine.resolved (not environment alone) for where the thread runs; the app UI always runs on {HOST_LABEL}.'}
@@ -3546,6 +3599,8 @@ def op_project_get(project, refresh=True, include_resolved=False, show_all=False
     r = op_read(project, None, refresh, max_messages, 0, False, force, stay, shot, with_threads=True, include_resolved=include_resolved, show_all=show_all, include_images=include_images, markdown=markdown, cache_if_busy=cache_if_busy, lock_wait=lock_wait)
     return r
 VERIFY_SECS = float(os.environ.get('CLAUDE_PROJECTS_VERIFY_S', '60'))
+VERIFY_JOB_SECS = float(os.environ.get('CLAUDE_PROJECTS_VERIFY_JOB_S', '8'))   # send jobs: the rest of the check runs off the lock
+VERIFY_HEAD_CHARS = 400
 def post_matches(m, text, before_max=None, since_utc=None):
     """m (a parsed transcript message) is the post of text: role user, a new index (> before_max) or a time at/after
     since_utc, and the text's start (with or without the origin header) inside the message."""
@@ -3563,14 +3618,35 @@ def post_matches(m, text, before_max=None, since_utc=None):
     sq = lambda t: re.sub(r'\s+', '', unicodedata.normalize('NFKC', t or '')).casefold()
     got = sq(m.get('text'))
     full = sq(text)[:60]; body = sq(origin_body(text or '') or '')[:60]
-    return bool(full and full in got) or bool(len(body) >= 12 and body in got)
+    if bool(full and full in got) or bool(len(body) >= 12 and body in got): return True
+    # The app collapses a long post to its first line(s) + "Show more": the visible part (from the origin header on;
+    # attachment chip names come first) must be a prefix of what was sent. Only with a new index to go by.
+    if m.get('truncated_in_app') and before_max is not None:
+        hdr = sq(ORIGIN_PREFIX); k = got.find(hdr)
+        vis = got[k:] if k >= 0 else ''
+        return len(vis) >= len(hdr) and sq(text).startswith(vis)
+    return False
+STATE_SCAN_EVERY_S = float(os.environ.get('CLAUDE_PROJECTS_STATE_SCAN_S', '120'))
+def _state_due(prev, sig):
+    if not prev or prev.get('sig') != sig: return True
+    return time.time() - float(prev.get('ts') or 0) > STATE_SCAN_EVERY_S
+CARD_SCAN_EVERY_S = float(os.environ.get('CLAUDE_PROJECTS_CARD_SCAN_S', '300'))
+def _cards_sig(msgs, busy):
+    """What a pending card would change: the last two messages and whether Claude is working."""
+    tail = [(m.get('index'), m.get('role'), hashlib.sha1((m.get('text') or '').encode()).hexdigest()[:12]) for m in (msgs or [])[-2:]]
+    return json.dumps([tail, bool(busy)])
+def _cards_due(prev, sig, prev_cards):
+    """Scan for permission cards on a read only when the thread's tail changed, a card was showing last time, or the
+    last scan is older than CARD_SCAN_EVERY_S (cards come with a new or growing message, so an unchanged tail has none)."""
+    if prev_cards or not prev or prev.get('sig') != sig: return True
+    return time.time() - float(prev.get('ts') or 0) > CARD_SCAN_EVERY_S
 def _verify_sent(thread, text, before_max, secs=None):
     """Poll the transcript (backoff 1, 2, 3, 5 s ...) until the new user message with this text shows. -> message or None."""
     secs = VERIFY_SECS if secs is None else secs
     t0 = time.time(); waits = [1, 2, 3, 5]; i = 0
     while time.time() - t0 < secs:
         try:
-            for m in read_messages(thread, 0, min_index=before_max):     # only the new messages are parsed
+            for m in read_messages(thread, 0, min_index=before_max, head_chars=VERIFY_HEAD_CHARS):   # only the start of the new messages
                 if post_matches(m, text, before_max): return m
         except Exception: pass
         time.sleep(waits[min(i, len(waits) - 1)]); i += 1
@@ -3611,10 +3687,13 @@ def find_existing_post(project, thread, message, before_max=None, since_utc=None
     """Look in the thread (live read, no typing) for a user message that is this send's post. -> message or None.
     Used before any retry and after an unverified Send, so a message is never posted twice."""
     p = resolve_project(project); chan = p['id']; tid = resolve_thread(chan, thread)
-    with ui_lock(f'read {p["name"]} {thread or "primary"} (post check)', force):
+    cached = read_cache(chan, tid) or {}
+    for m in reversed(cached.get('messages') or []):
+        if post_matches(m, message, before_max, since_utc): return m
+    with ui_lock(f'verify {p["name"]} {thread or "primary"} (post check)', force):
         try:
             open_target(chan, tid); settle(tid)
-            for m in reversed(read_messages(tid, 0 if before_max is not None else 12, min_index=before_max)):
+            for m in reversed(read_messages(tid, 0 if before_max is not None else 12, min_index=before_max, head_chars=VERIFY_HEAD_CHARS)):
                 if post_matches(m, message, before_max, since_utc): return m
             return None
         finally:
@@ -3956,6 +4035,8 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
     files = prepared_files if prepared_files is not None else (prepare_attachment_files(attachments) if attachments else [])
     dl = Deadline(deadline_s)
     if (not message or not message.strip()) and not files: raise ClaudeProjectsError('message is empty')
+    if not files and is_job_id(message):
+        raise ClaudeProjectsError(f'the message is only a send job id ({message.strip()}); pass it as job_id to get that job\'s result. Nothing was sent.')
     # Origin bracket: every message this plugin types starts with "[sent by Grok Bot]" (never doubled).
     message = add_origin(message or '', bot_name if bot_name is not None else CFG.get('bot_name'))
     if len(message) > 20000: raise ClaudeProjectsError('message longer than 20000 characters')
@@ -4047,8 +4128,8 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 else: xdo('key', '--clearmodifiers', 'Return')
                 log(f'sent {len(message)} chars to {p["name"]} {tid or "primary"}: {message[:80]!r}'); _mark('send')
                 _progress('verifying', attached=len(attached), total=len(files), before_max=bmax)
-                m = _verify_sent(tid, message, bmax)
-                if m is None:                      # one more look after the page settles (long replies re-render the list)
+                m = _verify_sent(tid, message, bmax, secs=VERIFY_JOB_SECS if _LOCK_JOB_ID else None)
+                if m is None and not _LOCK_JOB_ID:  # one more look after the page settles (long replies re-render the list); jobs re-check off the lock
                     try: settle(tid, 15)
                     except Exception: pass
                     m = _verify_sent(tid, message, bmax, secs=20)
@@ -4064,7 +4145,7 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                    'message_index': m['index'] if m else None, 'origin_header': message.split(chr(10), 1)[0], 'sent_at_local': ct(now().isoformat()), 'route': route(),
                    'cleared_leftovers': cleared, 'timing': tmr.as_dict()}
             if not m:
-                lim = scan_service_limit()
+                lim = service_limit_recent() if _LOCK_JOB_ID else scan_service_limit()
                 res.update(unverified=True, send_pressed=True, before_max=bmax, service_limit=lim,
                            warning=('Send was pressed but the message is NOT in the transcript: not confirmed as posted. Do not report it as sent '
                                     'and do not resend it blindly; the send job re-checks the thread and says posted or not_posted.'))
@@ -4145,6 +4226,11 @@ def op_send_job(project, message, thread=None, force=False, attachments=None, bo
             else: st = dict(st, state='failed', error='the send job ended without a result (killed?)', error_type='AppError')
             job_write(SEND_JOBS, job_id, st)
         return _send_answer(st)
+    if not attachments and is_job_id(message):
+        # a caller that passes a job id as the message wants the job's result, never a post of the id
+        jid = strip_origin(message).strip()
+        if job_read(SEND_JOBS, jid): return op_send_job(project, None, job_id=jid)
+        raise ClaudeProjectsError(f'the message is only a send job id ({jid}); pass it as job_id to get that job\'s result. Nothing was sent.')
     STAGE.maybe_sweep()
     files = prepare_attachment_files(attachments) if attachments else []
     if (not message or not message.strip()) and not files: raise ClaudeProjectsError('message is empty')
@@ -4241,8 +4327,8 @@ def _send_job_attempts(key, st, spec, prog):
         _reverify(key, st, spec, msg_full, prog); return
 def _reverify(key, st, spec, msg_full, prog):
     prog('unverified')
-    for d in SEND_REVERIFY_DELAYS:
-        time.sleep(d)
+    for d in (0.0, *SEND_REVERIFY_DELAYS):
+        if d: time.sleep(d)              # no UI lock while the app posts/renders the message
         try: m = find_existing_post(spec['project'], spec.get('thread'), msg_full, st.get('before_max'), _since_utc(st.get('first_started_ts')), force=spec.get('force', False))
         except BaseException as ex: log(f'send job {key}: re-check failed: {ex!r}'); m = None
         if m:

@@ -1,8 +1,6 @@
 """IndexedDB snapshots: one reader at a time, queued callers reuse its result, and project lookups accept a recent one."""
-import json, pathlib, subprocess, sys, threading, time
+import json, subprocess, threading, time
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import core as C
 
 SNAP = {'channels': [{'id': 'chan_A', 'name': 'Docs'}], 'sessions': []}

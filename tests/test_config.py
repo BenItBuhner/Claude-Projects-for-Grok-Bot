@@ -1,7 +1,5 @@
 """Config precedence and the absence of deployment-specific literals."""
-import json, os, pathlib, re, sys
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
+import json, os, pathlib, re
 from claude_projects import config as K
 
 REPO = pathlib.Path(__file__).resolve().parents[1]

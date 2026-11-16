@@ -1,7 +1,5 @@
 """Origin bracket: constant prefix, optional bot name, idempotent, applied to send and thread-create."""
-import json, pathlib, re, subprocess, sys
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
+import json, pathlib, subprocess, sys
 from claude_projects import origin as O
 from claude_projects import core as C
 

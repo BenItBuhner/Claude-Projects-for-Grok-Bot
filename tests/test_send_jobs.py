@@ -3,8 +3,6 @@ client retries, a bounded attach loop, and a clean composer when anything stops 
 import contextlib, json, os, pathlib, signal, subprocess, sys, threading, time
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import core as C
 
 
@@ -327,7 +325,7 @@ def test_crash_after_send_is_never_retried_and_never_reported_sent_unseen(jobs, 
     jobs['after_send'] = C.AppError('transcript did not load')
     r = send(files, budget=5)
     assert not r['sent'] and r['not_posted'] and r['posted'] is False and 'NOT POSTED' in r['note'] and jobs['sends'] == 1
-    assert jobs['checks'] == len(C.SEND_REVERIFY_DELAYS), 're-checked the thread, did not type it again'
+    assert jobs['checks'] == len(C.SEND_REVERIFY_DELAYS) + 1, 're-checked the thread, did not type it again'
     # the caller calls again: the earlier post shows up now, so the new attempt finds it and types nothing
     jobs['after_send'] = None; jobs['existing'] = {'index': 141, 'role': 'user', 'time_local': 'x'}
     again = send(files, budget=5)
@@ -343,7 +341,7 @@ def test_unverified_send_is_confirmed_on_recheck(jobs, files):
 def test_unverified_send_that_never_shows_is_not_posted(jobs, files):
     jobs['verified'] = False
     r = send(files, budget=5)
-    assert not r['sent'] and r['not_posted'] and jobs['sends'] == 1 and jobs['checks'] == len(C.SEND_REVERIFY_DELAYS)
+    assert not r['sent'] and r['not_posted'] and jobs['sends'] == 1 and jobs['checks'] == len(C.SEND_REVERIFY_DELAYS) + 1
 
 
 def test_refused_is_not_retried(jobs, files):

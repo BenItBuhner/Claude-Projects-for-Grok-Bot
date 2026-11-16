@@ -1,8 +1,6 @@
 """1.0.5: verified sends, bulk cap, watcher yield, service-limit detection, read freshness and coalescing, lane order."""
-import sys, pathlib, json, os, subprocess, time, datetime, pytest
+import sys, pathlib, json, subprocess, time, datetime, pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import core as c
 
 @pytest.fixture(autouse=True)
@@ -41,7 +39,7 @@ def test_send_ticket_served_before_older_bulk_ticket(monkeypatch):
     send = c._ticket_new('send Sketchpad primary')
     order = [fp for fp, _ in c._tickets()]
     assert order.index(send) < order.index(bulk)
-    assert c.op_priority('send X') == 1 and c.op_priority('attachment get') == 2 and c.op_priority('card-watch X') == 0
+    assert c.op_priority('send X') == 0 and c.op_priority('read X') == 1 and c.op_priority('attachment get') == 2 and c.op_priority('card-watch X') == 0
 
 # ---- bulk hard cap
 def test_bulk_over_cap_only_when_someone_waits(monkeypatch, other_pid):
@@ -103,6 +101,7 @@ def test_freshness_missing_read_at_is_stale():
 
 # ---- read coalescing
 def test_duplicate_read_waits_and_shares_the_running_pass(monkeypatch):
+    monkeypatch.setattr(c, 'READ_FRESH_S', 0)   # the cache here is seconds old; this test is about the other paths
     monkeypatch.setattr(c.time, 'sleep', lambda s: None)
     monkeypatch.setattr(c, 'resolve_project', lambda p: {'id': 'chan_X', 'name': 'Sketchpad', 'primary_thread_id': None})
     monkeypatch.setattr(c, 'resolve_thread', lambda chan, t, ths=None: None)

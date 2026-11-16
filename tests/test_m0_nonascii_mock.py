@@ -17,7 +17,6 @@ os.environ['DISPLAY'] = DISPLAY
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'tests'))
-import conftest  # noqa: F401
 
 class MockEditable:
     """Duck-types the AT-SPI methods used by atspi_insert_text / read-back."""

@@ -2,7 +2,7 @@
 
 Nothing here touches a real VM, WSL or the network: the macOS script runs against stub commands, the Windows script
 against tests/fixtures/fake-wsl.exe (pwsh only), and the in-VM checkout runs against local git repositories."""
-import os, pathlib, re, shutil, subprocess
+import os, pathlib, shutil, subprocess
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]

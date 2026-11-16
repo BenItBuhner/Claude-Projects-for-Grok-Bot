@@ -1,39 +1,10 @@
 """Guided setup flow (claude_projects/setup.py): beta verdicts, host classes, the status state machine, sign-in, tidy, MCP tool.
 No app, display, systemd or network: RUN (shell) and CLI (`claude-projects --json ...`) are replaced with fakes."""
-import asyncio, json, os, pathlib, re, sys, time
+import asyncio, json, os, pathlib, re, time
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import setup as S
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-
-
-class Fake:
-    """Records shell calls; answers claude-projects --json calls from a dict of command -> result (or list of results, in order)."""
-    def __init__(self, cli=None, run=None):
-        self.cli = dict(cli or {}); self.runs = []; self.cli_calls = []; self.run_map = run or {}
-    def RUN(self, cmd, timeout=60, env=None, input=None):
-        self.runs.append(list(cmd))
-        for k, v in self.run_map.items():
-            if k in ' '.join(cmd): return v
-        return 0, '', ''
-    def CLI(self, args, timeout=180):
-        self.cli_calls.append(list(args)); r = self.cli.get(args[0], {})
-        if isinstance(r, list): return r.pop(0) if len(r) > 1 else r[0]
-        return r
-
-
-@pytest.fixture
-def env(tmp_path, monkeypatch):
-    st, cfgd, units = tmp_path / 'state', tmp_path / 'cfg', tmp_path / 'units'
-    for d in (st, cfgd, units): d.mkdir()
-    monkeypatch.setattr(S, 'STATE_DIR', st); monkeypatch.setattr(S, 'STATE_FILE', st / 'setup.json')
-    monkeypatch.setattr(S, 'CONFIG_DIR', cfgd); monkeypatch.setattr(S, 'UNIT_DIR', units)
-    monkeypatch.setattr(S.time, 'sleep', lambda s: None)
-    f = Fake(); monkeypatch.setattr(S, 'RUN', f.RUN); monkeypatch.setattr(S, 'CLI', f.CLI)
-    monkeypatch.setattr(S, 'CFG', dict(S.CFG, viewport_mode='on-demand'))
-    return f
 
 
 def args(**kw): return type('A', (), kw)()

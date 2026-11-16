@@ -4,10 +4,8 @@ import datetime
 import sys
 import unicodedata
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import conftest  # noqa: F401  (isolated config when run as a plain script)
 
 from claude_projects import core as C
 
@@ -91,10 +89,7 @@ def test_send_compare_keeps_blank_lines_and_nfc():
     ok, diff = C.send_text_diff(intended, got)
     assert ok and diff is None
 
-    # NFC vs NFD e-acute
-    nfc = unicodedata.normalize("NFC", "cafe\u0301")  # if given NFD-ish
-    # actually cafe + combining → NFC is café
-    nfd = "caf\u00e9"  # already NFC
+    # NFD e-acute matches its NFC form
     nfd2 = "cafe\u0301"
     ok, _ = C.send_text_diff(nfd2, unicodedata.normalize("NFC", nfd2))
     assert ok

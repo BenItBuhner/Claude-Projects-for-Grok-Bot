@@ -1,8 +1,6 @@
 """MCP surface: tool list, origin-bracket instructions in descriptions, bot_name pass-through (no app, no network)."""
-import asyncio, pathlib, re, sys
+import asyncio, pathlib, re
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 
 mcp_mod = pytest.importorskip('mcp')
 from claude_projects import mcp_server as M

@@ -1,8 +1,6 @@
 """Computer-use permission cards in a thread (the request for screen control), from the live tree seen on 2026-11-15."""
-import json, pathlib, sys
+import json
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import permissions as P
 from claude_projects import core as C
 
@@ -120,7 +118,7 @@ def test_deny_never_touches_the_intro(monkeypatch):
 
 
 def test_still_showing_is_reported_not_hidden(monkeypatch):
-    st = _env(monkeypatch, desktop_card(), take_on_continue=True)
+    _env(monkeypatch, desktop_card(), take_on_continue=True)
     monkeypatch.setattr(C, '_finish_computer_use_allow', lambda wait_s=4.0: [])   # no dialog came up
     r = C.op_permission('Demo', 'Allow for this session', 'cmsg_T', dry_run=False)
     assert r['card_gone'] is False and 'still showing' in r['warning'] and 'diagnostics' in r

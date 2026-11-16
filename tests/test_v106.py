@@ -1,8 +1,6 @@
 """1.0.6: pruned accessibility walks, tail-only reads and verifies, message reuse, faster bulk cap."""
 import sys, pathlib, time, pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import core as c
 
 class N:

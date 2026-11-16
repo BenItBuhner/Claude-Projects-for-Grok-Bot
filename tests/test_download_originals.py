@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import conftest  # noqa: F401  (isolated config when run as a plain script)
 
 from claude_projects import core as C
 

@@ -14,7 +14,7 @@ Rules for an Allow (all must hold, else the decision is 'refuse' and nothing is 
   * the label is a one-time or this-session Allow (never 'Always allow');
   * the card does not ask for full-screen control, the clipboard or system keys.
 """
-import re, json, hashlib, datetime, pathlib
+import json, datetime, pathlib
 from claude_projects import permissions as PERM
 
 TITLE = 'Claude wants to use'
