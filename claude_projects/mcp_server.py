@@ -12,7 +12,8 @@ _PKG = pathlib.Path(__file__).resolve().parent   # run as a file (python claude_
 sys.path[:] = [p for p in sys.path if pathlib.Path(p or '.').resolve() != _PKG]   # not from inside the package
 sys.path.insert(0, str(_PKG.parent))
 from claude_projects.config import CFG
-from claude_projects.origin import ORIGIN_PREFIX, origin_header
+from claude_projects.origin import ORIGIN_PREFIX, strip_origin
+from claude_projects.ids import is_job_id
 from claude_projects import config as cfg_mod, policy as policy_mod, staging as staging_mod
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent, ImageContent
@@ -209,7 +210,7 @@ async def claude_thread_attachment_get(project: str, thread: Optional[str] = Non
     return with_images(await run(flags(force) + a, 120))
 
 @mcp.tool()
-async def claude_thread_send(project: str, message: str, thread: Optional[str] = None, wait: bool = False,
+async def claude_thread_send(project: str, message: Optional[str] = None, thread: Optional[str] = None, wait: bool = False,
                              timeout_s: int = 600, poll_s: int = 10, dry_run: bool = False, attachments: Optional[list[dict]] = None,
                              bot_name: Optional[str] = None, attach_test: Union[bool, str] = False, force: bool = False,
                              idempotency_key: Optional[str] = None, job_id: Optional[str] = None, clear_leftovers: bool = False) -> dict:
@@ -245,8 +246,12 @@ async def claude_thread_send(project: str, message: str, thread: Optional[str] =
     then says joined_existing_send=true. To send the same text again on purpose, pass a new idempotency_key. A failed
     send says which file and step failed and that the composer was cleaned up; nothing was sent. With attachments,
     wait=true is not waited for: call claude_thread_wait after the send."""
+    if not job_id and not attachments and is_job_id(message):
+        job_id = strip_origin(message or '').strip()      # a job id passed as the message asks for that job, never a post
     if job_id:
         return await run(flags(force) + ['send', project, '--job-id', job_id], 60)
+    if not message and not attachments:
+        return {'ok': False, 'error': 'message is empty (pass message, or job_id for an earlier send)', 'error_type': 'ClaudeProjectsError'}
     jobbed = not dry_run and (not wait or bool(attachments))
     if jobbed:
         a = ['send', project] + (['--thread', thread] if thread else []) + (['--bot-name', bot_name] if bot_name else []) + ['--budget', str(SEND_BUDGET)] + (['--idempotency-key', idempotency_key] if idempotency_key else []) + (['--clear-leftovers'] if clear_leftovers else [])

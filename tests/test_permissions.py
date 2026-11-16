@@ -1,8 +1,5 @@
 """Generic permission-card detection on mock accessibility snapshots (no app, no display)."""
-import pathlib, sys
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import permissions as P
 from claude_projects import core as C
 

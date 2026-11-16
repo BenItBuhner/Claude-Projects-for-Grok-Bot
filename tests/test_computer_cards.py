@@ -1,8 +1,6 @@
 """The controlled computer's side: decide a computer-use card from a UI Automation snapshot of its Claude app."""
 import json, pathlib, subprocess, sys
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import computer_cards as CC
 from test_computer_use_cards import desktop_card, probe_card
 

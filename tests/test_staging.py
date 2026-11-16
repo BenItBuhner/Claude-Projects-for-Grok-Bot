@@ -1,7 +1,5 @@
 """Managed staging dir: unique slots, TTL / size sweeps, base64 staging without overwrites."""
-import base64, os, pathlib, sys, time
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
+import base64, os, pathlib, time
 from claude_projects import staging as S
 from claude_projects import core as C
 

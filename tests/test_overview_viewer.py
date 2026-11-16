@@ -1,10 +1,8 @@
 """Attachment get with the app's "Overview" document viewer (it replaced the Image preview dialog for files Claude
 uploads): a fake AT-SPI tree shaped like the one probed on the live app. Nothing here touches a real app or Project."""
-import pathlib, sys
+import pathlib
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import core as C
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 32

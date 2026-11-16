@@ -1,8 +1,6 @@
 """Mock tests for the location-bar attach fix (no X, no UI)."""
 import sys, pathlib, pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401  (isolated config)
 from claude_projects import core as c
 
 @pytest.fixture(autouse=True)

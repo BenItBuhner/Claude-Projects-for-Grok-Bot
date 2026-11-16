@@ -6,12 +6,26 @@ on:
 permissions:
   contents: read
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: ruff
+        run: pipx run ruff==0.17.5 check claude_projects tests tools
+      - name: ShellCheck
+        run: sudo apt-get install -y -qq shellcheck && shellcheck -S warning install.sh claude-projects bin/* hosts/macos/setup.sh hosts/macos/claude-projects tests/fixtures/fake-wsl.exe
+  typecheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: mypy
+        run: pipx run mypy==2.4.1
   tests:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: System packages
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv python3-gi gir1.2-atspi-2.0 shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv python3-gi gir1.2-atspi-2.0
       - name: Python environment
         run: |
           python3 -m venv .venv --system-site-packages
@@ -19,8 +33,41 @@ jobs:
           .venv/bin/pip install -q --no-deps -r requirements-nodeps.txt
       - name: pytest
         run: .venv/bin/python -m pytest -q
-      - name: ShellCheck
-        run: shellcheck -S warning install.sh claude-projects bin/* hosts/macos/setup.sh hosts/macos/claude-projects tests/fixtures/fake-wsl.exe
+  payload:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: .main-base
+      - name: Python environment
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv python3-gi gir1.2-atspi-2.0
+          python3 -m venv .venv --system-site-packages
+          .venv/bin/pip install -q -r requirements.txt
+          .venv/bin/pip install -q --no-deps -r requirements-nodeps.txt
+      - name: Measure main
+        run: |
+          if [ -f .main-base/tools/payload_budget.py ]; then
+            .venv/bin/python .main-base/tools/payload_budget.py --json base.json || true
+          fi
+      - name: Measure this change against main
+        run: .venv/bin/python tools/payload_budget.py --compare base.json --json payload.json --table payload.md
+      - name: Report
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -f payload.md ] || exit 0
+          cat payload.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" = pull_request ] && [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file payload.md --edit-last || gh pr comment "${{ github.event.pull_request.number }}" --body-file payload.md
+          fi
   powershell:
     runs-on: ubuntu-24.04
     steps:

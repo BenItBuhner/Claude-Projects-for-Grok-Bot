@@ -1,11 +1,9 @@
 """claude_thread_attachment_get answers within its budget: one fetch per attachment (retries and concurrent calls join
 it), a pending answer with a job_id when it runs long, and the finished file from the cache on the next call.
 The app is never touched: _attachment_fetch is faked, and the background worker runs as a thread."""
-import pathlib, sys, threading, time
+import pathlib, threading, time
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import core as C
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 32

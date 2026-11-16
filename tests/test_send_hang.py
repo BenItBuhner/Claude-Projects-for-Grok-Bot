@@ -1,8 +1,6 @@
 """Mock tests for the send-hang patch (no X, no UI). Run: venv/bin/python -m pytest -q test_send_hang.py"""
 import sys, pathlib, pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401  (isolated config)
 from claude_projects import core as c
 
 class FakeX:

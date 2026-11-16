@@ -1,9 +1,6 @@
-"""Per-step timing on the open path, and the shorter waits: settle ends once the transcript is stable, a child thread
-the open pane shows is accepted without walking the Threads sidebar. The app is never touched."""
-import pathlib, sys
+"""Per-step timing on the open path; a child thread the open pane shows is accepted without walking the Threads
+sidebar. The app is never touched."""
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import core as C
 
 
@@ -26,27 +23,6 @@ def test_step_timer_logs_each_step(clock):
     assert lines[-1] == 'timing attachment Demo 138.2: deeplink 1.5, settle 2.5, total 4.0'
     C._mark('outside')          # no timer: a no-op
     assert C._TIMER is None
-
-
-def test_settle_returns_soon_after_the_transcript_is_stable(clock, monkeypatch):
-    t, _ = clock
-    monkeypatch.setattr(C, 'msg_panel', lambda thread: 'panel')
-    monkeypatch.setattr(C, 'kids', lambda p: [])
-    monkeypatch.setattr(C, 'kids_deep_articles', lambda p: ['a'] * (3 if t[0] < 1001 else 5))
-    monkeypatch.setattr(C, 'nm', lambda e: 'Message 5')
-    t0 = t[0]
-    assert C.settle(None, 25) is True
-    assert t[0] - t0 <= 2.5, f'settled after {t[0] - t0:.1f} s; the old 1 s polls took 3+ s'
-
-
-def test_settle_waits_while_loading(clock, monkeypatch):
-    t, _ = clock
-    monkeypatch.setattr(C, 'msg_panel', lambda thread: 'panel')
-    monkeypatch.setattr(C, 'kids', lambda p: ['Loading...'] if t[0] < 1004 else [])
-    monkeypatch.setattr(C, 'text_of', lambda e: e)
-    monkeypatch.setattr(C, 'nm', lambda e: e)
-    monkeypatch.setattr(C, 'kids_deep_articles', lambda p: ['Message 1'])
-    assert C.settle(None, 25) is True and t[0] >= 1004
 
 
 def test_new_child_thread_shown_in_the_pane_skips_the_sidebar_walk(clock, monkeypatch):

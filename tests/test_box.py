@@ -3,11 +3,9 @@ viewport state and next steps. Shell and app calls are faked as in test_setup.py
 processes (sleep) under claude_projects/proc.py with a private D-Bus bus when dbus-daemon is installed."""
 import json, os, pathlib, shutil, subprocess, sys, time
 import pytest
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import conftest  # noqa: F401
 from claude_projects import setup as S
 from claude_projects import config as cfg_mod
-from test_setup import env, args, _installed, _preflight  # noqa: F401  (fixtures and helpers)
+from test_setup import args, _installed, _preflight
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 UBUNTU = {'os': 'linux', 'arch': 'x86_64', 'python': '3.12.3', 'user': 'box', 'hostname': 'h', 'distro_id': 'ubuntu',
