@@ -11,7 +11,7 @@ you, pick up results, and unblock threads stuck on a permission card. It runs on
 the real Claude app on an always-on computer of yours.
 
 An MCP server with 25 tools. Works with Grok Bot or any agent that speaks MCP and can run shell commands.
-Latest release: [v1.0.6](https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot/releases/latest).
+Latest release: [v1.0.7](https://github.com/BenItBuhner/Claude-Projects-for-Grok-Bot/releases/latest).
 
 ## Set it up
 
