@@ -40,6 +40,7 @@ def test_dismiss_falls_back_to_geometry_cancel(monkeypatch):
 
 def test_attach_failure_always_dismisses(monkeypatch):
     called = []
+    monkeypatch.setattr(c.AttachCtx, 'ensure', lambda self: self)
     monkeypatch.setattr(c, '_attach_files_impl', lambda f: (_ for _ in ()).throw(c.AppError("folder 'opt' not found")))
     monkeypatch.setattr(c, '_dismiss_open_files', lambda reason='': called.append(reason) or True)
     with pytest.raises(c.AppError): c.attach_files([{'path': '/x', 'name': 'x'}])

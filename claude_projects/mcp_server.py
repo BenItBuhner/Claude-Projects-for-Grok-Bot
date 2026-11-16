@@ -160,7 +160,10 @@ async def claude_project_get(project: str, refresh: bool = True, max_messages: i
     Messages carry `attachments` and `blocks` like claude_thread_read; include_images / markdown work the same.
     CACHE-FIRST WHEN BUSY: while another run holds the app, a refresh answers at once from the last read
     (served_from_cache_because_busy=true, busy.eta_s, cache_age_min); with nothing cached it queues up to ~35 s, then
-    answers busy with the queue position."""
+    answers busy with the queue position.
+    FRESHNESS: every answer has freshness {source: live | coalesced | cache | cache_busy, read_at, age_s, stale}; a cached answer
+    older than 5 min has stale=true and a loud stale_warning (messages after read_at are missing). Several bots reading the
+    same thread at once share one UI pass (source=coalesced, coalesced_wait_s) instead of queueing a pass each."""
     a = ['project', project, '--max', str(max_messages)] + (['--cached'] if not refresh else ['--cache-if-busy', '--lock-wait', str(READ_LOCK_WAIT)]) + (['--resolved'] if include_resolved else []) + (['--all-threads'] if all_threads else []) + (['--images'] if include_images else []) + (['--markdown'] if markdown else []) + (['--stay'] if refresh else [])
     return with_images(await run(flags(force) + a, 300, busy_budget=0))
 
@@ -178,7 +181,10 @@ async def claude_thread_read(project: str, thread: Optional[str] = None, refresh
     Each user message has sent_by_bot (true when its first line is the origin bracket) - see the server instructions.
     CACHE-FIRST WHEN BUSY: while another run holds the app, a refresh answers at once from the last read
     (served_from_cache_because_busy=true, busy.eta_s, cache_age_min); retry after eta_s for a live read. With nothing
-    cached it queues (fair FIFO) up to ~35 s, then answers busy with the queue position."""
+    cached it queues (fair FIFO) up to ~35 s, then answers busy with the queue position.
+    FRESHNESS: every answer has freshness {source: live | coalesced | cache | cache_busy, read_at, age_s, stale}; a cached answer
+    older than 5 min has stale=true and a loud stale_warning (messages after read_at are missing). Several bots reading the
+    same thread at once share one UI pass (source=coalesced, coalesced_wait_s) instead of queueing a pass each."""
     a = ['read', project, '--max', str(max_messages), '--history', str(history_pages)] + (['--thread', thread] if thread else []) + (['--cached'] if not refresh else ['--cache-if-busy', '--lock-wait', str(READ_LOCK_WAIT)]) + (['--expand'] if expand else []) + (['--images'] if include_images else []) + (['--markdown'] if markdown else []) + (['--stay'] if refresh else [])
     return with_images(await run(flags(force) + a, 300, busy_budget=0))
 
@@ -208,7 +214,11 @@ async def claude_thread_send(project: str, message: str, thread: Optional[str] =
                              bot_name: Optional[str] = None, attach_test: Union[bool, str] = False, force: bool = False,
                              idempotency_key: Optional[str] = None, job_id: Optional[str] = None, clear_leftovers: bool = False) -> dict:
     """Type `message` into the composer of the project's primary thread (thread=None) or a child thread and press Send, exactly as
-    the user would; then read the transcript back (verified_in_transcript, message_index). wait=true also waits for Claude's reply
+    the user would; then read the transcript back (verified_in_transcript, message_index).
+    VERIFIED OR SAYS SO: sent=true only when the post was found in the transcript (role user, a new index, matching text).
+    Otherwise the answer is loud: unverified=true / posted=false / state not_posted or failed, with a warning. A job that fails
+    before Send is retried with backoff; before any retry it checks the thread for an existing post, so nothing is posted twice.
+    Never resend after an unverified or not_posted answer without reading the thread first. wait=true also waits for Claude's reply
     (see claude_thread_wait). Refuses if the box holds an unsent draft or a VNC viewer is connected (force=true overrides the viewer
     check). This spends the user's Claude usage and is visible to him: send only when asked. dry_run=true opens the target and checks
     the composer and Send button without typing or sending.

@@ -307,9 +307,10 @@ discovery is not a missing tool on the server; `claude_skill_get` returning this
    the origin bracket; its `summary` (and `current_state.summary`) is the request without the bracket. Do not quote a
    bot-sent message as something the user said.
 4. Where a thread runs = `machine.resolved`. If it is unknown, say "unknown (not shown in the app)". Never guess.
-5. Cached results carry `cache_age_min`; refresh before treating anything older than ~15 minutes as fact.
-6. When `sidebar_disagrees` is true, report the live status, not the sidebar label.
-7. `current_state.ask` (and `ask` on status results) classifies the latest reply; an `approval` ask carries `requested_line`.
+5. Every read carries `freshness` (`source`, `read_at`, `age_s`, `stale`); a `stale_warning` means messages after `read_at` are missing. Refresh before treating anything older than ~15 minutes as fact.
+6. A send is posted only when `sent` is true and `verified_in_transcript` is true. `unverified`, `not_posted` or `failed` means read the thread before doing anything; never resend blind.
+7. When `sidebar_disagrees` is true, report the live status, not the sidebar label.
+8. `current_state.ask` (and `ask` on status results) classifies the latest reply; an `approval` ask carries `requested_line`.
    Report waiting child threads (`waiting_threads`) along with the primary; see "Check every thread" above.
 
 ## Auto permission mode and permission cards

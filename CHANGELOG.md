@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.0.5 (2026-11-15)
+
+### Sends: verified, or loudly not
+- A send result reports `sent: true` only after the post is found in the transcript: role user, an index after the
+  last one seen before Send, and matching text. Matching ignores whitespace the app adds on re-render (`(8:32` shows as
+  `( 8:32`), which had made a posted message look unverified.
+- When the post can't be confirmed, the result says `unverified: true` (or the job ends `not_posted`) with
+  `posted: false`, a warning and the service-limit check result. The answer no longer says `sent: true` on its own.
+- Send jobs that fail before Send are retried with backoff (10 s, then 30 s; tripled while a service limit shows),
+  at most twice within 10 minutes. Refusals are not retried. Before any retry, and after an unverified Send, the job
+  reads the thread for an existing post (rechecks at 10, 30 and 60 s), so a message is never posted twice.
+
+### Root cause of the slow and lost sends (measured from 7 PM CT)
+- Whole-document accessibility walks run at about 13-20 ms per node on a long transcript. The send path ran them
+  dozens of times: once on every paste-verify poll (finding the message box), plus again for the Send button and the
+  attach control. AT-SPI text insertion failed in all 38 sends and cost over a minute on a 10k-character message
+  before every send fell back to clipboard paste. A 10k-character send spent 64 s between paste and Send.
+- The message box is now remembered while it is alive on the same route, and searched from the end of the page
+  otherwise. The Send button and the attach control are looked up next to the composer first. Paste is the first
+  typing method (`CLAUDE_PROJECTS_ATSPI_INSERT=1` restores AT-SPI insertion). Timing marks now name each step
+  (`before_index`, `composer`, `typed`, `pre_send_checks`, `send`, `verify`).
+- Attachment sends failed with "typing the path took longer than 20 s". The time was really spent finding the attach
+  control (25-94 s), and that was charged to the first file's 20 s clock. Finding the control now happens once per
+  send, before the per-file clock starts, inside the composer's scope first. The error names its parts (picker s, path s).
+
+### Fairness: nobody waits minutes behind bulk work
+- Bulk hard cap: an attachment fetch, refresh or attention pass that holds the UI more than 20 s
+  (`CLAUDE_PROJECTS_BULK_CAP_S`) while anyone waits is stopped and re-queued behind the waiter. After 3 preemptions,
+  one last run goes to the end. Sends, reads, presses and waits are never preempted.
+- "Not available" attachment results are cached for 6 h, so bots stop re-running 2-5 minute fetches for a file with no
+  Download button. `refresh=true` checks again.
+- The card watcher yields: while others wait it looks at most once per max(15 s, 2x its last look).
+- Status shows `queue_depth`, `queue_oldest_wait_s`, `queue_eta_last_s` and `service_limit`.
+
+### Reads: fresh, stamped and shared
+- Every read carries `freshness` (`source`: live, coalesced, cache or cache_busy; `read_at`, `age_s`, `stale`). A
+  cached answer older than 5 minutes (`CLAUDE_PROJECTS_READ_STALE_S`) has `stale: true` and a loud `stale_warning`.
+- Duplicate reads are coalesced. A read of a thread that another bot is already reading (or is queued to read) waits
+  for that pass and answers from the transcript it wrote, instead of queueing a second UI pass.
+- The app keeps no transcripts in its IndexedDB (only lists, account and settings), so reads still come from the UI or
+  the cache. No lock-free source for transcripts exists in the app's stored data.
+
+### Service limits
+- Limit and overload banners (rate limit, usage limit, 429, at capacity) are detected in alerts, dialogs and the
+  composer area, never the transcript. They are recorded in `service-limit.json`, shown in status and lengthen send
+  backoff. None were seen in the logs from this session.
+
 ## 1.0.4 (2026-11-15)
 
 ### Reliable computer-use presses and bounded jobs

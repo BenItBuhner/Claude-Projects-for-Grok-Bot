@@ -669,6 +669,51 @@ def _release_flock(f):
     try: fcntl.flock(f, fcntl.LOCK_UN); f.close()
     except Exception: pass
 _HELD = {}   # this process's held lock: {'f', 'op', 'since'}
+# ---- bulk hard cap: a background fetch / refresh that holds the UI lock longer than BULK_HARD_CAP_S while anyone else
+# waits is stopped (Preempted), releases the lock and is retried behind the waiters. Sends, reads and presses never wait
+# minutes behind a fetch again. Waits (op_wait polls) are never preempted.
+BULK_HARD_CAP_S = float(os.environ.get('CLAUDE_PROJECTS_BULK_CAP_S', '20'))
+PREEMPTIBLE_KINDS = ('attachment', 'projects-refresh', 'refresh', 'attention', 'probe-projects', 'tidy-ui')
+_PREEMPT = {'armed': False, 'off': False}
+def others_waiting():
+    """Live waiters for the UI lock from other processes (any lane)."""
+    return [d for _, d in _tickets() if int(d.get('pid') or 0) != os.getpid()]
+def preemptible(op):
+    k = op_kind(op)
+    if k in URGENT_KINDS or k == 'wait': return False
+    return k in PREEMPTIBLE_KINDS or _BULK_CTX
+def bulk_over_cap(t=None):
+    """True when this process holds the UI lock for a preemptible bulk op past the cap while someone else waits."""
+    if _PREEMPT.get('off') or not _HELD or not preemptible(_HELD.get('op')): return False
+    if (t or time.time()) - float(_HELD.get('since') or time.time()) < BULK_HARD_CAP_S: return False
+    return bool(others_waiting())
+def _preempt_signal(signum, frame):
+    if _PREEMPT.get('armed') and bulk_over_cap():
+        _PREEMPT['armed'] = False
+        raise Preempted(f"{_HELD.get('op')!r} held the UI lock over {int(BULK_HARD_CAP_S)} s while another op waited")
+def _bulk_guard_start(op):
+    """Arm the cap for a bulk op on the main thread: a watcher thread checks every 2 s and interrupts the op (SIGUSR1)."""
+    import signal
+    if not preemptible(op) or threading.current_thread() is not threading.main_thread() or not hasattr(signal, 'pthread_kill'): return None
+    try: prev = signal.signal(signal.SIGUSR1, _preempt_signal)
+    except Exception: return None
+    stop = threading.Event(); main = threading.main_thread().ident; _PREEMPT['armed'] = True
+    def run():
+        while not stop.wait(2.0):
+            try:
+                if _PREEMPT.get('armed') and bulk_over_cap():
+                    log(f"bulk cap: interrupting {_HELD.get('op')!r} (held over {int(BULK_HARD_CAP_S)} s, {len(others_waiting())} waiting)")
+                    signal.pthread_kill(main, signal.SIGUSR1); stop.wait(5.0)
+            except Exception: pass
+    threading.Thread(target=run, daemon=True, name='bulk-cap').start()
+    return (stop, prev)
+def _bulk_guard_stop(g):
+    import signal
+    _PREEMPT['armed'] = False
+    if not g: return
+    g[0].set()
+    try: signal.signal(signal.SIGUSR1, g[1])
+    except Exception: pass
 def urgent_waiting():
     """Live waiters in the urgent lane (permission presses / card listing / watcher), oldest first."""
     return [d for _, d in _tickets() if int(d.get('priority', 1)) == 0 and int(d.get('pid') or 0) != os.getpid()]
@@ -702,8 +747,10 @@ def ui_lock(op, force=False, timeout=None):
         f = _acquire_flock(op, None, timeout, t0)
         _HELD.update(f=f, op=op, since=time.time())
         log(f'lock acquired for {op} (waited {time.time()-t0:.1f}s)')
+        guard = _bulk_guard_start(op)
         try: yield
         finally:
+            _bulk_guard_stop(guard)
             if _HELD:
                 try: _record_op_duration(op, time.time() - _HELD['since'])
                 except Exception: pass
@@ -1127,12 +1174,38 @@ def read_messages(thread, max_messages=20, history_pages=0, expand=False, includ
         if (min(seen) if seen else 0) >= before: break
     msgs = [seen[k] for k in sorted(seen)]
     return msgs[-max_messages:] if max_messages else msgs
-def composer():
-    d, _ = main_doc()
+COMPOSER_NAME_RE = re.compile(r'^(Write your (prompt|reply) to Claude|Type / for commands|Reply.*|Message .*|Ask Claude.*|Describe a task.*)')
+_COMPOSER = {'e': None, 'route': None}
+def _composer_alive(e):
+    """The remembered composer is still the live, editable, on-screen box of a document (cheap: a parent chain walk)."""
+    try:
+        if e is None or not has_state(e, 'EDITABLE') or not has_state(e, 'SHOWING') or has_state(e, 'DEFUNCT'): return False
+        node = e
+        for _ in range(80):
+            node = node.get_parent()
+            if node is None: return False
+            if role(node) in ('document web', 'document frame'): return True
+    except Exception: return False
+    return False
+def composer(fresh=False):
+    """The message box. A whole-document AT-SPI walk costs 10-60 s on a long transcript (13-20 ms per node), and the
+    send path asks for the composer dozens of times (every paste-verify poll), so: reuse the last one while it is
+    alive on the same route, else search the end of the document first (the composer is last), else walk it all."""
+    d, u = main_doc()
     if not d: return None
-    ents = find_all(d, 'entry', lambda e: has_state(e, 'EDITABLE'))
-    pref = [e for e in ents if re.match(r'^(Write your (prompt|reply) to Claude|Type / for commands|Reply.*|Message .*|Ask Claude.*|Describe a task.*)', nm(e))]
-    return (pref or ents or [None])[-1]
+    c = _COMPOSER.get('e')
+    if not fresh and c is not None and _COMPOSER.get('route') == u and _composer_alive(c): return c
+    st = [d]; n = 0; hit = None
+    while st and n < 6000:                                    # reverse pre-order: the bottom of the page first
+        e = st.pop(); n += 1
+        if role(e) == 'entry' and has_state(e, 'EDITABLE') and COMPOSER_NAME_RE.match(nm(e) or ''): hit = e; break
+        st.extend(kids(e))
+    if hit is None:
+        ents = find_all(d, 'entry', lambda e: has_state(e, 'EDITABLE'))
+        pref = [e for e in ents if COMPOSER_NAME_RE.match(nm(e))]
+        hit = (pref or ents or [None])[-1]
+    _COMPOSER.update(e=hit, route=u)
+    return hit
 def composer_text(e):
     """Text in the ProseMirror composer: one paragraph per line (the entry itself only exposes U+FFFC embeds)."""
     if e is None: return ''
@@ -1860,6 +1933,9 @@ def store_file(src, name, mime, meta):
 # A job runs in a detached worker so a tool call can answer within its budget; the same call again joins it.
 class Interrupted(BaseException):
     """SIGTERM or the watchdog: not an AppError, so no fallback path catches it; cleanup in finally blocks still runs."""
+class Preempted(Interrupted):
+    """A bulk op went past the bulk hard cap while another op waited for the UI: it stops at once (finally blocks run)
+    and its caller retries it behind the waiters."""
 def job_lock(dirp, key):
     """-> an open file holding the job's exclusive lock, or None when another process holds it."""
     dirp.mkdir(parents=True, exist_ok=True); os.chmod(dirp, 0o700)
@@ -1949,6 +2025,18 @@ def _att_cached(key, since=None, fresh=False):
     m = r.get('meta') or {}
     if not fresh and m.get('available') and m.get('path_on_host') and pathlib.Path(m['path_on_host']).is_file() and _att_identity_ok(m): return r
     return None
+ATT_PREEMPT_MAX = int(os.environ.get('CLAUDE_PROJECTS_ATTACH_PREEMPT_MAX', '3'))
+ATT_NEG_TTL = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_NEG_TTL_S', '21600'))    # "not available" answers are reused this long
+def _att_unavailable_cached(key):
+    """A recent 'not available' result for key (the app has no Download control and no readable preview for it). Fetching it
+    again takes minutes of UI time and gives the same answer, so it is answered from the cache until refresh=true."""
+    r = _att_job_result(key)
+    if not r or r.get('status') != 'done': return None
+    m = r.get('meta') or {}
+    if m.get('available') is not False or m.get('kind') in ('link', 'pull_request'): return None
+    if time.time() - float(r.get('finished_ts') or 0) > ATT_NEG_TTL: return None
+    if m.get('identity') and not _att_identity_ok(m): return None          # the numbering moved: N.n is another message now
+    return r
 def _att_job_running(key): return job_running(ATT_JOBS, key)
 def _att_run_job(key, job):
     """Run one fetch for key under its job lock and write the result file. Returns the result, or None when another
@@ -1958,12 +2046,20 @@ def _att_run_job(key, job):
     try:
         r = _att_cached(key, since=job.get('started_ts'), fresh=bool(job.get('refresh')))
         if r: return r                                 # finished while this one waited for the lock
-        t0 = time.time()
-        try: r = {'status': 'done', 'meta': _attachment_fetch(**{k: job[k] for k in ('project', 'thread', 'message_index', 'n', 'force', 'stay', 'shot')})}
-        except ClaudeProjectsError as ex: r = {'status': 'failed', 'error': str(ex), 'error_type': type(ex).__name__, 'code': getattr(ex, 'code', 1)}
-        except Exception as ex: r = {'status': 'failed', 'error': repr(ex), 'error_type': 'AppError', 'code': 6}
-        except Interrupted as ex: r = {'status': 'failed', 'error': f'interrupted ({ex})', 'error_type': 'AppError', 'code': 6}
-        r.update(job_id=key, finished_ts=time.time(), seconds=round(time.time() - t0, 1))
+        t0 = time.time(); preempted = 0
+        while True:
+            try: r = {'status': 'done', 'meta': _attachment_fetch(**{k: job[k] for k in ('project', 'thread', 'message_index', 'n', 'force', 'stay', 'shot')})}
+            except Preempted as ex:
+                preempted += 1
+                log(f'attachment job {key}: preempted ({ex}); re-queued behind the waiters ({preempted}/{ATT_PREEMPT_MAX})')
+                if preempted >= ATT_PREEMPT_MAX: _PREEMPT['off'] = True      # last try runs to the end: bulk work is delayed, never starved
+                time.sleep(1.0); continue
+            except ClaudeProjectsError as ex: r = {'status': 'failed', 'error': str(ex), 'error_type': type(ex).__name__, 'code': getattr(ex, 'code', 1)}
+            except Exception as ex: r = {'status': 'failed', 'error': repr(ex), 'error_type': 'AppError', 'code': 6}
+            except Interrupted as ex: r = {'status': 'failed', 'error': f'interrupted ({ex})', 'error_type': 'AppError', 'code': 6}
+            break
+        _PREEMPT['off'] = False
+        r.update(job_id=key, finished_ts=time.time(), seconds=round(time.time() - t0, 1), preempted=preempted or None)
         job_write(ATT_JOBS, key, r)
         return r
     finally: job_unlock(f)
@@ -1993,6 +2089,13 @@ def op_attachment_get(project, thread=None, attachment_id=None, message_index=No
     if not refresh:
         r = _att_cached(key)
         if r: return _att_answer(r, as_, full, cached=True)
+        r = _att_unavailable_cached(key)
+        if r:
+            out = _att_answer(r, as_, full, cached=True)
+            out['note'] = (f"not available (checked {ct(datetime.datetime.fromtimestamp(r['finished_ts'], datetime.timezone.utc).isoformat())}: "
+                           f"{(r.get('meta') or {}).get('source') or 'the app gives no copy'}). Answered from the cache without opening the app again; "
+                           'pass refresh=true to try once more.')
+            return out
     spec = dict(project=chan, chan=chan, thread=thread, message_index=message_index, n=n, force=force, stay=stay, shot=shot, refresh=refresh, started_ts=t_start)
     if job or budget is None:
         r = _att_run_job(key, spec)
@@ -2101,17 +2204,27 @@ def present_attachment(meta, as_='auto', full=False):
     meta['returned_as'] = mode
     return meta
 
+_LAST_SCOPE = {'scope': None}
 def locate_attach_control():
-    """Find the composer's attach control and list its menu (opening the menu uploads nothing), then close it."""
+    """Find the composer's attach control and list its menu (opening the menu uploads nothing), then close it.
+    The Add button is looked up inside the composer's own scope first (a few dozen nodes), the whole document only as a
+    fallback; the menu is read from the popup at the end of the document. The scope is kept for the attach loop."""
     d, _ = main_doc(); b = None
     e = composer()
-    adds = find_all(d, 'push button', lambda x: nm(x) in ('Add', 'Add files', 'Attach', 'Add content', 'Add attachment')) if d else []
+    pred = lambda x: nm(x) in ATTACH_BUTTON_NAMES
+    sc = _composer_scope(e) if e is not None else None
+    adds = find_all(sc, 'push button', pred) if sc is not None else []
+    if not adds and d is not None: adds = find_all(d, 'push button', pred)
     if adds and e:
         ce = extents(e) or (0, 0, 0, 0)
         b = min(adds, key=lambda x: abs((extents(x) or (0, 0, 0, 0))[1] - ce[1]))
+    _LAST_SCOPE['scope'] = sc
     if not b: return {'attach_button_found': False}
     act(b, 'Add'); time.sleep(1.2); d, _ = main_doc()
-    items = [nm(x) for x in walk(d, 40000) if role(x) in ('menu item', 'check menu item', 'radio menu item')]
+    menu = _find_rev(d, 'menu', maxn=4000) if d is not None else None
+    roles = ('menu item', 'check menu item', 'radio menu item')
+    items = [nm(x) for x in walk(menu, 400, max_s=4) if role(x) in roles] if menu is not None else []
+    if not items: items = [nm(x) for x in walk(d, 40000, max_s=10) if role(x) in roles]
     xdo('key', 'Escape'); time.sleep(.8)
     return {'attach_button_found': True, 'attach_button': nm(b), 'menu_items': items, 'attach_item': next((i for i in items if re.match(r'^(Add|Upload|Attach) (files|photos|file)', i)), None)}
 def prepare_attachment_files(attachments):
@@ -2430,7 +2543,8 @@ class AttachCtx:
         if self.item is None:
             info = locate_attach_control()
             if not info.get('attach_item'): raise AppError('attach menu item not found; nothing attached')
-            self.button, self.item = info['attach_button'], info['attach_item']; self.scope = _composer_scope(); _mark('locate_attach_control')
+            self.button, self.item = info['attach_button'], info['attach_item']
+            self.scope = _LAST_SCOPE.get('scope') if _LAST_SCOPE.get('scope') is not None else _composer_scope(); _mark('locate_attach_control')
         return self
 def _open_attach_picker(ctx=None, limit=15):
     ctx = (ctx or AttachCtx()).ensure(); t0 = time.time()
@@ -2513,7 +2627,9 @@ def _attach_one_via_location(f, test_only=False, shot_dir=None, ctx=None, deadli
         log(f"attach-test {f['name']}: typed path, ocr_match={ok}, cancelled={closed}")
         return {'name': f['name'], 'path': path, 'size': os.path.getsize(path), 'typed_in_location_bar': True,
                 'ocr_saw_filename': ok, 'ocr_text': ' '.join(txt.split())[:200], 'screenshot': shot, 'cancelled': closed}
-    if left() <= 0: raise AttachError(f['name'], f'typing the path took longer than {int(limit)} s')
+    if left() <= 0:
+        raise AttachError(f['name'], f"opening the file picker and typing the path took longer than {int(limit)} s "
+                                     f"(picker {tm.get('picker', 0):.1f} s, path {tm.get('path', 0):.1f} s)")
     _click_chooser_open(None, wid); tm['open'] = time.time() - t0 - sum(tm.values())
     scope = getattr(ctx, 'scope', None); polls = 0
     while True:
@@ -2538,6 +2654,9 @@ def attach_files(files, test_only=False, shot_dir=None, done=None, deadline=None
     results = []; done = done if done is not None else []; deadline = deadline or Deadline()
     try:
         ctx = AttachCtx()
+        if progress: progress('attaching', attached=0, total=len(files), file=files[0]['name'])
+        t_loc = time.time(); ctx.ensure()                   # once per send, not charged to the first file's per-file limit
+        if time.time() - t_loc > 10: log(f'locating the attach control took {time.time() - t_loc:.1f} s')
         for i, f in enumerate(files):
             deadline.check(f"before attaching {f['name']} ({i + 1}/{len(files)})")
             if progress: progress('attaching', attached=i, total=len(files), file=f['name'])
@@ -2882,6 +3001,12 @@ def card_watch_once(chan, tid, only_apps, force=False, dry_run=False):
             ent.update(action='pressed', pressed_with=how, card_gone=gone, press_s=round(time.time() - t0, 1), pressed_at_local=ct(now().isoformat()))
             log(f'card-watch pressed {label!r} on {c["card_id"]} gone={gone}'); _watch_log(ent); acts.append(ent)
     return acts
+WATCH_YIELD_MIN_S = float(os.environ.get('CLAUDE_PROJECTS_WATCH_YIELD_S', '15'))
+def watch_sleep(interval_s, last_look_s, others_waiting):
+    """Seconds until the watcher's next look. With nobody else queued: interval_s. While other ops wait, the urgent-lane
+    watcher steps back to at most one look per max(15 s, 2x its last look), so it can never hold the UI most of the time."""
+    base = max(1.0, float(interval_s))
+    return max(base, WATCH_YIELD_MIN_S, 2.0 * float(last_look_s or 0)) if others_waiting else base
 def op_card_watch(project, thread=None, only_apps=None, duration_s=600, interval_s=5, force=False, dry_run=False, stop_after=0):
     """Watch one thread for computer-use cards and press Allow on those whose apps are all in only_apps (required).
     Each look is a short urgent-lane lock (other ops queue behind it only for that look); between looks the lock is free.
@@ -2892,12 +3017,14 @@ def op_card_watch(project, thread=None, only_apps=None, duration_s=600, interval
     _watch_log({'action': 'start', 'thread': thread_address(chan, tid), 'only_apps': list(only_apps), 'duration_s': duration_s, 'dry_run': dry_run})
     try:
         while time.time() < t_end:
-            looks += 1
+            looks += 1; t_look = time.time()
             try: out += card_watch_once(chan, tid, only_apps, force=force, dry_run=dry_run)
             except Busy as ex: errors += 1; log(f'card-watch look skipped: {ex}')
             except ClaudeProjectsError as ex: errors += 1; log(f'card-watch look failed: {ex}')
             if stop_after and sum(1 for a in out if a.get('action') == 'pressed' and a.get('card_gone')) >= stop_after: break
-            time.sleep(max(1.0, float(interval_s)))
+            try: waiting = bool(others_waiting())
+            except Exception: waiting = False
+            time.sleep(watch_sleep(interval_s, time.time() - t_look, waiting))
     finally:
         _watch_log({'action': 'stop', 'looks': looks, 'presses': sum(1 for a in out if a.get('action') == 'pressed')})
         try: go_home()
@@ -3083,7 +3210,52 @@ def _read(chan, thread, max_messages, history_pages, expand, with_threads=False,
     info = pane_info(thread); threads = None
     if with_threads and not thread: threads = parse_threads(chan, include_resolved, show_all); ensure_threads_panel(False)
     return msgs, info, threads, dialogs()
+READ_STALE_S = float(os.environ.get('CLAUDE_PROJECTS_READ_STALE_S', '300'))
+READ_COALESCE_WAIT = float(os.environ.get('CLAUDE_PROJECTS_READ_COALESCE_S', '150'))
+def _age_s(iso):
+    try: return max(0.0, round((now() - datetime.datetime.fromisoformat(str(iso).replace('Z', '+00:00'))).total_seconds(), 1))
+    except Exception: return None
+def stamp_freshness(out, source):
+    """Every read answer says where it came from and how old it is: source (live | coalesced | cache | cache_busy),
+    read_at, age_s, and stale=true with a warning when a cached answer is older than READ_STALE_S."""
+    if not isinstance(out, dict): return out
+    age = _age_s(out.get('read_at'))
+    out['freshness'] = {'source': source, 'read_at': out.get('read_at'), 'read_at_local': ct(out.get('read_at')) if out.get('read_at') else None,
+                        'age_s': age, 'stale': bool(source != 'live' and (age is None or age > READ_STALE_S))}
+    if out['freshness']['stale']:
+        out['stale_warning'] = (f"STALE: this is a cached read from {out['freshness']['read_at_local'] or 'an unknown time'} "
+                                f"({'?' if age is None else int(age)} s old); messages after it are missing. Read again with refresh for a live read.")
+    return out
+def same_read_inflight(op):
+    """Another process is reading the same thread right now (holding the UI lock for it, or queued for it)."""
+    me = os.getpid()
+    h = ui_lock_holder()
+    if h and h.get('op') == op and int(h.get('pid') or 0) != me: return h
+    for _, d in _tickets():
+        if d.get('op') == op and int(d.get('pid') or 0) != me: return d
+    return None
 def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0, expand=False, force=False, stay=False, shot=None, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None):
+    """Read a thread. Live reads of the same thread by several callers at once are coalesced: a caller that finds the same
+    read already running (or queued) waits for it and answers from the transcript it wrote, instead of queueing a second
+    UI pass. Every answer carries freshness (source, read_at, age_s, stale)."""
+    if refresh and not force and not expand and not history_pages and not shot and not with_threads:
+        p = resolve_project(project); op = f'read {p["name"]} {thread or "primary"}'; t0 = time.time()
+        other = same_read_inflight(op)
+        if other:
+            log(f'coalescing {op!r} with pid {other.get("pid")}')
+            limit = min(READ_COALESCE_WAIT, float(lock_wait)) if lock_wait else READ_COALESCE_WAIT
+            while same_read_inflight(op) and time.time() - t0 < limit: time.sleep(0.5)
+            tid0 = resolve_thread(p['id'], thread)
+            c = read_cache(p['id'], tid0 if tid0 and not str(tid0).startswith('LOOKUP:') else None)
+            a = _age_s((c or {}).get('read_at'))
+            if c and a is not None and a <= time.time() - t0 + 2:
+                out = _op_read_impl(project, thread, False, max_messages, include_images=include_images, markdown=markdown)
+                out['coalesced_with_pid'] = other.get('pid'); out['coalesced_wait_s'] = round(time.time() - t0, 1)
+                return stamp_freshness(out, 'coalesced')
+    out = _op_read_impl(project, thread, refresh, max_messages, history_pages, expand, force, stay, shot, with_threads, include_resolved, show_all, include_images, markdown, cache_if_busy, lock_wait)
+    src = 'cache_busy' if out.get('served_from_cache_because_busy') else ('cache' if out.get('from_cache') else 'live')
+    return stamp_freshness(out, src)
+def _op_read_impl(project, thread=None, refresh=True, max_messages=20, history_pages=0, expand=False, force=False, stay=False, shot=None, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None):
     p = resolve_project(project); chan = p['id']
     tid = resolve_thread(chan, thread)
     cached = read_cache(chan, tid if tid and not str(tid).startswith('LOOKUP:') else None)
@@ -3092,7 +3264,7 @@ def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0
         if h and int(h.get('pid') or 0) != os.getpid():
             # Cache-first: the app is busy with someone else's UI work. Answer now from the last read instead of queueing
             # behind it; the caller can retry later (or pass cache_if_busy=false to queue for a live read).
-            out = op_read(project, thread, False, max_messages, include_images=include_images, markdown=markdown)
+            out = _op_read_impl(project, thread, False, max_messages, include_images=include_images, markdown=markdown)
             q = ui_queue_status()
             out['served_from_cache_because_busy'] = True
             out['busy'] = {'holder': q['holder'], 'queue_length': q['length'],
@@ -3210,15 +3382,81 @@ def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0
 def op_project_get(project, refresh=True, include_resolved=False, show_all=False, max_messages=10, force=False, stay=False, shot=None, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None):
     r = op_read(project, None, refresh, max_messages, 0, False, force, stay, shot, with_threads=True, include_resolved=include_resolved, show_all=show_all, include_images=include_images, markdown=markdown, cache_if_busy=cache_if_busy, lock_wait=lock_wait)
     return r
-def _verify_sent(thread, text, before_max, secs=40):
-    t0 = time.time(); want = norm(text)[:120].casefold()
+VERIFY_SECS = float(os.environ.get('CLAUDE_PROJECTS_VERIFY_S', '60'))
+def post_matches(m, text, before_max=None, since_utc=None):
+    """m (a parsed transcript message) is the post of text: role user, a new index (> before_max) or a time at/after
+    since_utc, and the text's start (with or without the origin header) inside the message."""
+    if not m or m.get('role') != 'user': return False
+    if before_max is not None and int(m.get('index') or 0) <= int(before_max): return False
+    if since_utc:
+        def _t(x):
+            try: return datetime.datetime.fromisoformat(str(x).replace('Z', '+00:00')).timestamp()
+            except Exception: return None
+        tm, ts = _t(m.get('time_utc')), _t(since_utc)
+        if tm is not None and ts is not None and tm < ts: return False
+        # with no index to go by, an undated message could be an older post of the same text: never call it ours
+        if before_max is None and tm is None: return False
+    # compared with all whitespace removed: the app re-renders spacing ("(8:32" shows as "( 8:32"), so an exact prefix misses real posts
+    sq = lambda t: re.sub(r'\s+', '', unicodedata.normalize('NFKC', t or '')).casefold()
+    got = sq(m.get('text'))
+    full = sq(text)[:60]; body = sq(origin_body(text or '') or '')[:60]
+    return bool(full and full in got) or bool(len(body) >= 12 and body in got)
+def _verify_sent(thread, text, before_max, secs=None):
+    """Poll the transcript (backoff 1, 2, 3, 5 s ...) until the new user message with this text shows. -> message or None."""
+    secs = VERIFY_SECS if secs is None else secs
+    t0 = time.time(); waits = [1, 2, 3, 5]; i = 0
     while time.time() - t0 < secs:
         try:
             for m in read_messages(thread, 0):
-                if m['index'] > before_max and m['role'] == 'user' and want[:60] in norm(m['text']).casefold(): return m
+                if post_matches(m, text, before_max): return m
         except Exception: pass
-        time.sleep(2)
+        time.sleep(waits[min(i, len(waits) - 1)]); i += 1
     return None
+SERVICE_LIMIT_RE = re.compile(r"(rate.?limit|usage limit|too many requests|\b429\b|you(?:'|\u2019)ve (?:hit|reached) (?:your|the) (?:\w+ )?limit"
+                              r"|limit (?:will )?resets?|out of (?:free )?messages|(?:is|are) overloaded|at capacity|temporarily unavailable)", re.I)
+SERVICE_LIMIT_FILE = ROOT/'service-limit.json'
+def scan_service_limit(max_s=3.0):
+    """Look for a limit / overload banner from the service: alerts, dialogs and the composer's own area (never the
+    transcript, where Claude may just be talking about rate limits). Records a hit in service-limit.json. -> {'text', 'at_local'} or None."""
+    hits = []
+    try:
+        d, _ = main_doc()
+        roots = [x for x in find_all(d, pred=lambda e: role(e) in ('alert', 'dialog', 'alert dialog', 'notification', 'status'))] if d is not None else []
+        e = composer()
+        if e is not None: roots.append(_composer_scope(e, levels=4))
+        t_end = time.time() + max_s
+        for r in roots:
+            for x in walk(r, 400, max_s=max(0.2, t_end - time.time())):
+                t = (nm(x) or '') + ' ' + (text_of(x)[:300] if role(x) in ('static', 'label', 'paragraph', 'text', 'heading') else '')
+                if SERVICE_LIMIT_RE.search(t): hits.append(' '.join(t.split())[:240])
+            if time.time() > t_end: break
+    except Exception as ex: log(f'service limit scan failed: {ex!r}')
+    if not hits: return None
+    rec = {'text': hits[0], 'at': now().isoformat(), 'at_local': ct(now().isoformat())}
+    try: SERVICE_LIMIT_FILE.write_text(json.dumps(rec, ensure_ascii=False))
+    except Exception: pass
+    log(f'SERVICE LIMIT shown by the app: {hits[0]!r}')
+    return rec
+def service_limit_recent(max_age_s=1800):
+    """The last limit banner seen within max_age_s, else None (status shows it; send retries back off longer)."""
+    try:
+        rec = json.loads(SERVICE_LIMIT_FILE.read_text())
+        if time.time() - datetime.datetime.fromisoformat(rec['at']).timestamp() <= max_age_s: return rec
+    except Exception: pass
+    return None
+def find_existing_post(project, thread, message, before_max=None, since_utc=None, force=False):
+    """Look in the thread (live read, no typing) for a user message that is this send's post. -> message or None.
+    Used before any retry and after an unverified Send, so a message is never posted twice."""
+    p = resolve_project(project); chan = p['id']; tid = resolve_thread(chan, thread)
+    with ui_lock(f'read {p["name"]} {thread or "primary"} (post check)', force):
+        try:
+            open_target(chan, tid); settle(tid)
+            for m in reversed(read_messages(tid, 0)):
+                if post_matches(m, message, before_max, since_utc): return m
+            return None
+        finally:
+            try: go_home()
+            except Exception: pass
 def _has_non_ascii(s):
     return any(ord(c) > 127 for c in (s or ''))
 
@@ -3430,8 +3668,9 @@ def type_text(e, text, read_back=None):
 
     _focus_composer(e)
 
-    # 1) AT-SPI EditableText
-    if atspi_insert_text(e, text_nfc):
+    # 1) AT-SPI EditableText (off by default: the app's ProseMirror box refuses it, and on a 10k-char message the failed
+    #    call alone cost over a minute; CLAUDE_PROJECTS_ATSPI_INSERT=1 turns it back on)
+    if os.environ.get('CLAUDE_PROJECTS_ATSPI_INSERT') == '1' and atspi_insert_text(e, text_nfc):
         ok, got = _wait_composer_match(text_nfc, e)
         if ok:
             return
@@ -3534,6 +3773,16 @@ def _progress(state, **kw):
     if _PROGRESS:
         try: _PROGRESS(state, **kw)
         except Exception as ex: log(f'progress hook failed: {ex!r}')
+def _send_buttons(e=None):
+    """Send buttons, looked up next to the composer first (a few dozen nodes), the whole document only as a fallback."""
+    want = ('Send', 'Send message', 'Submit')
+    sc = None
+    try: sc = _composer_scope(e) if e is not None else None
+    except Exception: sc = None
+    sb = find_all(sc, 'push button', lambda b: nm(b) in want) if sc is not None else []
+    if not sb:
+        d, _ = main_doc(); sb = find_all(d, 'push button', lambda b: nm(b) in want) if d is not None else []
+    return sb
 def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, force=False, stay=False, shot=None, dry_run=False, type_test=False, attachments=None, bot_name=None, attach_test=False, deadline_s=None, prepared_files=None, clear_leftovers=False):
     """attach_test (dry runs only): True/'cancel' types each path in the picker and Cancels; 'open' presses Open, waits
     for the chip, removes it with its own Remove button and checks the box is empty. Neither types the message or Sends.
@@ -3563,14 +3812,13 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                     raise AppError('a GTK Open Files chooser is open on the app display (left by a failed attach); a real send would dismiss it first. Nothing typed.')
                 if not _dismiss_open_files('pre-send'):
                     raise AppError('a GTK Open Files chooser is open on the app display and could not be closed; not sending')
-            before = read_messages(tid, 0); bmax = max([m['index'] for m in before], default=0)
-            e = composer()
+            before = read_messages(tid, 0); bmax = max([m['index'] for m in before], default=0); _mark('before_index')
+            e = composer(fresh=True); _mark('composer')
             if not e: raise AppError('composer (message box) not found on this page — the thread may still be loading, or a dialog is covering it; retry')
             draft = composer_text(e)
             if norm(draft): raise Refused(f'the message box already holds an unsent draft (maybe typed by {OPERATOR}); not overwriting it')
             chips0 = composer_chips()      # attachments already in the box: a real send never sends them along
-            d, _ = main_doc()
-            sb = [b for b in find_all(d, 'push button', lambda b: nm(b) in ('Send', 'Send message', 'Submit'))]
+            sb = _send_buttons(e) if dry_run else None
             att_info = locate_attach_control() if (files and dry_run) else None
             if dry_run and attach_mode == 'open':
                 if not files: raise ClaudeProjectsError('--attach-test=open needs --attach files')
@@ -3610,7 +3858,7 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 if files: attach_files(files, done=attached, deadline=dl, progress=_progress); e = composer() or e
                 dl.check('before typing'); _progress('typing', attached=len(attached), total=len(files))
                 if message: type_text(e, message)
-                dl.check('after typing')
+                _mark('typed'); dl.check('after typing')
                 got = composer_text(composer() or e)
                 if dry_run:
                     typed_ok, diff = send_text_diff(message, got)
@@ -3630,14 +3878,18 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 extra, missing = _extra_chips(composer_chips(), attached)
                 if extra: raise AppError(f'the message box holds attachment(s) this send did not add: {extra}; stopped before Send, nothing was sent')
                 if missing: raise AppError(f'attached file(s) {missing} are no longer in the message box; stopped before Send, nothing was sent')
-                d, _ = main_doc()
-                sb = [b for b in find_all(d, 'push button', lambda b: nm(b) in ('Send', 'Send message', 'Submit'))]
-                _progress('sending', attached=len(attached), total=len(files)); send_pressed = True
+                sb = _send_buttons(composer() or e); _mark('pre_send_checks')
+                _progress('sending', attached=len(attached), total=len(files), before_max=bmax); send_pressed = True
                 if sb: act(sb[-1], 'Send')
                 else: xdo('key', '--clearmodifiers', 'Return')
-                log(f'sent {len(message)} chars to {p["name"]} {tid or "primary"}: {message[:80]!r}')
-                _progress('verifying', attached=len(attached), total=len(files))
+                log(f'sent {len(message)} chars to {p["name"]} {tid or "primary"}: {message[:80]!r}'); _mark('send')
+                _progress('verifying', attached=len(attached), total=len(files), before_max=bmax)
                 m = _verify_sent(tid, message, bmax)
+                if m is None:                      # one more look after the page settles (long replies re-render the list)
+                    try: settle(tid, 15)
+                    except Exception: pass
+                    m = _verify_sent(tid, message, bmax, secs=20)
+                _mark('verify')
             except BaseException as ex:
                 if send_pressed: raise                     # it went out: never clear or retry after Send
                 rep = _cleanup_composer(attached)
@@ -3645,9 +3897,15 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 except Exception: pass
                 log(f'send to {p["name"]} {tid or "primary"} stopped before Send ({type(ex).__name__}: {ex}); cleanup {rep}')
                 raise
-            res = {'project': p['name'], 'project_id': chan, 'thread_id': tid or 'primary', 'sent': True, 'verified_in_transcript': bool(m), 'attached': [f['name'] for f in files] or None,
+            res = {'project': p['name'], 'project_id': chan, 'thread_id': tid or 'primary', 'sent': bool(m), 'verified_in_transcript': bool(m), 'attached': [f['name'] for f in files] or None,
                    'message_index': m['index'] if m else None, 'origin_header': message.split(chr(10), 1)[0], 'sent_at_local': ct(now().isoformat()), 'route': route(),
                    'cleared_leftovers': cleared, 'timing': tmr.as_dict()}
+            if not m:
+                lim = scan_service_limit()
+                res.update(unverified=True, send_pressed=True, before_max=bmax, service_limit=lim,
+                           warning=('Send was pressed but the message is NOT in the transcript: not confirmed as posted. Do not report it as sent '
+                                    'and do not resend it blindly; the send job re-checks the thread and says posted or not_posted.'))
+                log(f'UNVERIFIED send to {p["name"]} {tid or "primary"}: Send pressed, no matching new message after index {bmax}' + (f'; service limit shown: {lim}' if lim else ''))
             if shot: screenshot(shot)
         finally:
             if not (stay or wait): go_home()
@@ -3659,7 +3917,14 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
 SEND_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_SEND_BUDGET', '40'))
 SEND_DEADLINE = float(os.environ.get('CLAUDE_PROJECTS_SEND_DEADLINE', '420'))          # a whole send, enforced inside the job
 SEND_DEDUPE_WINDOW = float(os.environ.get('CLAUDE_PROJECTS_SEND_DEDUPE_S', '1800'))    # the same send again within this window joins the old job
-SEND_FINAL = ('sent', 'failed')
+SEND_FINAL = ('sent', 'failed', 'not_posted')
+SEND_RETRIES = int(os.environ.get('CLAUDE_PROJECTS_SEND_RETRIES', '2'))                  # extra attempts after a failure before Send
+SEND_RETRY_BACKOFF = (10.0, 30.0)                                                        # seconds before retry 1, 2 (x3 when a service limit shows)
+SEND_RETRY_WINDOW = float(os.environ.get('CLAUDE_PROJECTS_SEND_RETRY_WINDOW', '600'))    # no new attempt this long after the job began
+SEND_REVERIFY_DELAYS = (10.0, 30.0, 60.0)                                                # re-checks of the thread after an unverified Send
+def send_retryable(ex):
+    """A failure before Send that a later attempt can get past (app busy or slow, page not ready, picker slow)."""
+    return isinstance(ex, (AppError, Busy)) and not isinstance(ex, Refused)
 def send_job_key(chan, thread, message, files, idempotency_key=None):
     if idempotency_key: base = f'key|{chan}|{idempotency_key}'
     else:
@@ -3667,7 +3932,7 @@ def send_job_key(chan, thread, message, files, idempotency_key=None):
         base = f"{chan}|{norm(str(thread)).casefold() if thread else 'primary'}|{message}|{fs}"
     return 's' + hashlib.sha256(base.encode()).hexdigest()[:23]
 def _send_state_public(st):
-    out = {k: st.get(k) for k in ('job_id', 'state', 'step', 'attached', 'total', 'file', 'error', 'error_type', 'cleanup', 'project', 'thread_id') if st.get(k) is not None}
+    out = {k: st.get(k) for k in ('job_id', 'state', 'step', 'attached', 'total', 'file', 'error', 'error_type', 'cleanup', 'project', 'thread_id', 'attempts') if st.get(k) is not None}
     if st.get('started_ts'): out['started_at_local'] = ct(datetime.datetime.fromtimestamp(st['started_ts'], datetime.timezone.utc).isoformat())
     if st.get('finished_ts'): out['finished_at_local'] = ct(datetime.datetime.fromtimestamp(st['finished_ts'], datetime.timezone.utc).isoformat())
     if st.get('state') == 'attaching' and st.get('total'): out['progress'] = f"attaching {min(st.get('attached', 0) + 1, st['total'])}/{st['total']}"
@@ -3680,17 +3945,29 @@ def _send_answer(st, joined=False):
             r['note'] = (f'this send already went out (same message and files within {int(SEND_DEDUPE_WINDOW // 60)} min, or the same idempotency_key); '
                          'nothing was sent again. To send the same text again on purpose, pass a new idempotency_key.')
         return r
+    if st.get('state') == 'not_posted':
+        out = dict(_send_state_public(st), sent=False, failed=True, not_posted=True, posted=False)
+        out['note'] = ('NOT POSTED: Send was pressed but the message never appeared in the transcript after re-checks'
+                       + (f" (service limit shown: {st['service_limit']['text']!r})" if st.get('service_limit') else '') +
+                       '. Calling again with the same arguments first checks the thread and only types it if it is still missing.')
+        return out
     if st.get('state') == 'failed':
-        out = dict(_send_state_public(st), sent=False, failed=True)
-        out['note'] = 'nothing was sent' + ('; ' + st['cleanup_note'] if st.get('cleanup_note') else '') + '. Calling again starts a new attempt.'
+        out = dict(_send_state_public(st), sent=False, failed=True, posted=False)
+        out['note'] = 'nothing was sent' + ('; ' + st['cleanup_note'] if st.get('cleanup_note') else '') + \
+                      (f" after {st['attempts']} attempts" if (st.get('attempts') or 0) > 1 else '') + '. Calling again starts a new attempt.'
+        if st.get('service_limit'): out['service_limit'] = st['service_limit']
         return out
     extra = {}
     try:
         q = queue_entry_for(pid=st.get('pid'), job_id=st.get('job_id')) if st.get('job_id') else None
         if q: extra = {'queue_position': q['position'], 'eta_s': q['eta_s'], 'busy': f"busy, queued as job {st['job_id']}"}
     except Exception: pass
-    return dict(_send_state_public(st), **extra, pending=True, sent=False, retry_after_s=15,
-                note='still sending in the app; call claude_thread_send again with the same arguments (or job_id) for the result. '
+    if st.get('state') == 'unverified':
+        extra['warning'] = 'Send was pressed but the post is not confirmed yet; the job is re-checking the thread. NOT confirmed as sent.'
+    if st.get('state') == 'retry_wait':
+        extra['last_error'] = st.get('last_error'); extra['retry_in_s'] = st.get('retry_in_s')
+    return dict(_send_state_public(st), **extra, pending=True, sent=False, posted=False, retry_after_s=15,
+                note='NOT SENT YET: still sending in the app; call claude_thread_send again with the same arguments (or job_id) for the result. '
                      'It joins this send and never types or sends the message twice.')
 def op_send_job(project, message, thread=None, force=False, attachments=None, bot_name=None, budget=None, idempotency_key=None, job_id=None, clear_leftovers=False):
     """A send that answers within `budget` seconds: the send itself runs in a detached worker."""
@@ -3699,7 +3976,11 @@ def op_send_job(project, message, thread=None, force=False, attachments=None, bo
         st = job_read(SEND_JOBS, job_id)
         if not st: raise NotFound(f'no send job {job_id}')
         if st.get('state') not in SEND_FINAL and not job_running(SEND_JOBS, job_id):
-            st = dict(st, state='failed', error='the send job ended without a result (killed?)', error_type='AppError'); job_write(SEND_JOBS, job_id, st)
+            if st.get('state') in ('sending', 'verifying', 'unverified'):
+                st = dict(st, state='not_posted', error='the send job ended after Send was pressed and before the post was confirmed; check the thread',
+                          error_type='AppError')
+            else: st = dict(st, state='failed', error='the send job ended without a result (killed?)', error_type='AppError')
+            job_write(SEND_JOBS, job_id, st)
         return _send_answer(st)
     STAGE.maybe_sweep()
     files = prepare_attachment_files(attachments) if attachments else []
@@ -3714,8 +3995,11 @@ def op_send_job(project, message, thread=None, force=False, attachments=None, bo
         joined = False
         spec = {'project': chan, 'thread': thread, 'message': message, 'bot_name': bot_name, 'force': force, 'files': files, 'deadline_s': SEND_DEADLINE,
                 'clear_leftovers': bool(clear_leftovers)}
+        prior = {}
+        if st and st.get('state') in ('not_posted', 'unverified', 'sending', 'verifying'):
+            prior = {'check_existing': True, 'before_max': st.get('before_max'), 'first_started_ts': st.get('first_started_ts') or st.get('started_ts')}
         job_write(SEND_JOBS, key, {'job_id': key, 'state': 'queued', 'project': p['name'], 'thread_id': thread or 'primary', 'started_ts': t_start,
-                                   'total': len(files), 'attached': 0, 'spec': spec})
+                                   'total': len(files), 'attached': 0, 'spec': spec, **prior})
         how = spawn_job([*cfg_mod.module_argv('claude_projects'), '--json'] + (['--force'] if force else []) + ['send-job', key], f'send-{key[:8]}')
         log(f'send job {key} started for {p["name"]} {thread or "primary"} ({len(files)} file(s), {how})')
     while time.time() - t_start < budget:
@@ -3736,26 +4020,74 @@ def run_send_job(key):
         def prog(state, **kw):
             st.update(kw, state=state, step=state, updated_ts=time.time()); job_write(SEND_JOBS, key, st)
         _PROGRESS = prog; prog('starting')
-        try:
-            r = op_send(spec['project'], spec.get('message') or '', spec.get('thread'), force=spec.get('force', False), bot_name=spec.get('bot_name'),
-                        prepared_files=spec.get('files') or [], deadline_s=spec.get('deadline_s'), clear_leftovers=bool(spec.get('clear_leftovers')))
-            st.update(state='sent', step='sent', result=r)
-        except BaseException as ex:
-            rep = getattr(ex, 'cleanup', None)
-            if st.get('state') in ('sending', 'verifying'):   # Send was pressed: it went out, so it must never be retried
-                st.update(state='sent', step='sent', result={'project': st.get('project'), 'thread_id': st.get('thread_id'), 'sent': True, 'verified_in_transcript': False,
-                                                              'note': f'Send was pressed, then {type(ex).__name__}: {ex}; check the thread before sending again'})
-                st['finished_ts'] = time.time(); st.pop('spec', None); job_write(SEND_JOBS, key, st); log(f'send job {key}: sent, then {ex!r}')
-                return _send_answer(st)
-            st.update(state='failed', error=str(ex) or type(ex).__name__, error_type=type(ex).__name__, cleanup=rep,
-                      cleanup_note=(None if not rep else ('chips still in the composer: ' + ', '.join(rep['chips_left']) if rep.get('chips_left') else 'the composer was left clean')))
-            if isinstance(ex, (ClaudeProjectsError, Interrupted)): pass
-            else: log(f'send job {key} crashed: {ex!r}')
+        st.setdefault('first_started_ts', st.get('started_ts') or time.time())
+        _send_job_attempts(key, st, spec, prog)
         st['finished_ts'] = time.time(); st.pop('spec', None) if st.get('state') == 'sent' else None
-        job_write(SEND_JOBS, key, st); log(f"send job {key}: {st['state']} ({st.get('error') or ''})")
+        job_write(SEND_JOBS, key, st); log(f"send job {key}: {st['state']} ({st.get('error') or ''})" + (f" attempts={st.get('attempts')}" if (st.get('attempts') or 0) > 1 else ''))
         return _send_answer(st)
     finally:
         _PROGRESS = None; _LOCK_JOB_ID = None; job_unlock(f)
+def _since_utc(ts):
+    try: return datetime.datetime.fromtimestamp(float(ts) - 5, datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+    except Exception: return None
+def _mark_posted(st, m, how):
+    st.update(state='sent', step='sent', result={'project': st.get('project'), 'thread_id': st.get('thread_id'), 'sent': True, 'verified_in_transcript': True,
+                                                 'message_index': m.get('index'), 'found_by': how, 'sent_at_local': m.get('time_local') or ct(now().isoformat())})
+def _send_job_attempts(key, st, spec, prog):
+    """The send job's attempts. A failure before Send is retried (backoff 10 s, 30 s; longer while a service limit shows),
+    each retry preceded by a look for an existing post. After Send the post must show in the transcript: an unseen post
+    is re-checked (10, 30, 60 s) and ends 'sent' (seen, with its index) or 'not_posted' - never 'sent' unseen."""
+    msg_full = add_origin(spec.get('message') or '', spec.get('bot_name') if spec.get('bot_name') is not None else CFG.get('bot_name'))
+    t_job = time.time(); attempt = 0
+    def existing(where):
+        try: m = find_existing_post(spec['project'], spec.get('thread'), msg_full, st.get('before_max'), _since_utc(st.get('first_started_ts')), force=spec.get('force', False))
+        except BaseException as ex: log(f'send job {key}: post check ({where}) failed: {ex!r}'); return None
+        if m: log(f"send job {key}: found the post already in the thread ({where}) as #{m.get('index')}; not typing it again")
+        return m
+    if st.get('check_existing'):
+        m = existing('earlier attempt pressed Send')
+        if m: _mark_posted(st, m, 'post check before retry'); return
+    while True:
+        attempt += 1; st['attempts'] = attempt
+        try:
+            r = op_send(spec['project'], spec.get('message') or '', spec.get('thread'), force=spec.get('force', False), bot_name=spec.get('bot_name'),
+                        prepared_files=spec.get('files') or [], deadline_s=spec.get('deadline_s'), clear_leftovers=bool(spec.get('clear_leftovers')))
+        except BaseException as ex:
+            rep_ = getattr(ex, 'cleanup', None)
+            if st.get('state') in ('sending', 'verifying'):            # Send was pressed: never type it again; confirm it instead
+                log(f'send job {key}: Send pressed, then {ex!r}; checking the thread')
+                st['error_after_send'] = f'{type(ex).__name__}: {ex}'
+                _reverify(key, st, spec, msg_full, prog); return
+            st.update(error=str(ex) or type(ex).__name__, error_type=type(ex).__name__, cleanup=rep_,
+                      cleanup_note=(None if not rep_ else ('chips still in the composer: ' + ', '.join(rep_['chips_left']) if rep_.get('chips_left') else 'the composer was left clean')))
+            if not isinstance(ex, (ClaudeProjectsError, Interrupted)): log(f'send job {key} crashed: {ex!r}')
+            lim = service_limit_recent(600)
+            if lim: st['service_limit'] = lim
+            if send_retryable(ex) and attempt <= SEND_RETRIES and time.time() - t_job < SEND_RETRY_WINDOW:
+                wait = SEND_RETRY_BACKOFF[min(attempt - 1, len(SEND_RETRY_BACKOFF) - 1)] * (3 if lim else 1)
+                log(f'send job {key}: attempt {attempt} failed before Send ({type(ex).__name__}: {ex}); retrying in {wait:.0f} s')
+                prog('retry_wait', last_error=str(ex)[:300], retry_in_s=wait); time.sleep(wait)
+                m = existing(f'before retry {attempt}')
+                if m: _mark_posted(st, m, 'post check before retry'); return
+                continue
+            st.update(state='failed', step='failed'); return
+        if r.get('verified_in_transcript'):
+            st.update(state='sent', step='sent', result=r); st.pop('error', None); return
+        st['result_unverified'] = r; st['before_max'] = r.get('before_max', st.get('before_max'))
+        if r.get('service_limit'): st['service_limit'] = r['service_limit']
+        _reverify(key, st, spec, msg_full, prog); return
+def _reverify(key, st, spec, msg_full, prog):
+    prog('unverified')
+    for d in SEND_REVERIFY_DELAYS:
+        time.sleep(d)
+        try: m = find_existing_post(spec['project'], spec.get('thread'), msg_full, st.get('before_max'), _since_utc(st.get('first_started_ts')), force=spec.get('force', False))
+        except BaseException as ex: log(f'send job {key}: re-check failed: {ex!r}'); m = None
+        if m:
+            log(f"send job {key}: post confirmed on re-check as #{m.get('index')}"); _mark_posted(st, m, 're-check after Send'); return
+    lim = service_limit_recent(900)
+    if lim: st['service_limit'] = lim
+    st.update(state='not_posted', step='not_posted', error=st.get('error_after_send') or 'Send was pressed but the message never showed in the transcript', error_type='AppError')
+    log(f'send job {key}: NOT POSTED after re-checks ({sum(SEND_REVERIFY_DELAYS):.0f} s)')
 def op_wait(project, thread=None, after_index=None, timeout=600, poll=10, force=False, stay=False, shot=None, quiet_polls=2):
     """Poll the transcript until Claude has replied after `after_index` and is no longer working."""
     p = resolve_project(project); chan = p['id']; tid = resolve_thread(chan, thread)
@@ -4483,6 +4815,7 @@ def op_attention(projects=None, refresh=False, max_reads=2, budget_s=40.0, force
     global _BULK_CTX
     prev = _BULK_CTX; _BULK_CTX = True
     try: return _op_attention_impl(projects=projects, refresh=refresh, max_reads=max_reads, budget_s=budget_s, force=force)
+    except Preempted as ex: log(f'attention pass preempted: {ex}'); return {'preempted': str(ex), 'note': 'stopped to let a waiting op use the app; call again'}
     finally: _BULK_CTX = prev
 def _op_attention_impl(projects=None, refresh=False, max_reads=2, budget_s=40.0, force=False):
     """Everything that needs the user across Projects, in one pass: every thread (primary and child) in a 'Waiting on you'
@@ -4535,6 +4868,7 @@ def op_refresh(projects=None, background=False, max_projects=3, force=False):
     global _BULK_CTX
     prev = _BULK_CTX; _BULK_CTX = True
     try: return _op_refresh_impl(projects=projects, background=background, max_projects=max_projects, force=force)
+    except Preempted as ex: log(f'refresh preempted: {ex}'); return {'preempted': str(ex), 'note': 'stopped to let a waiting op use the app; the next refresh picks up'}
     finally: _BULK_CTX = prev
 def _op_refresh_impl(projects=None, background=False, max_projects=3, force=False):
     """Refresh the project list (opens Projects view) and re-read the primary thread of changed / named projects."""
@@ -4625,6 +4959,11 @@ def op_status():
     try: st['ui_queue'] = ui_queue_status()
     except Exception as ex: st['ui_queue'] = None; log(f'ui_queue_status failed: {ex!r}')
     st['busy'] = bool(holder) or bool(st['jobs_running']) or bool((st['ui_queue'] or {}).get('length'))   # deploys: restart only when this is false
+    q = st['ui_queue'] or {}
+    st['queue_depth'] = q.get('length', 0)
+    st['queue_oldest_wait_s'] = max([e.get('waited_s') or 0 for e in q.get('queue') or []], default=0)
+    st['queue_eta_last_s'] = (q.get('queue') or [{}])[-1].get('eta_s') if q.get('queue') else 0
+    st['service_limit'] = service_limit_recent()
     try: st['route'] = route(); st['dialogs'] = dialogs() or None; st['stray_open_files'] = len(_open_files_wids()) or None; st['signed_in'] = not re.search(r'/login|/oauth', st['route'] or '')
     except Exception as ex: st['app'] = f'not reachable: {ex}'
     try:
@@ -4754,7 +5093,7 @@ def main(argv=None):
     a = ap.parse_args(argv); F = dict(force=a.force)  # argv already hoisted
     import signal
     lim = int(os.environ.get('CLAUDE_PROJECTS_MAX_SECONDS', '0')) or ((getattr(a, 'timeout', 0) or 0) + 300 if a.cmd in ('send', 'wait') else 600)
-    if a.cmd == 'send-job': lim = int(SEND_DEADLINE + 120)        # the job enforces its own deadline; this is the backstop
+    if a.cmd == 'send-job': lim = int(SEND_DEADLINE + SEND_RETRY_WINDOW + sum(SEND_REVERIFY_DELAYS) + 400)   # attempts, backoff, re-checks; the backstop
     if a.cmd == 'permission-job': lim = int(PERM_LOCK_WAIT + 180)
     if a.cmd == 'card-watch': lim = int(a.duration + 180)
     def _alarm(*_): raise Interrupted(f'claude-projects watchdog: {a.cmd} exceeded {lim}s')
