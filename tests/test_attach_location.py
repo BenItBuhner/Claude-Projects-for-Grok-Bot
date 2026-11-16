@@ -24,6 +24,7 @@ class UI:
         return ''
 
 def wire(monkeypatch, ui, ocr=True):
+    monkeypatch.setattr(c.AttachCtx, 'ensure', lambda self: self)
     monkeypatch.setattr(c, 'xdo', ui.xdo)
     monkeypatch.setattr(c, '_open_attach_picker', lambda *a, **k: (setattr(ui, 'opened', ui.opened + 1), '42')[1])
     monkeypatch.setattr(c, '_active_win_name', lambda: 'Open Files')

@@ -35,7 +35,7 @@ def app(monkeypatch, files):
     monkeypatch.setattr(C, 'dialogs', lambda: None)
     monkeypatch.setattr(C, '_open_files_wids', lambda: [])
     monkeypatch.setattr(C, 'read_messages', lambda *x, **k: [])
-    monkeypatch.setattr(C, 'composer', lambda: 'composer')
+    monkeypatch.setattr(C, 'composer', lambda **kw: 'composer')
     monkeypatch.setattr(C, 'composer_text', lambda e: a.text)
     monkeypatch.setattr(C, 'main_doc', lambda: (None, ''))
     monkeypatch.setattr(C, 'find_all', lambda *x, **k: [])
@@ -246,8 +246,14 @@ def test_a_dead_lock_holder_is_not_busy(monkeypatch):
 
 @pytest.fixture
 def jobs(monkeypatch, tmp_path, files):
-    st = {'sends': 0, 'delay': 0.0, 'fail': None, 'after_send': None}
+    st = {'sends': 0, 'delay': 0.0, 'fail': None, 'after_send': None, 'existing': None, 'checks': 0, 'verified': True}
     monkeypatch.setattr(C, 'SEND_JOBS', tmp_path / 'send-jobs')
+    monkeypatch.setattr(C, 'SEND_RETRY_BACKOFF', (0.0, 0.0))
+    monkeypatch.setattr(C, 'SEND_REVERIFY_DELAYS', (0.0, 0.0))
+    monkeypatch.setattr(C, 'service_limit_recent', lambda *a, **k: None)
+    def existing(project, thread, message, before_max=None, since_utc=None, force=False):
+        st['checks'] += 1; return st['existing']
+    monkeypatch.setattr(C, 'find_existing_post', existing)
     monkeypatch.setattr(C, 'ATT_JOBS', tmp_path / 'att-jobs')
     monkeypatch.setattr(C.STAGE, 'maybe_sweep', lambda: None)
     monkeypatch.setattr(C, 'resolve_project', lambda q, snap=None: {'id': 'chan_E', 'name': 'Notes'})
@@ -259,6 +265,7 @@ def jobs(monkeypatch, tmp_path, files):
         if st['fail']: raise st['fail']
         C._progress('sending'); st['sends'] += 1
         if st['after_send']: raise st['after_send']
+        if not st['verified']: return {'sent': False, 'verified_in_transcript': False, 'unverified': True, 'message_index': None, 'before_max': 139}
         return {'sent': True, 'verified_in_transcript': True, 'message_index': 140, 'attached': [f['name'] for f in prepared_files or []]}
     monkeypatch.setattr(C, 'op_send', fake_send)
     threads = []
@@ -310,16 +317,44 @@ def test_failed_before_send_is_reported_and_can_be_retried(jobs, files):
     r = send(files, budget=5)
     assert r['failed'] and not r['sent'] and 'util.js' in r['error'] and r['error_type'] == 'AttachError'
     assert 'composer was left clean' in r['note'] and 'nothing was sent' in r['note']
+    assert r['attempts'] == 1 + C.SEND_RETRIES and jobs['checks'] == C.SEND_RETRIES, 'retried with a post check before each retry'
     jobs['fail'] = None
     assert send(files, budget=5)['sent'] and jobs['sends'] == 1
 
 
-def test_crash_after_send_is_never_retried(jobs, files):
+def test_crash_after_send_is_never_retried_and_never_reported_sent_unseen(jobs, files):
     jobs['after_send'] = C.AppError('transcript did not load')
     r = send(files, budget=5)
-    assert r['sent'] and r['verified_in_transcript'] is False and 'check the thread' in r['note']
-    jobs['after_send'] = None
-    assert send(files, budget=5)['joined_existing_send'] and jobs['sends'] == 1
+    assert not r['sent'] and r['not_posted'] and r['posted'] is False and 'NOT POSTED' in r['note'] and jobs['sends'] == 1
+    assert jobs['checks'] == len(C.SEND_REVERIFY_DELAYS), 're-checked the thread, did not type it again'
+    # the caller calls again: the earlier post shows up now, so the new attempt finds it and types nothing
+    jobs['after_send'] = None; jobs['existing'] = {'index': 141, 'role': 'user', 'time_local': 'x'}
+    again = send(files, budget=5)
+    assert again['sent'] and again['verified_in_transcript'] and again['message_index'] == 141 and jobs['sends'] == 1
+
+
+def test_unverified_send_is_confirmed_on_recheck(jobs, files):
+    jobs['verified'] = False; jobs['existing'] = {'index': 140, 'role': 'user'}
+    r = send(files, budget=5)
+    assert r['sent'] and r['verified_in_transcript'] and r['message_index'] == 140 and r['found_by'] == 're-check after Send'
+
+
+def test_unverified_send_that_never_shows_is_not_posted(jobs, files):
+    jobs['verified'] = False
+    r = send(files, budget=5)
+    assert not r['sent'] and r['not_posted'] and jobs['sends'] == 1 and jobs['checks'] == len(C.SEND_REVERIFY_DELAYS)
+
+
+def test_refused_is_not_retried(jobs, files):
+    jobs['fail'] = C.Refused('the message box already holds an unsent draft')
+    r = send(files, budget=5)
+    assert r['failed'] and r.get('attempts') == 1 and jobs['checks'] == 0
+
+
+def test_retry_finds_existing_post_and_stops(jobs, files):
+    jobs['fail'] = C.AppError('transcript panel not found'); jobs['existing'] = {'index': 150, 'role': 'user'}
+    r = send(files, budget=5)
+    assert r['sent'] and r['message_index'] == 150 and r['found_by'] == 'post check before retry' and jobs['sends'] == 0
 
 
 def test_running_send_counts_as_busy(jobs, files):

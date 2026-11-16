@@ -93,12 +93,15 @@ def test_refresh_fetches_again(jobs):
     assert r['available'] and not r.get('cached') and jobs['calls'] == 2
 
 
-def test_not_available_is_answered_once_not_cached(jobs):
+def test_not_available_is_cached_so_bots_do_not_refetch(jobs):
+    # 1.0.5: a missing Download button is remembered (ATT_NEG_TTL) instead of re-running a 2-5 min UI fetch per retry
     jobs['available'] = False
     r = get(budget=5)
     assert r['available'] is False and r['failed_steps'] == ['x'] and not r.get('pending')
+    r2 = get(budget=5)
+    assert r2['available'] is False and 'cache' in (r2.get('note') or '').lower() and jobs['calls'] == 1
     jobs['available'] = True
-    assert get(budget=5)['available'] and jobs['calls'] == 2
+    assert get(budget=5, refresh=True)['available'] and jobs['calls'] == 2
 
 
 def test_errors_reach_the_caller(jobs):
