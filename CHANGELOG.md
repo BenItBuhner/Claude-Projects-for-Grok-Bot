@@ -2,6 +2,20 @@
 
 ## 1.0.7 (2026-11-16)
 
+### Never posted twice, and a broken Python is named
+- A retried send whose earlier attempt pressed Send types again only when the post check ran and found nothing. A
+  check that fails (busy app, thread not found, interrupted) used to count as "not there", so the message was typed a
+  second time. Now the job stops without typing, stays `not_posted`, and the next retry checks again.
+- The post check opens a thread given by title even when the cached sidebar doesn't list it yet (it looks the title up
+  live, as the send does). Before, every check of such a send failed, so it always ended `not_posted`.
+- A send with `wait=true` answers with the send's result when the wait stops after Send (Busy, or Refused while a
+  viewer watches): `reply.wait_error` says what stopped it and to call `claude_thread_wait`. Before, a Busy there exited
+  with code 3 and the MCP layer reran the whole send.
+- An MCP call over its timeout gets SIGTERM, then SIGKILL after 10 s, and is reaped. Before, it only got SIGTERM.
+- install.sh makes the Python environment from /usr/bin/python3 (python3-gi is built for it only) and stops with a
+  clear message when the environment can't load the AT-SPI bindings. `setup verify` has an `atspi` check. A pyenv,
+  conda or Homebrew python3 on PATH used to give an install where the app only showed as "not reachable".
+
 ### Sends report what really happened
 - A long post that the app shows collapsed (only its first line, then "Show more") now counts as posted. The visible
   part, from the origin bracket on, must be the start of the sent text, at a new message index. Before, such sends were

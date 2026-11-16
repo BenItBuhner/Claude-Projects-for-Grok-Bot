@@ -251,7 +251,9 @@ def jobs(monkeypatch, tmp_path, files):
     monkeypatch.setattr(C, 'SEND_REVERIFY_DELAYS', (0.0, 0.0))
     monkeypatch.setattr(C, 'service_limit_recent', lambda *a, **k: None)
     def existing(project, thread, message, before_max=None, since_utc=None, force=False):
-        st['checks'] += 1; return st['existing']
+        st['checks'] += 1
+        if isinstance(st['existing'], BaseException): raise st['existing']
+        return st['existing']
     monkeypatch.setattr(C, 'find_existing_post', existing)
     monkeypatch.setattr(C, 'ATT_JOBS', tmp_path / 'att-jobs')
     monkeypatch.setattr(C.STAGE, 'maybe_sweep', lambda: None)
@@ -354,6 +356,50 @@ def test_retry_finds_existing_post_and_stops(jobs, files):
     jobs['fail'] = C.AppError('transcript panel not found'); jobs['existing'] = {'index': 150, 'role': 'user'}
     r = send(files, budget=5)
     assert r['sent'] and r['message_index'] == 150 and r['found_by'] == 'post check before retry' and jobs['sends'] == 0
+
+
+def test_retry_after_send_never_types_when_the_post_check_fails(jobs, files):
+    # an earlier attempt pressed Send and was never seen; on the retry the check itself fails (busy app, thread not
+    # found): that proves nothing, so the job must not type the message again
+    jobs['after_send'] = C.AppError('transcript did not load')
+    assert send(files, budget=5)['not_posted'] and jobs['sends'] == 1
+    jobs['after_send'] = None; jobs['existing'] = C.Busy('the app is busy (held by a read)')
+    again = send(files, budget=5)
+    assert again['not_posted'] and not again['sent'] and jobs['sends'] == 1, 'typed again although the check failed'
+    assert 'check for that post failed' in again['error'] and 'Nothing was typed' in again['error']
+    # the next retry checks again; this time the check runs and finds nothing, so it is sent once more
+    jobs['existing'] = None
+    third = send(files, budget=5)
+    assert third['sent'] and jobs['sends'] == 2
+
+
+def test_post_check_resolves_a_thread_given_by_title(monkeypatch):
+    opened = []
+    monkeypatch.setattr(C, 'log', lambda *x, **k: None)
+    monkeypatch.setattr(C, 'resolve_project', lambda q, snap=None: {'id': 'chan_E', 'name': 'Notes'})
+    monkeypatch.setattr(C, 'resolve_thread', lambda chan, q, threads=None: 'LOOKUP:' + q)
+    monkeypatch.setattr(C, 'read_cache', lambda *a, **k: (_ for _ in ()).throw(AssertionError('no cache for a LOOKUP id')))
+    monkeypatch.setattr(C, '_resolve_tid', lambda p, chan, thread: 'cmsg_found')
+    monkeypatch.setattr(C, 'ui_lock', lambda *x, **k: contextlib.nullcontext())
+    monkeypatch.setattr(C, 'open_target', lambda chan, tid: opened.append(tid))
+    monkeypatch.setattr(C, 'settle', lambda *a, **k: None)
+    monkeypatch.setattr(C, 'go_home', lambda: None)
+    msg = C.add_origin('hello there', None)
+    monkeypatch.setattr(C, 'read_messages', lambda tid, *a, **k: [{'index': 9, 'role': 'user', 'text': msg}])
+    m = C.find_existing_post('Notes', 'Fix the docs', msg, before_max=8)
+    assert opened == ['cmsg_found'] and m and m['index'] == 9
+
+
+@pytest.mark.parametrize('err', [C.Busy('UI lock held by a read for 600 s'), C.Refused('a viewer is connected')])
+def test_send_with_wait_answers_sent_when_the_wait_stops(app, monkeypatch, err):
+    """Send was pressed; an error from the wait must not escape: Busy exits with code 3, and the MCP layer reruns the
+    whole send on Busy, which would post it twice."""
+    def fake_wait(*a, **k): raise err
+    monkeypatch.setattr(C, 'op_wait', fake_wait)
+    r = C.op_send('Notes', 'run the tests', wait=True)
+    assert r['sent'] and r['message_index'] == 7 and app.sent == 1
+    assert r['reply']['done'] is False and r['reply']['wait_error'] == type(err).__name__
+    assert 'Do not send it again' in r['reply']['note'] and 'after_index=7' in r['reply']['note']
 
 
 def test_running_send_counts_as_busy(jobs, files):

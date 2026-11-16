@@ -116,3 +116,18 @@ def test_send_attach_test_open_and_clear_leftovers(monkeypatch):
     assert '--attach-test=open' in seen['args']
     asyncio.run(M.claude_thread_send('Demo', 'x', clear_leftovers=True))
     assert '--clear-leftovers' in seen['args'] and '--budget' in seen['args']
+
+
+def test_timed_out_call_stops_and_reaps_the_cli(monkeypatch, tmp_path):
+    """A call over its timeout gets SIGTERM, then SIGKILL if it ignores that, and is reaped: no process keeps the UI lock."""
+    pidf = tmp_path / 'pid'
+    stub = tmp_path / 'cli'
+    stub.write_text(f"#!/bin/sh\necho $$ > {pidf}\ntrap '' TERM\nwhile :; do sleep 0.1; done\n"); stub.chmod(0o755)
+    monkeypatch.setattr(M, 'CLI', str(stub))
+    orig = M._stop_child
+    monkeypatch.setattr(M, '_stop_child', lambda p, grace=10.0: orig(p, grace=0.5))
+    r = asyncio.run(M.run(['status'], timeout=0.5))
+    assert r['error'] == 'Timeout'
+    import os
+    pid = int(pidf.read_text())
+    with pytest.raises(ProcessLookupError): os.kill(pid, 0)

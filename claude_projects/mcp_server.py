@@ -72,6 +72,18 @@ PERMISSION_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_PERMISSION_BUDGET', '4
 READ_LOCK_WAIT = float(os.environ.get('CLAUDE_PROJECTS_READ_LOCK_WAIT', '35'))   # a live read queues this long, then answers busy
 
 
+async def _stop_child(p, grace=10.0):
+    """SIGTERM (the CLI cleans up and releases the UI lock on it), then SIGKILL if it hasn't exited after grace
+    seconds, and reap it either way, so a timed-out call never leaves a process holding the lock or a zombie."""
+    try: p.terminate()
+    except ProcessLookupError: return
+    try: await asyncio.wait_for(p.wait(), grace)
+    except asyncio.TimeoutError:
+        try: p.kill()
+        except ProcessLookupError: return
+        await p.wait()
+
+
 async def run(args, timeout=900, msg=None, attach=None, busy_budget=None):
     """Run claude-projects --json. On Busy (code 3 / holder), auto-retry with 2..15s backoff until busy_budget
     (default 900s; wait tools pass their own timeout). Each attempt keeps the original subprocess timeout."""
@@ -91,7 +103,8 @@ async def run(args, timeout=900, msg=None, attach=None, busy_budget=None):
             p = await asyncio.create_subprocess_exec(CLI, '--json', *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             try: out, err = await asyncio.wait_for(p.communicate(), timeout)
             except asyncio.TimeoutError:
-                p.terminate(); return {'error': 'Timeout', 'message': f'claude-projects did not finish in {timeout}s', 'busy_retries': attempt - 1}
+                await _stop_child(p)
+                return {'error': 'Timeout', 'message': f'claude-projects did not finish in {timeout}s', 'busy_retries': attempt - 1}
             raw = out.decode() if out else ''
             err_txt = err.decode() if err else ''
             for line in err_txt.splitlines():

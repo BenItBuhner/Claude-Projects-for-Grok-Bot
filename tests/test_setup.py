@@ -478,3 +478,29 @@ def test_install_picks_a_browser_deb_that_exists(tmp_path):
     sh = (REPO / 'install.sh').read_text()
     assert 'firefox-esr || run' not in sh, 'no blind apt install that prints "no installation candidate"'
     assert '"$BROWSER_PKG"' in sh and 'snap install chromium' in sh
+
+
+# ---------------------------------------------------------------- AT-SPI bindings in the plugin's Python
+
+def test_atspi_check_passes_when_the_bindings_load(env, monkeypatch):
+    seen = []
+    monkeypatch.setattr(S, 'RUN', lambda cmd, timeout=60, env=None, input=None: (seen.append(cmd), (0, '', ''))[1])
+    c = S.atspi_check()
+    assert c['id'] == 'atspi' and c['status'] == 'pass'
+    assert seen and seen[0][1:] == ['-c', S.ATSPI_IMPORT]
+
+
+def test_atspi_check_names_the_python_problem_not_the_desktop_service(env, monkeypatch):
+    err = "Traceback (most recent call last):\nImportError: cannot import name '_gi' from partially initialized module 'gi'"
+    monkeypatch.setattr(S, 'RUN', lambda cmd, timeout=60, env=None, input=None: (1, '', err))
+    c = S.atspi_check()
+    assert c['status'] == 'fail' and "cannot import name '_gi'" in c['detail']
+    assert 'python3-gi' in c['fix'] and '/usr/bin/python3' in c['fix'] and 'desktop' not in c['fix']
+
+
+def test_install_builds_the_venv_from_the_system_python_and_checks_atspi():
+    src = (REPO / 'install.sh').read_text()
+    assert 'VENV_PY=/usr/bin/python3' in src
+    assert 'run "$VENV_PY" -m venv --system-site-packages' in src
+    assert 'run python3 -m venv' not in src
+    assert "from gi.repository import Atspi" in src and 'exit 1' in src.split('from gi.repository import Atspi', 1)[1][:800]

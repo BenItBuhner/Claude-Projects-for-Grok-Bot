@@ -3687,11 +3687,14 @@ def find_existing_post(project, thread, message, before_max=None, since_utc=None
     """Look in the thread (live read, no typing) for a user message that is this send's post. -> message or None.
     Used before any retry and after an unverified Send, so a message is never posted twice."""
     p = resolve_project(project); chan = p['id']; tid = resolve_thread(chan, thread)
-    cached = read_cache(chan, tid) or {}
-    for m in reversed(cached.get('messages') or []):
+    cached = read_cache(chan, tid) if not (tid and str(tid).startswith('LOOKUP:')) else None
+    for m in reversed((cached or {}).get('messages') or []):
         if post_matches(m, message, before_max, since_utc): return m
     with ui_lock(f'verify {p["name"]} {thread or "primary"} (post check)', force):
         try:
+            # a thread given by title that the cached sidebar doesn't list yet: look it up live, as op_send does
+            # (open_target can't open 'LOOKUP:<title>', so every check of such a send used to fail)
+            if tid and str(tid).startswith('LOOKUP:'): tid = _resolve_tid(p, chan, thread)
             open_target(chan, tid); settle(tid)
             for m in reversed(read_messages(tid, 0 if before_max is not None else 12, min_index=before_max, head_chars=VERIFY_HEAD_CHARS)):
                 if post_matches(m, message, before_max, since_utc): return m
@@ -4154,8 +4157,15 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
         finally:
             if not (stay or wait): go_home()
     if wait:
-        w = op_wait(p['id'], tid, after_index=res['message_index'] or bmax, timeout=timeout, poll=poll, force=force, stay=stay, shot=shot)
-        res['reply'] = w
+        # Send was pressed: whatever the wait does now, this call has to answer with the send's result. Raising here
+        # (Busy after the lock wait, Refused while a viewer watches) exits non-zero, and the MCP layer retries Busy
+        # by running the whole send again: a second post.
+        try: res['reply'] = op_wait(p['id'], tid, after_index=res['message_index'] or bmax, timeout=timeout, poll=poll, force=force, stay=stay, shot=shot)
+        except ClaudeProjectsError as ex:
+            log(f'send to {p["name"]} {tid or "primary"}: sent, then the wait stopped ({type(ex).__name__}: {ex})')
+            res['reply'] = {'done': False, 'wait_error': type(ex).__name__, 'message': str(ex),
+                            'note': 'The message was sent; only the wait stopped. Do not send it again: call claude_thread_wait with '
+                                    f'after_index={res["message_index"] or bmax}.'}
     return res
 # ---- sends as background jobs: the MCP tool answers within its budget; a retry joins the job and never sends twice
 SEND_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_SEND_BUDGET', '40'))
@@ -4288,13 +4298,24 @@ def _send_job_attempts(key, st, spec, prog):
     is re-checked (10, 30, 60 s) and ends 'sent' (seen, with its index) or 'not_posted' - never 'sent' unseen."""
     msg_full = add_origin(spec.get('message') or '', spec.get('bot_name') if spec.get('bot_name') is not None else CFG.get('bot_name'))
     t_job = time.time(); attempt = 0
-    def existing(where):
+    def existing(where, strict=False):
         try: m = find_existing_post(spec['project'], spec.get('thread'), msg_full, st.get('before_max'), _since_utc(st.get('first_started_ts')), force=spec.get('force', False))
-        except BaseException as ex: log(f'send job {key}: post check ({where}) failed: {ex!r}'); return None
+        except BaseException as ex:
+            log(f'send job {key}: post check ({where}) failed: {ex!r}')
+            if strict: raise
+            return None
         if m: log(f"send job {key}: found the post already in the thread ({where}) as #{m.get('index')}; not typing it again")
         return m
     if st.get('check_existing'):
-        m = existing('earlier attempt pressed Send')
+        # An earlier attempt pressed Send. Type it again only when a post check ran and found nothing: a check that
+        # failed (busy app, thread not found, interrupted) proves nothing, so the job stops without typing and stays
+        # not_posted, and the next retry checks again.
+        try: m = existing('earlier attempt pressed Send', strict=True)
+        except BaseException as ex:
+            st.update(state='not_posted', step='not_posted', error_type='AppError', check_failed=True,
+                      error=f'An earlier attempt pressed Send and the check for that post failed ({type(ex).__name__}: {ex}). '
+                            'Nothing was typed, so it is not posted twice. Retry the same send later to check again.')
+            return
         if m: _mark_posted(st, m, 'post check before retry'); return
     while True:
         attempt += 1; st['attempts'] = attempt
