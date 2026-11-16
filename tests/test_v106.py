@@ -77,11 +77,12 @@ def test_reuse_is_off_for_expand(monkeypatch):
     msgs = c.read_messages(None, 2, expand=True, reuse={3: {'index': 3, 'text': 'old'}})
     assert all(m['text'] == 'fresh' for m in msgs)
 
-def test_card_scan_tail_only_covers_last_three_messages():
+def test_card_scan_tail_only_covers_last_two_messages(monkeypatch):
+    monkeypatch.setattr(c, '_PANEL_PASS', {})
     p = N('panel', 'Chat messages', [N('article', f'Message {i}', [N('push button', f'Allow {i}')]) for i in range(1, 8)] + [N('push button', 'Deny tail')])
     d = N('document web', '', [p, N('dialog', 'x', [N('push button', 'Outside')])])
     names = [e.name for e in c._card_scan_nodes(d, True)]
-    assert 'Allow 7' in names and 'Allow 5' in names and 'Allow 4' not in names and 'Deny tail' in names and 'Outside' in names
+    assert 'Allow 7' in names and 'Allow 6' in names and 'Allow 5' not in names and 'Deny tail' in names and 'Outside' in names
     assert 'Allow 1' in [e.name for e in c._card_scan_nodes(d, False)], 'presses and the watcher keep the full scan'
 
 def test_preempt_refires_until_released(monkeypatch):
@@ -171,3 +172,15 @@ def test_go_home_skipped_when_preempted(monkeypatch):
     monkeypatch.setattr(c, '_PREEMPT', {'armed': True, 'off': False, 'fired': 1})
     monkeypatch.setattr(c, 'route', lambda: (_ for _ in ()).throw(AssertionError('no navigation')))
     assert c.go_home() is False
+
+def test_card_scan_reuses_busy_pass(monkeypatch):
+    panel = object(); a1, a2, a3 = object(), object(), object()
+    monkeypatch.setattr(c, '_PANEL_PASS', {'panel': panel, 'arts': [a1, a2, a3], 'nodes': [a1, a2, a3], 'ts': time.time()})
+    monkeypatch.setattr(c, 'is_transcript_panel', lambda e: e is panel)
+    monkeypatch.setattr(c, 'walk_pruned', lambda *a, **k: (_ for _ in ()).throw(AssertionError('panel walked again')))
+    idx = {id(a1): 1, id(a2): 2, id(a3): 3}
+    monkeypatch.setattr(c, 'article_index', lambda a: idx[id(a)])
+    walked = []
+    monkeypatch.setattr(c, 'walk', lambda a, *x, **k: (walked.append(idx[id(a)]), iter([]))[1])
+    list(c._card_scan_nodes(None, True, snap=[(panel, 'section', 'Messages')]))
+    assert walked == [2, 3]

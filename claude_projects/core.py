@@ -1174,6 +1174,7 @@ def app_time_local(times):
             try: return ct(datetime.datetime.strptime(dm.group(1) + ' ' + m.group(1) + m.group(2), '%B %d, %Y %I:%M%p').replace(tzinfo=APP_TZ).isoformat())
             except Exception: pass
     return None
+_PANEL_PASS = {}   # the last pruned transcript pass (busy_state), reused by the read's card scan a moment later
 def busy_state(thread=None, snap=None):
     """True if Claude is visibly still responding in the open transcript (Stop button, or a working indicator after the last message)."""
     d, _ = main_doc()
@@ -1188,10 +1189,13 @@ def busy_state(thread=None, snap=None):
         k = id(e)
         if k not in seen: seen[k] = is_message_article(e)
         return seen[k]
+    arts, nodes = [], []
     for e in walk_pruned(p, art, 20000):
-        if art(e): tail = []; continue
+        nodes.append(e)
+        if art(e): arts.append(e); tail = []; continue
         if role(e) in ('static', 'status bar', 'progress bar'):
             tail.append(text_of(e).strip())
+    _PANEL_PASS.update(panel=p, arts=arts, nodes=nodes, ts=time.time())
     return any(re.match(r'^(Thinking|Working|Claude is (thinking|working)|Responding|Running .*)…?\.{0,3}$', t) for t in tail)
 def pane_info(thread, snap=None):
     d, _ = main_doc(); info = {}
@@ -2859,6 +2863,10 @@ def _snapshot_subtree(root, maxn=3000):
         nodes.append({'id': nid, 'parent': par, 'role': r, 'name': name[:500], 'text': t}); objs[nid] = e
         for c in reversed(kids(e)): st.append((c, nid))
     return nodes, objs
+def _same_node(a, b):
+    if a is b: return True
+    try: return a == b
+    except Exception: return False
 def _card_scan_nodes(d, tail_only, snap=None):
     if not tail_only: yield from walk(d, 30000, max_s=8); return
     panels = []
@@ -2866,14 +2874,19 @@ def _card_scan_nodes(d, tail_only, snap=None):
         if is_transcript_panel(e): panels.append(e)
         yield e
     for p in panels:
-        arts = []
-        for e in walk_pruned(p, is_message_article, 20000, max_s=4):
-            if is_message_article(e): arts.append(e)
-            yield e
-        for a in sorted(arts, key=article_index)[-3:]: yield from walk(a, 4000, max_s=3)
+        pp = _PANEL_PASS
+        if pp.get('panel') is not None and time.time() - pp.get('ts', 0) < 10 and _same_node(pp['panel'], p):
+            arts = list(pp['arts']); yield from pp['nodes']
+        else:
+            arts = []
+            for e in walk_pruned(p, is_message_article, 20000, max_s=4):
+                if is_message_article(e): arts.append(e)
+                yield e
+        # a pending card belongs to the latest message; two covers a trailing status/user echo
+        for a in sorted(arts, key=article_index)[-2:]: yield from walk(a, 4000, max_s=3)
 def detect_permission_cards(max_up=6, with_objs=False, tail_only=False, snap=None):
     """Read-only: find permission cards in the open page. Cheap when there are none (one role/name pass).
-    tail_only (reads): skip the bodies of all but the last 3 messages, where a pending card always is. Card presses
+    tail_only (reads): skip the bodies of all but the last 2 messages, where a pending card always is. Card presses
     and the watcher keep the full scan."""
     d, _ = main_doc()
     if not d: return ([], {}) if with_objs else []

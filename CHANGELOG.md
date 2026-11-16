@@ -12,7 +12,7 @@
 - The transcript panel and the message box are remembered while they are alive on the same route.
 - Reads parse only the messages they return. Finished messages are reused from the last read (everything before that
   read's latest message, unless the app cut it short). Expand, images and markdown always parse fresh.
-- Permission cards on reads are looked for outside the transcript and in its last 3 messages. Card presses and the
+- Permission cards on reads are looked for outside the transcript and in its last 2 messages. Card presses and the
   card watcher keep the full scan.
 - Sends get the last message number without parsing anything. Verify and the post check parse only the messages after
   it.
@@ -37,7 +37,8 @@
   single-flight file lock keyed by project, thread and read options). Joiners get the same answer, stamped
   `coalesced`, or the same error. Reads with different options never share.
 - The thread list is found and parsed without walking the transcripts (it took 32.5 s on a long Project).
-- The Stop check after the last message is one pruned pass (it took 14.3 s).
+- The Stop check after the last message is one pruned pass (it took 14.3 s). The read's card scan reuses that pass
+  rather than walking the transcript again (cards took 16.5 s on a thread read).
 - A background read gives way to a waiting send or read as soon as its messages are in, rather than finishing threads
   and cards first. It does not give way to other bulk work.
 - A preempted bulk op skips its trip back to the home page.
