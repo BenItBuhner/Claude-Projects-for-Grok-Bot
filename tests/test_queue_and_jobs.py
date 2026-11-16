@@ -118,11 +118,11 @@ def _perm_env(monkeypatch, tmp_path, worker_result=None, worker_delay=0.0):
 def test_permission_job_answers_within_budget_when_the_app_is_busy(monkeypatch, tmp_path, clean_queue):
     started = _perm_env(monkeypatch, tmp_path)
     t0 = time.time()
-    r = C.op_permission_job('Demo', 'Allow for this session', 'cmsg_T', dry_run=False, only_apps=['Ephemeris', 'Notepad'], budget=1.0)
+    r = C.op_permission_job('Demo', 'Allow for this session', 'cmsg_T', dry_run=False, only_apps=['Sketchpad', 'Notepad'], budget=1.0)
     assert time.time() - t0 < 3 and r['pending'] and r['pressed'] is None and r['job_id'] == started[0]
     assert r['diagnostics_file'].endswith(f"{r['job_id']}.diag.json")
     # the same call again joins the queued job instead of starting a second one
-    r2 = C.op_permission_job('Demo', 'Allow for this session', 'cmsg_T', dry_run=False, only_apps=['Ephemeris', 'Notepad'], budget=0.5)
+    r2 = C.op_permission_job('Demo', 'Allow for this session', 'cmsg_T', dry_run=False, only_apps=['Sketchpad', 'Notepad'], budget=0.5)
     assert r2['job_id'] == r['job_id'] and len(started) == 1
 
 

@@ -88,7 +88,7 @@ def _env(monkeypatch, nodes, take_on_continue, on_this_desktop=True, button_stat
     return state
 
 
-def probe_card(device='BennettsPC'):
+def probe_card(device='Desktop-PC'):
     """The enable step as a desktop that is not the controlled computer shows it."""
     rows = [(0, None, 'section', ''), (1, 0, 'status bar', ''), (2, 1, 'static', 'Claude wants to use your computer. Choose an option to respond.'),
             (3, 0, 'section', ''), (4, 3, 'heading', 'Claude wants to use your computer'),
@@ -126,24 +126,24 @@ def test_still_showing_is_reported_not_hidden(monkeypatch):
     assert r['card_gone'] is False and 'still showing' in r['warning'] and 'diagnostics' in r
 
 
-def test_replay_perm_fd74f1c4d2_real_click_from_other_desktop(monkeypatch):
+def test_replay_apps_card_real_click_from_other_desktop(monkeypatch):
     st = _env(monkeypatch, desktop_card(), take_on_continue=False, on_this_desktop=False)
-    assert st['cards'][0]['card_id'] == 'perm_fd74f1c4d2'
+    assert st['cards'][0]['card_id'] == 'perm_27ea95c718'
     r = C.op_permission('Demo', 'Allow for this session', 'cmsg_T', dry_run=False)
     assert r['card_gone'] and r['pressed_with'] == 'click'
 
 
 def test_only_apps_refuses_extra_apps(monkeypatch):
     st = _env(monkeypatch, desktop_card(), take_on_continue=False)
-    r = C.op_permission('Demo', 'Allow for this session', 'cmsg_T', dry_run=False, only_apps=['Ephemeris'])
+    r = C.op_permission('Demo', 'Allow for this session', 'cmsg_T', dry_run=False, only_apps=['Sketchpad'])
     assert st['pressed'] == [] and r['refused'] == 'apps_not_allowed' and r['apps_outside'] == ['Notepad']
-    r = C.op_permission('Demo', 'Allow for this session', 'cmsg_T', dry_run=False, only_apps=['ephemeris.exe', 'notepad'])
+    r = C.op_permission('Demo', 'Allow for this session', 'cmsg_T', dry_run=False, only_apps=['sketchpad.exe', 'notepad'])
     assert st['pressed'] == ['Allow for this session'] and r['card_gone']
 
 
 def test_lasting_grant_is_refused(monkeypatch):
     st = _env(monkeypatch, desktop_card('Always allow'), take_on_continue=False)
-    r = C.op_permission('Demo', 'Always allow', 'cmsg_T', dry_run=False, only_apps=['Ephemeris', 'Notepad'])
+    r = C.op_permission('Demo', 'Always allow', 'cmsg_T', dry_run=False, only_apps=['Sketchpad', 'Notepad'])
     assert st['pressed'] == [] and r['refused'] == 'lasting_grant'
 
 
@@ -156,18 +156,18 @@ def test_disabled_button_is_not_pressed(monkeypatch):
 def test_probe_card_continue_is_pressable_from_another_desktop(monkeypatch):
     st = _env(monkeypatch, probe_card(), take_on_continue=False, on_this_desktop=False)
     c = st['cards'][0]
-    assert c['type'] == 'computer_use' and c['cu_kind'] == 'probe' and c['device'] == 'BennettsPC' and c['options'] == ['Deny', 'Continue']
+    assert c['type'] == 'computer_use' and c['cu_kind'] == 'probe' and c['device'] == 'Desktop-PC' and c['options'] == ['Deny', 'Continue']
     called = []
     monkeypatch.setattr(C, '_finish_computer_use_allow', lambda wait_s=4.0: called.append(1) or [])
-    r = C.op_permission('Demo', 'Continue', 'cmsg_T', dry_run=False, only_apps=['Ephemeris', 'Notepad'])
+    r = C.op_permission('Demo', 'Continue', 'cmsg_T', dry_run=False, only_apps=['Sketchpad', 'Notepad'])
     assert st['pressed'] == ['Continue'] and r['card_gone'] and called == [] and r['computer_use_kind'] == 'probe'
 
 
 def test_card_watch_presses_only_allowlisted(monkeypatch, tmp_path):
     st = _env(monkeypatch, desktop_card(), take_on_continue=False)
     monkeypatch.setattr(C, 'CARD_WATCH_LOG', tmp_path / 'w.jsonl')
-    acts = C.card_watch_once('chan_TEST', 'cmsg_T', ['Ephemeris'])
+    acts = C.card_watch_once('chan_TEST', 'cmsg_T', ['Sketchpad'])
     assert st['pressed'] == [] and acts[0]['action'] == 'left' and acts[0]['refused'] == 'apps_not_allowed'
-    acts = C.card_watch_once('chan_TEST', 'cmsg_T', ['Ephemeris', 'Notepad'])
+    acts = C.card_watch_once('chan_TEST', 'cmsg_T', ['Sketchpad', 'Notepad'])
     assert st['pressed'] == ['Allow for this session'] and acts[0]['action'] == 'pressed' and acts[0]['card_gone']
     assert len((tmp_path / 'w.jsonl').read_text().splitlines()) == 2

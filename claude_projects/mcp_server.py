@@ -379,7 +379,7 @@ async def claude_thread_permission(project: str, option: str, thread: Optional[s
     Policy: press an affirmative option only when the user policy pre-approves it or the action is clearly inside the task the user
     gave; anything questionable (outside the task, secrets, destructive, new machines/repos the user did not mention) goes to the
     user first. The result says whether the card disappeared (card_gone).
-    COMPUTER USE: only_apps=['Ephemeris','Notepad'] refuses an Allow on any card that requests other apps
+    COMPUTER USE: only_apps=['Sketchpad','Notepad'] refuses an Allow on any card that requests other apps
     (apps_not_allowed); lasting grants ('Always allow') and full-screen control are refused. All card buttons are pressed
     with a real pointer click at their centre, then verified; AT-SPI do_action is a fallback (on computer-use cards it
     can focus the button without clicking it). An Allow can work from this host even for a laptop-targeted card.

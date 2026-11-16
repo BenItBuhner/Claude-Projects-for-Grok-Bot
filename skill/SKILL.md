@@ -344,13 +344,13 @@ cards can show in the thread:
   use is turned on in the Claude desktop app on `<device>`" [Deny] [Continue]. `Continue` tells Claude the user says it
   is on there; `Deny` makes Claude carry on without the screen for that turn. Press `Continue` only when the user said
   computer use is on (or the policy pre-approves it).
-- **The apps card** (`computer_use_kind: "apps"`): "Claude wants to use: Ephemeris All ... Notepad All" [Deny] [Allow for
+- **The apps card** (`computer_use_kind: "apps"`): "Claude wants to use: Sketchpad All ... Notepad All" [Deny] [Allow for
   this session]. The plugin presses it with a real pointer click at the button's centre, then verifies. AT-SPI
   `do_action(0)` can only focus this button, not click it: the card stays pending and can cause new requests to decline
   instantly. Do not assume an Allow needs to be pressed on the controlled computer: a real click from the plugin host
   has been proven to grant laptop screen access. The laptop UI Automation path is also kept (`hosts/windows/computer-permission.ps1`
   snapshot -> `claude-projects computer-card decide --only-apps ...` -> press request; dry run first).
-- Under a standing approval for named apps, pass them as `only_apps` (e.g. `["Ephemeris", "Notepad"]`): an Allow on a
+- Under a standing approval for named apps, pass them as `only_apps` (e.g. `["Sketchpad", "Notepad"]`): an Allow on a
   card that requests anything else is refused (`apps_not_allowed`). Count a press as done only when `card_gone` is true
   and the thread goes on with the screen.
 - **Why a thread says "turn on computer use" when it is on:** the app writes Claude's note about computer use from the

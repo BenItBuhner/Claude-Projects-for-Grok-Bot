@@ -1,6 +1,6 @@
 """Computer-use cards on the controlled computer: decide from a snapshot of its Claude app, press nothing here.
 
-The computer-use apps card ("Claude wants to use: Ephemeris All ... Notepad All" [Deny] [Allow for this session]) is bound
+The computer-use apps card ("Claude wants to use: Sketchpad All ... Notepad All" [Deny] [Allow for this session]) is bound
 to the computer Claude controls: the Claude app on any other desktop can only send Deny for it (see
 claude_projects.permissions). So an Allow has to be pressed in the Claude app ON that computer. On a Windows PC,
 hosts/windows/computer-permission.ps1 reads that app over UI Automation ({"action": "snapshot"}) and presses one

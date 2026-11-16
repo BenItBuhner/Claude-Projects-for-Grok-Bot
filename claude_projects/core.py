@@ -2886,7 +2886,7 @@ def op_card_watch(project, thread=None, only_apps=None, duration_s=600, interval
     """Watch one thread for computer-use cards and press Allow on those whose apps are all in only_apps (required).
     Each look is a short urgent-lane lock (other ops queue behind it only for that look); between looks the lock is free.
     Runs for duration_s (or until stop_after presses). Every action is logged to logs/card-watch.jsonl."""
-    if not only_apps: raise ClaudeProjectsError('only_apps is required (e.g. Ephemeris,Notepad); the watcher presses nothing else')
+    if not only_apps: raise ClaudeProjectsError('only_apps is required (e.g. Sketchpad,Notepad); the watcher presses nothing else')
     p = resolve_project(project); chan = p['id']; tid = _resolve_tid(p, chan, thread)
     t_end = time.time() + float(duration_s); out = []; looks = 0; errors = 0
     _watch_log({'action': 'start', 'thread': thread_address(chan, tid), 'only_apps': list(only_apps), 'duration_s': duration_s, 'dry_run': dry_run})
