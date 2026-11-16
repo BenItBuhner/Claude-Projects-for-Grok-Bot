@@ -533,7 +533,9 @@ def deploy_busy():
     h = ui_lock_holder()
     try: jr = jobs_running()
     except Exception as ex: jr = []; log(f'jobs_running failed: {ex!r}')
-    return {'busy': bool(h) or bool(jr), 'lock_holder': h, 'jobs_running': jr or []}
+    try: q = len(_tickets())
+    except Exception: q = 0
+    return {'busy': bool(h) or bool(jr) or bool(q), 'lock_holder': h, 'jobs_running': jr or [], 'queued_waiters': q}
 def _busy_detail(wait_s, prefix):
     """Busy message with holder pid/op/since + wait_s so callers can queue/diagnose."""
     h = _read_ui_holder(); bits = [f'{prefix} for >{wait_s:.0f}s']
@@ -545,47 +547,168 @@ def _busy_detail(wait_s, prefix):
     bits.append('retry later')
     return '; '.join(bits)
 
+# ---- fair FIFO queue in front of the lock: each waiter holds a ticket file, and only the oldest live ticket may take the
+# lock, so a long queue drains in arrival order (no waiter can be starved by luckier pollers). Tickets of dead pids are pruned.
+UIQ = ROOT/'ui.queue'
+OP_DURATIONS = ROOT/'op-durations.json'
+DEFAULT_OP_SECONDS = {'send': 90.0, 'read': 25.0, 'attachment': 45.0, 'permission': 20.0, 'wait': 120.0, 'project': 30.0,
+                      'permissions': 15.0, 'attention': 30.0, 'projects-refresh': 40.0}
+def op_kind(op):
+    k = (str(op or '').split(' ', 1)[0] or 'other').strip()
+    return k
+def _pid_alive(pid):
+    try: os.kill(int(pid), 0); return True
+    except ProcessLookupError: return False
+    except Exception: return True
+def _op_durations():
+    try: return json.loads(OP_DURATIONS.read_text())
+    except Exception: return {}
+def _record_op_duration(op, seconds):
+    """Rolling mean (EMA, alpha 0.3) of how long each kind of op holds the lock, for queue ETAs."""
+    try:
+        d = _op_durations(); k = op_kind(op); prev = d.get(k)
+        d[k] = round(seconds if prev is None else 0.7 * float(prev) + 0.3 * seconds, 1)
+        t = OP_DURATIONS.with_suffix('.tmp'); t.write_text(json.dumps(d)); t.replace(OP_DURATIONS)
+    except Exception: pass
+def expected_op_seconds(op, durations=None):
+    d = _op_durations() if durations is None else durations; k = op_kind(op)
+    try: return float(d[k])
+    except Exception: return float(DEFAULT_OP_SECONDS.get(k, 30.0))
+URGENT_KINDS = ('permission', 'permissions', 'card-watch')
+BULK_KINDS = ('attachment', 'projects-refresh', 'refresh', 'attention', 'probe-projects', 'wait', 'tidy-ui')
+def op_priority(op):
+    """Lane of an op: 0 urgent (permission presses, card listing, the card watcher), 1 normal (reads, sends),
+    2 bulk (attachment fetches, refreshes, waits). The queue serves lane 0 first, then 1, then 2, FIFO in each lane,
+    and long bulk ops step aside at their checkpoints while an urgent op waits."""
+    k = op_kind(op)
+    if k in URGENT_KINDS: return 0
+    return 2 if (k in BULK_KINDS or _BULK_CTX) else 1
+_BULK_CTX = False   # set while a background refresh / attention pass runs: its reads queue in the bulk lane
+def _ticket_new(op, job_id=None, prio=None):
+    UIQ.mkdir(parents=True, exist_ok=True)
+    pr = op_priority(op) if prio is None else int(prio)
+    name = f'{pr}-{time.time_ns():020d}-{os.getpid()}-{threading.get_ident() % 100000}.json'
+    (UIQ/name).write_text(json.dumps({'pid': os.getpid(), 'op': op, 'since': now().isoformat(), 'job_id': job_id, 'priority': pr}))
+    return UIQ/name
+def _tickets():
+    """Live tickets, oldest first: [(path, data)]. Removes tickets whose process is gone."""
+    out = []
+    try: names = sorted(x for x in os.listdir(UIQ) if x.endswith('.json'))
+    except FileNotFoundError: return out
+    for n in names:
+        fp = UIQ/n
+        try: d = json.loads(fp.read_text())
+        except Exception: d = None
+        if not d or not _pid_alive(d.get('pid')):
+            try: fp.unlink()
+            except Exception: pass
+            continue
+        out.append((fp, d))
+    return out
+def ui_queue_status():
+    """{'holder', 'queue': [{position, op, pid, job_id, since_local, waited_s, eta_s}], 'length'}: who holds the UI lock and who
+    waits, in the order they will run. eta_s = seconds until that waiter is expected to get the lock (holder's remaining time +
+    the expected time of everyone ahead, from each op kind's recent lock-hold times)."""
+    durs = _op_durations(); h = ui_lock_holder(); t = time.time(); ahead = 0.0
+    if h:
+        try: el = t - datetime.datetime.fromisoformat(str(h.get('since'))).timestamp()
+        except Exception: el = 0.0
+        ahead = max(5.0, expected_op_seconds(h.get('op'), durs) - el)
+        h = dict(h, held_s=round(el, 1), expected_remaining_s=round(ahead, 1), since_local=ct(h.get('since')) if h.get('since') else None)
+    q = []
+    for i, (fp, d) in enumerate(_tickets()):
+        try: waited = t - datetime.datetime.fromisoformat(str(d.get('since'))).timestamp()
+        except Exception: waited = None
+        q.append({'position': i + 1, 'op': d.get('op'), 'pid': d.get('pid'), 'job_id': d.get('job_id'), 'lane': d.get('priority', 1),
+                  'since_local': ct(d.get('since')) if d.get('since') else None,
+                  'waited_s': round(waited, 1) if waited is not None else None, 'eta_s': round(ahead, 1)})
+        ahead += expected_op_seconds(d.get('op'), durs)
+    return {'holder': h, 'queue': q, 'length': len(q)}
+def queue_entry_for(pid=None, job_id=None):
+    """This waiter's place in the queue (or None when it is not waiting)."""
+    for e in ui_queue_status()['queue']:
+        if (pid is not None and e['pid'] == pid) or (job_id and e.get('job_id') == job_id): return e
+    return None
+_LOCK_JOB_ID = None   # set by job workers so their ticket names the job (queue position per job in status answers)
+
+def _acquire_flock(op, ticket_prio, timeout, t0):
+    """Queue (ticket in lane ticket_prio) until first in line, then take the flock. -> open file."""
+    ticket = _ticket_new(op, _LOCK_JOB_ID, ticket_prio); logged_wait = False; f = None
+    try:
+        while True:
+            if time.time() - t0 > 2 and not logged_wait:
+                log(f'lock wait >2s for {op!r} waiter_pid={os.getpid()} holder={_read_ui_holder()}'); logged_wait = True
+            live = _tickets()
+            if not any(fp == ticket for fp, _ in live):                 # our ticket vanished: re-queue
+                ticket = _ticket_new(op, _LOCK_JOB_ID, ticket_prio); live = _tickets()
+            first = bool(live) and live[0][0] == ticket
+            if first:
+                f = open(LOCKP, 'a+')
+                try:
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    try: same = os.stat(LOCKP).st_ino == os.fstat(f.fileno()).st_ino
+                    except FileNotFoundError: same = False
+                    if same: break
+                    fcntl.flock(f, fcntl.LOCK_UN)
+                except OSError: pass
+                f.close(); f = None
+            if time.time() - t0 > timeout:
+                pos = next((i + 1 for i, (fp, _) in enumerate(live) if fp == ticket), None)
+                raise Busy(_busy_detail(time.time() - t0, 'the app is busy with another claude-projects run') + (f'; queue_position={pos} of {len(live)}' if pos else ''))
+            time.sleep(0.2 if first else 0.4)
+        (ROOT/'ui.holder').write_text(json.dumps({'pid': os.getpid(), 'op': op, 'since': now().isoformat(), 'job_id': _LOCK_JOB_ID, 'priority': op_priority(op)}))
+        return f
+    finally:
+        try: ticket.unlink()
+        except Exception: pass
+def _release_flock(f):
+    try: (ROOT/'ui.holder').unlink()
+    except Exception: pass
+    try: LOCKP.unlink()
+    except Exception: pass
+    try: fcntl.flock(f, fcntl.LOCK_UN); f.close()
+    except Exception: pass
+_HELD = {}   # this process's held lock: {'f', 'op', 'since'}
+def urgent_waiting():
+    """Live waiters in the urgent lane (permission presses / card listing / watcher), oldest first."""
+    return [d for _, d in _tickets() if int(d.get('priority', 1)) == 0 and int(d.get('pid') or 0) != os.getpid()]
+def ui_checkpoint(restore=None, where=''):
+    """Called by long ops (attachment fetches, refreshes) between steps. When an urgent op is waiting, step aside: release
+    the UI lock, let the urgent op run, take the lock back at the head of the normal lane, then call restore() (re-open
+    the target) before going on. -> seconds spent stepped aside (0 when nothing was waiting)."""
+    if not _HELD or op_priority(_HELD.get('op')) == 0 or not urgent_waiting(): return 0.0
+    t0 = time.time(); op = _HELD['op']
+    _record_op_duration(op, t0 - _HELD['since'])
+    _release_flock(_HELD['f']); _HELD.clear(); log(f'{op!r} stepped aside for an urgent op at {where or "a checkpoint"}')
+    time.sleep(0.3)
+    f = _acquire_flock(op, 1, max(UI_LOCK_DEFAULT_TIMEOUT, 600), time.time())
+    _HELD.update(f=f, op=op, since=time.time()); waited = time.time() - t0
+    log(f'{op!r} resumed after {waited:.1f}s aside')
+    if restore: restore()
+    return waited
+
 @contextlib.contextmanager
 def ui_lock(op, force=False, timeout=None):
     """Serialize UI work through CFG['ui_lock_file'] (holders unlink the file on exit, so re-check the inode).
-    Default timeout 600s (override via timeout= or CLAUDE_PROJECTS_UI_LOCK_TIMEOUT) so multi-bot callers queue behind long send/settle."""
+    Waiters queue in lanes (urgent, normal, bulk; FIFO in each; see ui_queue_status). Default timeout 600s (override via
+    timeout= or CLAUDE_PROJECTS_UI_LOCK_TIMEOUT); a Busy raised on timeout names the holder and the queue position."""
     if timeout is None: timeout = UI_LOCK_DEFAULT_TIMEOUT
     if vnc_viewers() and not force:
         raise Refused(f'a VNC/noVNC viewer is connected to {os.environ.get("DISPLAY")} ({OPERATOR} may be using the app); retry later or pass force=true')
-    t0 = time.time(); logged_wait = False
+    t0 = time.time()
     if not _tlock.acquire(timeout=timeout):
         raise Busy(_busy_detail(time.time() - t0, 'another claude-projects operation in this process is running'))
-    f = None
     try:
-        while True:
-            waited = time.time() - t0
-            if waited > 2 and not logged_wait:
-                h = _read_ui_holder()
-                log(f'lock wait >2s for {op!r} waiter_pid={os.getpid()} holder={h}')
-                logged_wait = True
-            f = open(LOCKP, 'a+')
-            try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                try: same = os.stat(LOCKP).st_ino == os.fstat(f.fileno()).st_ino
-                except FileNotFoundError: same = False
-                if same: break
-                fcntl.flock(f, fcntl.LOCK_UN)
-            except OSError: pass
-            f.close(); f = None
-            if time.time() - t0 > timeout:
-                raise Busy(_busy_detail(time.time() - t0, 'the app is busy with another claude-projects run'))
-            time.sleep(1)
-        (ROOT/'ui.holder').write_text(json.dumps({'pid': os.getpid(), 'op': op, 'since': now().isoformat()}))
+        f = _acquire_flock(op, None, timeout, t0)
+        _HELD.update(f=f, op=op, since=time.time())
         log(f'lock acquired for {op} (waited {time.time()-t0:.1f}s)')
-        yield
+        try: yield
+        finally:
+            if _HELD:
+                try: _record_op_duration(op, time.time() - _HELD['since'])
+                except Exception: pass
+                _release_flock(_HELD['f']); _HELD.clear()
     finally:
-        if f:
-            try: (ROOT/'ui.holder').unlink()
-            except Exception: pass
-            try: LOCKP.unlink()
-            except Exception: pass
-            try: fcntl.flock(f, fcntl.LOCK_UN); f.close()
-            except Exception: pass
         _tlock.release()
 
 # ---------------------------------------------------------------- IndexedDB snapshot (no UI)
@@ -668,6 +791,10 @@ def A():
     global _A
     if _A is None:
         import gi; gi.require_version('Atspi', '2.0'); from gi.repository import Atspi; _A = Atspi
+        # one accessibility call may block while the app is busy; cap each call (default 25 s in libatspi) so a walk
+        # can never hang for minutes in do_poll
+        try: Atspi.set_timeout(int(os.environ.get('CLAUDE_PROJECTS_ATSPI_TIMEOUT_MS', '4000')), -1)
+        except Exception: pass
     return _A
 def nm(o):
     try: return o.get_name() or ''
@@ -699,9 +826,11 @@ def win():
             for f in kids(app):
                 if role(f) == 'frame': return f
     raise AppError('Claude desktop window not found (is the claude-projects-desktop service running? claude-projects setup status)')
-def walk(o, maxn=60000):
-    st = [o]; n = 0
-    while st and n < maxn:
+WALK_MAX_S = float(os.environ.get('CLAUDE_PROJECTS_WALK_MAX_S', '45'))
+def walk(o, maxn=60000, max_s=None):
+    """Depth-first walk, capped by node count and wall time (max_s, default WALK_MAX_S)."""
+    st = [o]; n = 0; t_end = time.time() + (WALK_MAX_S if max_s is None else max_s)
+    while st and n < maxn and time.time() < t_end:
         e = st.pop(); n += 1; yield e
         st.extend(reversed(kids(e)))
 def main_doc():
@@ -724,6 +853,24 @@ def act(e, what=''):
         if ac and ac.get_n_actions() > 0: ac.do_action(0); return True
     except Exception: pass
     raise AppError(f'cannot press {role(e)} {nm(e)!r} {what}')
+def _extents(e):
+    """(x, y, w, h) of an object on screen (AT-SPI screen coordinates), or None."""
+    try:
+        ext = e.get_component_iface().get_extents(0)
+        if ext.width > 0 and ext.height > 0: return (ext.x, ext.y, ext.width, ext.height)
+    except Exception: pass
+    return None
+def real_click(e, what=''):
+    """Press a button the way a person does: a real pointer click (xdotool) at the centre of its on-screen box.
+    The app's buttons take AT-SPI do_action(0) as focus only for some React handlers (the computer-use card's
+    'Allow for this session' got focused and stayed pending), so cards are pressed with a real click and verified.
+    Falls back to do_action when the button has no usable box. -> 'click' | 'action'."""
+    ext = _extents(e)
+    if ext:
+        x, y, w, h = ext
+        if x >= 0 and y >= 0 and w < 2000 and h < 400:
+            _click_xy(x + w / 2, y + h / 2); log(f'real click {nm(e)!r} at {x + w / 2:.0f},{y + h / 2:.0f} {what}'); return 'click'
+    act(e, what); return 'action'
 def deeplink(link):
     if not link.startswith('claude://'): raise ValueError(link)
     # the launcher reads the config file through python twice unless these are set; pass them so a deep link costs one exec
@@ -757,7 +904,19 @@ def is_primary_route(u, chan):
     m = re.search(r'thread=([\w]+)', q)
     return not m or m.group(1).startswith(('session_', 'cse_'))
 _OVERVIEW = {}
+def _already_on(chan, thread):
+    """The app already shows this target (route check only): skip the 25-80 s deep link."""
+    try: u = route()
+    except Exception: return None
+    if thread:
+        path = (u or '').partition('?')[0].rstrip('/')
+        if path == f'/epitaxy/project/{chan}' and f'thread={thread}' in (u or '') and _thread_view_real(thread, 2): return u
+        return None
+    return u if is_primary_route(u, chan) else None
 def open_target(chan, thread=None):
+    u = _already_on(chan, thread)
+    if u:
+        log(f'open_target: already on {u}; no deep link'); _mark('already_open'); return u
     if thread:
         deeplink(f'claude://code/project/{chan}?thread={thread}')
         u = wait_route(lambda u: f'thread={thread}' in (u or ''), 25); ok = f'thread={thread}' in (u or '')
@@ -1725,7 +1884,7 @@ def job_write(dirp, key, data):
 def jobs_running():
     """Running background jobs (for status and the deploy busy check)."""
     out = []
-    for kind, dirp in (('attachment', ATT_JOBS), ('send', SEND_JOBS)):
+    for kind, dirp in (('attachment', ATT_JOBS), ('send', SEND_JOBS), ('permission', PERM_JOBS)):
         try: locks = list(dirp.glob('*.lock'))
         except Exception: locks = []
         for lk in locks:
@@ -1863,7 +2022,9 @@ def _attachment_fetch(project, thread, message_index, n, force=False, stay=False
     with step_timer(f'attachment {p["name"]} {thread or "primary"} {message_index}.{n}') as tmr, ui_lock(f'attachment {p["name"]} {thread or "primary"} {message_index}.{n}', force):
         try:
             _mark('lock'); tid = _resolve_tid(p, chan, thread); _mark('resolve_thread')
+            ui_checkpoint(where='attachment before open')
             open_target_settled(chan, tid)
+            if ui_checkpoint(lambda: open_target_settled(chan, tid), 'attachment after open'): _mark('stepped_aside')
             a = find_article(tid, int(message_index))
             R, _ = rich_of(a, int(message_index)); _mark('read_message')
             if not R.atts: raise NotFound(f'message {message_index} has no attachments, files or links')
@@ -2508,7 +2669,7 @@ def detect_permission_cards(max_up=6, with_objs=False):
     """Read-only: find permission cards in the open page. Cheap when there are none (one role/name pass)."""
     d, _ = main_doc()
     if not d: return ([], {}) if with_objs else []
-    cand = [e for e in walk(d, 30000) if role(e) == 'push button' and PERM.OPTION_RE.match(nm(e).strip())]
+    cand = [e for e in walk(d, 30000, max_s=8) if role(e) == 'push button' and PERM.OPTION_RE.match(nm(e).strip())]
     if not cand: return ([], {}) if with_objs else []
     tops = []
     for b in cand:
@@ -2546,34 +2707,86 @@ def _press_diagnostics(btn):
     except Exception as ex: out['notices_error'] = str(ex)[:120]
     return out
 CU_INTRO_TITLE = re.compile(r'background computer use', re.I)
-def _finish_computer_use_allow(wait_s=6.0):
-    """After Allow on a computer-use card: press 'Continue' in the app's 'Background computer use' intro dialog when it
-    opens (it does once per computer). Touches no other dialog or button. Returns the labels pressed."""
+def _finish_computer_use_allow(wait_s=4.0):
+    """After Allow on a computer-use card (only on the controlled computer's own app): press 'Continue' in the app's
+    'Background computer use' intro dialog when it opens (once per computer). Touches no other dialog or button.
+    Polls once a second with a bounded walk, so it never holds the lock for long."""
     t0 = time.time(); pressed = []
     while time.time() - t0 < wait_s:
         d, _ = main_doc()
-        for dl in ([e for e in walk(d, 40000) if role(e) in ('dialog', 'alert dialog')] if d else []):
+        try: dls = dialogs_fast(d)
+        except Exception: dls = []
+        for dl in dls:
             txt = ' '.join(text_of(e) for e in walk(dl, 400) if role(e) in ('heading', 'static', 'paragraph', 'label', 'dialog'))
             if not CU_INTRO_TITLE.search(txt + ' ' + nm(dl)): continue
             b = find(dl, 'push button', 'Continue')
             if b:
-                act(b, 'computer-use intro Continue'); log('computer-use intro: pressed Continue')
+                real_click(b, 'computer-use intro Continue'); log('computer-use intro: pressed Continue')
                 pressed.append('Continue (Background computer use intro)'); return pressed
-        time.sleep(0.5)
+        time.sleep(1.0)
     return pressed
+def _btn_state(btn):
+    """{'name', 'enabled', 'sensitive', 'showing'} of a button, or None when the object is gone (defunct)."""
+    try:
+        ss = btn.get_state_set(); st = A().StateType
+        if ss.contains(st.DEFUNCT): return None
+        return {'name': nm(btn), 'enabled': ss.contains(st.ENABLED), 'sensitive': ss.contains(st.SENSITIVE), 'showing': ss.contains(st.SHOWING)}
+    except Exception: return None
+def _wait_button_gone(btn, timeout_s=8.0, step=0.5):
+    """Cheap post-press check: the pressed button object disappears (defunct / not showing) when the card goes.
+    -> (gone, seconds). No tree walk."""
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        time.sleep(step)
+        st = _btn_state(btn)
+        if st is None or not st.get('showing'): return True, round(time.time() - t0, 1)
+    return False, round(time.time() - t0, 1)
+def dialogs_fast(d, max_nodes=1500, max_s=1.5):
+    """Dialogs among the document's first levels only (they are rendered near the root), with a node and time cap."""
+    out = []; t0 = time.time(); n = 0; st = [(d, 0)] if d else []
+    while st and n < max_nodes and time.time() - t0 < max_s:
+        e, depth = st.pop(); n += 1
+        if role(e) in ('dialog', 'alert dialog'): out.append(e); continue
+        if depth < 6: st.extend((c, depth + 1) for c in reversed(kids(e)))
+    return out
+_PERM_DIAG = None   # list the permission job appends its timeline to (see op_permission_job)
+def _pdiag(step, **kw):
+    if _PERM_DIAG is not None:
+        _PERM_DIAG.append(dict(kw, step=step, at_local=ct(now().isoformat()), t=round(time.time(), 2)))
 def thread_address(chan, tid, primary=None):
     """Stable address of an agent/thread: <project chan_>/<thread id> (primary = cse_, child = cmsg_)."""
     t = tid if tid and tid != 'primary' else (primary or 'primary')
     return f'{chan}/{t}'
-def op_permission(project, option, thread=None, card_id=None, dry_run=True, force=False, stay=False, shot=None):
-    """Approve / deny a permission card by option label. dry_run=True (default) only reads the card and the button it would press."""
+CU_ALLOW_ONCE_RE = re.compile(r'^(allow|allow once|allow for this session|allow in this session|allow session)$', re.I)
+def computer_use_guard(card, label, only_apps=None):
+    """Why an affirmative press on a computer-use card must not happen, or None when it may.
+    -> None | {'refused': code, 'reason': text, ...}. Codes: apps_not_allowed, lasting_grant, full_control."""
+    if card.get('type') != 'computer_use' or not PERM.AFFIRM_RE.match(label or ''): return None
+    kind = PERM.computer_use_kind(card)
+    if PERM.CU_FULL_RE.search(card.get('prompt') or ''):
+        return {'refused': 'full_control', 'reason': 'the card asks for full-screen control, the clipboard or system keys; only app-by-app grants are pressed'}
+    if kind == 'apps':
+        if PERM.CU_ALWAYS_RE.match(label.strip()):
+            return {'refused': 'lasting_grant', 'reason': f'{label!r} is a lasting grant; press a one-time or this-session Allow'}
+        if only_apps is not None:
+            extra = PERM.apps_outside(card, only_apps)
+            if extra: return {'refused': 'apps_not_allowed', 'apps_outside': extra, 'only_apps': list(only_apps),
+                              'reason': f'the card asks for apps outside only_apps: {", ".join(extra)}'}
+    return None
+def op_permission(project, option, thread=None, card_id=None, dry_run=True, force=False, stay=False, shot=None, only_apps=None, lock_wait=None):
+    """Approve / deny a permission card by option label. dry_run=True (default) only reads the card and the button it would press.
+    Buttons are pressed with a real pointer click at their centre (do_action only as a fallback), then verified.
+    Computer-use cards: only_apps limits an Allow to cards that request nothing else; lasting grants and full-screen
+    control are refused."""
     if not option or not str(option).strip(): raise ClaudeProjectsError('option is required (the exact button label, e.g. "Add folder" or "Not now")')
     p = resolve_project(project); chan = p['id']
-    with ui_lock(f'permission {p["name"]} {thread or "primary"}', force):
+    _pdiag('lock_wait', queue=ui_queue_status())
+    with ui_lock(f'permission {p["name"]} {thread or "primary"}', force, timeout=lock_wait):
+        _pdiag('lock_acquired')
         try:
             tid = _resolve_tid(p, chan, thread)
-            open_target_settled(chan, tid)
-            cards = detect_permission_cards()
+            open_target_settled(chan, tid); _pdiag('thread_open', thread_id=tid or 'primary')
+            cards = detect_permission_cards(); _pdiag('cards_read', cards=PERM.public(cards))
             if not cards: raise NotFound('no permission card is showing in this thread')
             if card_id:
                 card = next((c for c in cards if c['card_id'] == card_id), None)
@@ -2582,42 +2795,199 @@ def op_permission(project, option, thread=None, card_id=None, dry_run=True, forc
             else: raise ClaudeProjectsError(f'{len(cards)} cards are showing; pass card_id. Cards: ' + json.dumps(PERM.public(cards), ensure_ascii=False)[:1500])
             try: label, idx = PERM.match_option(card, option)
             except ValueError as ex: raise ClaudeProjectsError(str(ex))
+            btn = card['_objs'][idx]; before = _btn_state(btn)
             base = {'project': p['name'], 'project_id': chan, 'thread_id': tid or 'primary', 'address': thread_address(chan, tid, p.get('primary_thread_id')),
-                    'card': PERM.public([card])[0], 'option': label}
+                    'card': PERM.public([card])[0], 'option': label, 'button_state': before}
+            if card['type'] == 'computer_use': base['computer_use_kind'] = PERM.computer_use_kind(card)
+            guard = computer_use_guard(card, label, only_apps)
+            if guard:
+                _pdiag('refused', **guard); log(f'permission {card["card_id"]} refused: {guard["refused"]}')
+                if shot: screenshot(shot)
+                return dict(base, dry_run=bool(dry_run), pressed=None, card_gone=False, **guard,
+                            note='nothing was pressed')
+            if before is not None and not (before.get('enabled', True) and before.get('sensitive', True)):
+                _pdiag('refused', refused='button_disabled', button_state=before)
+                return dict(base, dry_run=bool(dry_run), pressed=None, card_gone=False, refused='button_disabled',
+                            reason=f'the {label!r} button is disabled in the app right now; nothing was pressed')
             if dry_run:
                 if shot: screenshot(shot)
                 return dict(base, dry_run=True, would_press=label, note='read-only: the card was found and nothing was pressed')
-            act(card['_objs'][idx], f'permission option {label!r}')
+            how = real_click(btn, f'permission option {label!r}'); t_press = time.time(); _pdiag('pressed', label=label, card_id=card['card_id'], how=how, box=_extents(btn))
             log(f'permission {p["name"]} {tid or "primary"} {card["card_id"]} {card["type"]} -> {label!r}')
             follow = []; affirm = bool(PERM.AFFIRM_RE.match(label))
-            if card['type'] == 'computer_use' and affirm:
-                # The app answers the first computer-use Allow on a computer with a "Background computer use (Beta)"
-                # intro dialog [Not now] [Continue]; the grant is only sent on Continue. Press Continue in that dialog
-                # (and nothing else), then wait for the card to go.
-                follow = _finish_computer_use_allow()
-            still, after = True, []
-            for _ in range(12 if card['type'] == 'computer_use' else 1):
-                time.sleep(1.5)
-                after = detect_permission_cards()
-                still = any(c['card_id'] == card['card_id'] for c in after)
-                if not still: break
+            if card['type'] == 'computer_use' and affirm and PERM.computer_use_kind(card) == 'apps':
+                # On the controlled computer the first Allow opens a "Background computer use (Beta)" intro dialog
+                # [Not now] [Continue]; the grant is only sent on Continue. Press Continue there (and nothing else).
+                follow = _finish_computer_use_allow(); _pdiag('intro_dialog', pressed=follow)
+            gone, waited = _wait_button_gone(btn, 4.0); _pdiag('verify', button_gone=gone, waited_s=waited)
+            if not gone and how == 'click':
+                # the click missed (moved / covered): one do_action try, then verify again
+                try: act(btn, f'permission option {label!r} (fallback)'); how = 'click+action'; _pdiag('fallback_action')
+                except Exception as ex: _pdiag('fallback_failed', error=str(ex)[:200])
+                gone, w2 = _wait_button_gone(btn, 4.0); waited += w2; _pdiag('verify', button_gone=gone, waited_s=w2)
+            after = detect_permission_cards()
+            still = any(c['card_id'] == card['card_id'] for c in after)
+            if gone and still: _pdiag('verify_mismatch', note='button object went but a card with the same id is showing (re-rendered)')
             busy = None
             try: busy = bool(busy_state(tid))
             except Exception: pass
             if shot: screenshot(shot)
             out = dict(base, dry_run=False, pressed=label, card_gone=not still, cards_now=PERM.public(after) or None,
-                       pressed_at_local=ct(now().isoformat()), claude_working=busy)
+                       pressed_at_local=ct(now().isoformat()), claude_working=busy, verify_s=round(time.time() - t_press, 1), pressed_with=how)
             if follow: out['also_pressed'] = follow
             if still:
-                out['diagnostics'] = _press_diagnostics(card['_objs'][idx])
+                out['diagnostics'] = {'button_after': _btn_state(btn)}
                 try: dl = dialogs()
                 except Exception: dl = []
                 out['warning'] = ('the card is still showing after the press: the app did not take the answer. '
                                   + ('Open dialogs: ' + json.dumps(dl, ensure_ascii=False)[:400] if dl else 'No dialog is open.'))
+            _pdiag('result', card_gone=not still, claude_working=busy)
             log(f'permission {card["card_id"]} result card_gone={not still} also={follow} working={busy}')
             return out
         finally:
             if not stay: go_home()
+
+# ---- card watcher: press allowlisted computer-use cards within seconds of their appearing
+CARD_WATCH_LOG = LOGD/'card-watch.jsonl'
+def _watch_log(entry):
+    try:
+        with open(CARD_WATCH_LOG, 'a', encoding='utf-8') as f: f.write(json.dumps(dict(entry, at_local=ct(now().isoformat())), ensure_ascii=False, default=str) + '\n')
+    except Exception: pass
+def pick_allow_option(card):
+    """The one-time / this-session Allow on a computer-use card (never a lasting grant)."""
+    return next((o for o in card.get('options') or [] if CU_ALLOW_ONCE_RE.match(o.strip())), None)
+def card_watch_once(chan, tid, only_apps, force=False, dry_run=False):
+    """One look at the thread under an urgent-lane lock; press the Allow on every computer-use apps card whose apps are
+    all in only_apps. -> list of action dicts (also appended to logs/card-watch.jsonl)."""
+    acts = []
+    with ui_lock(f'card-watch {chan} {tid or "primary"}', force, timeout=60):
+        open_target_settled(chan, tid)
+        for c in detect_permission_cards():
+            if c['type'] != 'computer_use' or PERM.computer_use_kind(c) != 'apps': continue
+            label = pick_allow_option(c)
+            guard = computer_use_guard(c, label or '', only_apps) if label else {'refused': 'no_allow_option', 'reason': 'no one-time Allow on the card'}
+            ent = {'card_id': c['card_id'], 'apps': [a.get('displayName') for a in c.get('apps') or []], 'thread': thread_address(chan, tid), 'option': label}
+            if guard:
+                ent.update(action='left', **guard); _watch_log(ent); acts.append(ent); continue
+            if dry_run:
+                ent.update(action='would_press'); _watch_log(ent); acts.append(ent); continue
+            btn = c['_objs'][c['options'].index(label)]; t0 = time.time()
+            how = real_click(btn, f'card-watch {label!r}')
+            gone, waited = _wait_button_gone(btn, 4.0)
+            if not gone and how == 'click':
+                try: act(btn, 'card-watch fallback'); how = 'click+action'
+                except Exception: pass
+                gone, w2 = _wait_button_gone(btn, 4.0); waited += w2
+            after = detect_permission_cards(); gone = not any(x['card_id'] == c['card_id'] for x in after)
+            ent.update(action='pressed', pressed_with=how, card_gone=gone, press_s=round(time.time() - t0, 1), pressed_at_local=ct(now().isoformat()))
+            log(f'card-watch pressed {label!r} on {c["card_id"]} gone={gone}'); _watch_log(ent); acts.append(ent)
+    return acts
+def op_card_watch(project, thread=None, only_apps=None, duration_s=600, interval_s=5, force=False, dry_run=False, stop_after=0):
+    """Watch one thread for computer-use cards and press Allow on those whose apps are all in only_apps (required).
+    Each look is a short urgent-lane lock (other ops queue behind it only for that look); between looks the lock is free.
+    Runs for duration_s (or until stop_after presses). Every action is logged to logs/card-watch.jsonl."""
+    if not only_apps: raise ClaudeProjectsError('only_apps is required (e.g. Sketchpad,Notepad); the watcher presses nothing else')
+    p = resolve_project(project); chan = p['id']; tid = _resolve_tid(p, chan, thread)
+    t_end = time.time() + float(duration_s); out = []; looks = 0; errors = 0
+    _watch_log({'action': 'start', 'thread': thread_address(chan, tid), 'only_apps': list(only_apps), 'duration_s': duration_s, 'dry_run': dry_run})
+    try:
+        while time.time() < t_end:
+            looks += 1
+            try: out += card_watch_once(chan, tid, only_apps, force=force, dry_run=dry_run)
+            except Busy as ex: errors += 1; log(f'card-watch look skipped: {ex}')
+            except ClaudeProjectsError as ex: errors += 1; log(f'card-watch look failed: {ex}')
+            if stop_after and sum(1 for a in out if a.get('action') == 'pressed' and a.get('card_gone')) >= stop_after: break
+            time.sleep(max(1.0, float(interval_s)))
+    finally:
+        _watch_log({'action': 'stop', 'looks': looks, 'presses': sum(1 for a in out if a.get('action') == 'pressed')})
+        try: go_home()
+        except Exception: pass
+    return {'project': p['name'], 'project_id': chan, 'thread_id': tid or 'primary', 'looks': looks, 'errors': errors, 'actions': out,
+            'log': str(CARD_WATCH_LOG)}
+
+# ---- permission jobs: the press runs in a detached worker so the tool always answers within its budget (~40 s)
+PERM_JOBS = CACHE/'permission-jobs'
+PERM_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_PERMISSION_BUDGET', '40'))
+PERM_LOCK_WAIT = float(os.environ.get('CLAUDE_PROJECTS_PERMISSION_LOCK_WAIT', '300'))
+PERM_JOIN_WINDOW = 120.0
+PERM_FINAL = ('done', 'failed')
+def perm_job_key(chan, thread, option, card_id, dry_run, only_apps):
+    t = norm(str(thread)).casefold() if thread else 'primary'
+    base = f'{chan}|{t}|{(option or "").strip().casefold()}|{card_id or ""}|{int(bool(dry_run))}|{",".join(sorted(only_apps or []))}'
+    return 'p' + hashlib.sha256(base.encode()).hexdigest()[:23]
+def _perm_answer(st):
+    key = st.get('job_id'); diag = str(PERM_JOBS/f'{key}.diag.json') if key else None
+    if st.get('state') == 'done':
+        return dict(st.get('result') or {}, job_id=key, diagnostics_file=diag)
+    if st.get('state') == 'failed':
+        return {'job_id': key, 'state': 'failed', 'pressed': None, 'error': st.get('error'), 'error_type': st.get('error_type'),
+                'diagnostics_file': diag, 'note': 'nothing more will happen for this job; call again to start a new attempt'}
+    out = {'job_id': key, 'state': st.get('state') or 'queued', 'pending': True, 'pressed': None, 'retry_after_s': 10,
+           'diagnostics_file': diag,
+           'note': 'still waiting for the app; call claude_thread_permission again with job_id (or the same arguments) for the result. '
+                   'It joins this job and never presses twice.'}
+    q = queue_entry_for(pid=st.get('pid'), job_id=key)
+    if q: out['queue_position'] = q['position']; out['eta_s'] = q['eta_s']
+    h = ui_lock_holder()
+    if h and st.get('pid') and int(h.get('pid') or 0) != int(st['pid']): out['busy'] = f"busy, queued as job {key} behind {h.get('op')!r}"
+    if st.get('started_ts'): out['started_at_local'] = ct(datetime.datetime.fromtimestamp(st['started_ts'], datetime.timezone.utc).isoformat())
+    return out
+def op_permission_job(project, option, thread=None, card_id=None, dry_run=True, force=False, only_apps=None, budget=None, job_id=None):
+    """claude_thread_permission's entry point: answers within `budget` seconds (default 40) with the result, or with
+    pending + job_id + queue position / ETA while the worker waits for the app. Diagnostics: <job>.diag.json."""
+    budget = PERM_BUDGET if budget is None else float(budget)
+    if job_id:
+        st = job_read(PERM_JOBS, job_id)
+        if not st: raise NotFound(f'no permission job {job_id}')
+        if st.get('state') not in PERM_FINAL and not job_running(PERM_JOBS, job_id) and time.time() - (st.get('started_ts') or 0) > 20:
+            st = dict(st, state='failed', error='the permission job ended without a result (killed?)', error_type='AppError'); job_write(PERM_JOBS, job_id, st)
+        t0 = time.time()
+        while st.get('state') not in PERM_FINAL and time.time() - t0 < min(budget, 20):
+            time.sleep(.3); st = job_read(PERM_JOBS, job_id) or st
+        return _perm_answer(st)
+    if not option or not str(option).strip(): raise ClaudeProjectsError('option is required (the exact button label, e.g. "Add folder" or "Not now")')
+    p = resolve_project(project); chan = p['id']; key = perm_job_key(chan, thread, option, card_id, dry_run, only_apps)
+    st = job_read(PERM_JOBS, key); t_start = time.time()
+    if st and (job_running(PERM_JOBS, key) or (st.get('state') not in PERM_FINAL and t_start - (st.get('started_ts') or 0) < 20)): pass
+    elif st and st.get('state') == 'done' and not dry_run and t_start - (st.get('finished_ts') or 0) < PERM_JOIN_WINDOW:
+        return dict(_perm_answer(st), joined_existing_job=True, note=f'this press already ran {int(t_start - st["finished_ts"])} s ago; nothing was pressed again')
+    else:
+        spec = {'project': chan, 'option': option, 'thread': thread, 'card_id': card_id, 'dry_run': bool(dry_run), 'force': bool(force),
+                'only_apps': list(only_apps) if only_apps is not None else None}
+        job_write(PERM_JOBS, key, {'job_id': key, 'state': 'queued', 'project': p['name'], 'thread_id': thread or 'primary', 'started_ts': t_start, 'spec': spec})
+        how = spawn_job([*cfg_mod.module_argv('claude_projects'), '--json'] + (['--force'] if force else []) + ['permission-job', key], f'perm-{key[:8]}')
+        log(f'permission job {key} started for {p["name"]} {thread or "primary"} {option!r} dry_run={dry_run} ({how})')
+    while time.time() - t_start < budget:
+        st = job_read(PERM_JOBS, key) or {}
+        if st.get('state') in PERM_FINAL: return _perm_answer(st)
+        time.sleep(.3)
+    return _perm_answer(job_read(PERM_JOBS, key) or {'job_id': key, 'state': 'queued'})
+def run_permission_job(key):
+    global _PERM_DIAG, _LOCK_JOB_ID
+    f = job_lock(PERM_JOBS, key)
+    if f is None: return {'job_id': key, 'note': 'this permission job is already running'}
+    st = job_read(PERM_JOBS, key) or {}; diag = []; _PERM_DIAG = diag; _LOCK_JOB_ID = key
+    dpath = PERM_JOBS/f'{key}.diag.json'
+    def save(state, **kw):
+        st.update(kw, state=state, updated_ts=time.time(), pid=os.getpid()); job_write(PERM_JOBS, key, st)
+        try: dpath.write_text(json.dumps({'job_id': key, 'state': state, 'spec': st.get('spec'), 'timeline': diag,
+                                           'result': st.get('result'), 'error': st.get('error')}, ensure_ascii=False, default=str, indent=1))
+        except Exception: pass
+    try:
+        if st.get('state') in PERM_FINAL: return _perm_answer(st)
+        spec = st.get('spec') or {}; save('waiting_for_app')
+        try:
+            r = op_permission(spec['project'], spec['option'], spec.get('thread'), spec.get('card_id'), dry_run=spec.get('dry_run', True),
+                              force=spec.get('force', False), only_apps=spec.get('only_apps'), lock_wait=PERM_LOCK_WAIT)
+            st['finished_ts'] = time.time(); save('done', result=r)
+        except BaseException as ex:
+            _pdiag('error', error=str(ex)[:500], error_type=type(ex).__name__)
+            st['finished_ts'] = time.time(); save('failed', error=str(ex) or type(ex).__name__, error_type=type(ex).__name__)
+            if not isinstance(ex, (ClaudeProjectsError, Interrupted)): log(f'permission job {key} crashed: {ex!r}')
+        log(f"permission job {key}: {st['state']} ({st.get('error') or ''})")
+        return _perm_answer(st)
+    finally:
+        _PERM_DIAG = None; _LOCK_JOB_ID = None; job_unlock(f)
 
 # ---------------------------------------------------------------- forwarding
 FORWARD_RULE = '\u2500' * 24
@@ -2713,10 +3083,23 @@ def _read(chan, thread, max_messages, history_pages, expand, with_threads=False,
     info = pane_info(thread); threads = None
     if with_threads and not thread: threads = parse_threads(chan, include_resolved, show_all); ensure_threads_panel(False)
     return msgs, info, threads, dialogs()
-def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0, expand=False, force=False, stay=False, shot=None, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False):
+def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0, expand=False, force=False, stay=False, shot=None, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None):
     p = resolve_project(project); chan = p['id']
     tid = resolve_thread(chan, thread)
     cached = read_cache(chan, tid if tid and not str(tid).startswith('LOOKUP:') else None)
+    if refresh and cache_if_busy and cached and not force:
+        h = ui_lock_holder()
+        if h and int(h.get('pid') or 0) != os.getpid():
+            # Cache-first: the app is busy with someone else's UI work. Answer now from the last read instead of queueing
+            # behind it; the caller can retry later (or pass cache_if_busy=false to queue for a live read).
+            out = op_read(project, thread, False, max_messages, include_images=include_images, markdown=markdown)
+            q = ui_queue_status()
+            out['served_from_cache_because_busy'] = True
+            out['busy'] = {'holder': q['holder'], 'queue_length': q['length'],
+                           'eta_s': round((q['holder'] or {}).get('expected_remaining_s', 0) + sum(expected_op_seconds(e['op']) for e in q['queue']), 1)}
+            out['note'] = ('the app is busy with another run, so this is the last cached read (see cache_age_min); '
+                           'retry after busy.eta_s for a live read, or pass refresh with cache_if_busy=false to queue for one')
+            return out
     if not refresh:
         if not cached: raise NotFound('nothing cached yet for this target; call again with refresh=true')
         cached = dict(cached); cached['from_cache'] = True
@@ -2751,7 +3134,7 @@ def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0
         if not tid:
             cached['waiting_threads'] = waiting_threads_for(chan, read_cache(chan), p.get('primary_thread_id'))
         return cached
-    with ui_lock(f'read {p["name"]} {thread or "primary"}', force):
+    with ui_lock(f'read {p["name"]} {thread or "primary"}', force, timeout=lock_wait):
         try:
             if tid and str(tid).startswith('LOOKUP:'):
                 open_target(chan, None); settle(None, 15); ths = parse_threads(chan, True, True); ensure_threads_panel(False)
@@ -2824,8 +3207,8 @@ def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0
             return res
         finally:
             if not stay: go_home()
-def op_project_get(project, refresh=True, include_resolved=False, show_all=False, max_messages=10, force=False, stay=False, shot=None, include_images=False, markdown=False):
-    r = op_read(project, None, refresh, max_messages, 0, False, force, stay, shot, with_threads=True, include_resolved=include_resolved, show_all=show_all, include_images=include_images, markdown=markdown)
+def op_project_get(project, refresh=True, include_resolved=False, show_all=False, max_messages=10, force=False, stay=False, shot=None, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None):
+    r = op_read(project, None, refresh, max_messages, 0, False, force, stay, shot, with_threads=True, include_resolved=include_resolved, show_all=show_all, include_images=include_images, markdown=markdown, cache_if_busy=cache_if_busy, lock_wait=lock_wait)
     return r
 def _verify_sent(thread, text, before_max, secs=40):
     t0 = time.time(); want = norm(text)[:120].casefold()
@@ -3301,7 +3684,12 @@ def _send_answer(st, joined=False):
         out = dict(_send_state_public(st), sent=False, failed=True)
         out['note'] = 'nothing was sent' + ('; ' + st['cleanup_note'] if st.get('cleanup_note') else '') + '. Calling again starts a new attempt.'
         return out
-    return dict(_send_state_public(st), pending=True, sent=False, retry_after_s=15,
+    extra = {}
+    try:
+        q = queue_entry_for(pid=st.get('pid'), job_id=st.get('job_id')) if st.get('job_id') else None
+        if q: extra = {'queue_position': q['position'], 'eta_s': q['eta_s'], 'busy': f"busy, queued as job {st['job_id']}"}
+    except Exception: pass
+    return dict(_send_state_public(st), **extra, pending=True, sent=False, retry_after_s=15,
                 note='still sending in the app; call claude_thread_send again with the same arguments (or job_id) for the result. '
                      'It joins this send and never types or sends the message twice.')
 def op_send_job(project, message, thread=None, force=False, attachments=None, bot_name=None, budget=None, idempotency_key=None, job_id=None, clear_leftovers=False):
@@ -3338,10 +3726,10 @@ def op_send_job(project, message, thread=None, force=False, attachments=None, bo
 def run_send_job(key):
     """The worker: one send for key, under its job lock, with progress written to the job file. A SIGTERM or the
     deadline stops it cleanly: the composer is cleaned up, the lock released, the app sent home, the reason recorded."""
-    global _PROGRESS
+    global _PROGRESS, _LOCK_JOB_ID
     f = job_lock(SEND_JOBS, key)
     if f is None: return {'job_id': key, 'note': 'this send job is already running'}
-    st = job_read(SEND_JOBS, key) or {}
+    st = job_read(SEND_JOBS, key) or {}; st['pid'] = os.getpid(); _LOCK_JOB_ID = key
     try:
         if st.get('state') in SEND_FINAL: return _send_answer(st)
         spec = st.get('spec') or {}
@@ -3367,7 +3755,7 @@ def run_send_job(key):
         job_write(SEND_JOBS, key, st); log(f"send job {key}: {st['state']} ({st.get('error') or ''})")
         return _send_answer(st)
     finally:
-        _PROGRESS = None; job_unlock(f)
+        _PROGRESS = None; _LOCK_JOB_ID = None; job_unlock(f)
 def op_wait(project, thread=None, after_index=None, timeout=600, poll=10, force=False, stay=False, shot=None, quiet_polls=2):
     """Poll the transcript until Claude has replied after `after_index` and is no longer working."""
     p = resolve_project(project); chan = p['id']; tid = resolve_thread(chan, thread)
@@ -4092,6 +4480,11 @@ def _triage_from_read(r):
     }
 
 def op_attention(projects=None, refresh=False, max_reads=2, budget_s=40.0, force=False):
+    global _BULK_CTX
+    prev = _BULK_CTX; _BULK_CTX = True
+    try: return _op_attention_impl(projects=projects, refresh=refresh, max_reads=max_reads, budget_s=budget_s, force=force)
+    finally: _BULK_CTX = prev
+def _op_attention_impl(projects=None, refresh=False, max_reads=2, budget_s=40.0, force=False):
     """Everything that needs the user across Projects, in one pass: every thread (primary and child) in a 'Waiting on you'
     group with its latest ask (approval asks carry the exact requested_line), plus permission cards seen in any thread.
     refresh=False (default) uses cached reads only (no UI, no lock). refresh=True also live-reads up to max_reads waiting
@@ -4139,6 +4532,11 @@ def op_attention(projects=None, refresh=False, max_reads=2, budget_s=40.0, force
                      'post it for them only under an explicit standing approval covering that exact action, otherwise ask. '
                      'Never invent the user\'s words. ask_stale=true: read that thread before relaying.')}
 def op_refresh(projects=None, background=False, max_projects=3, force=False):
+    global _BULK_CTX
+    prev = _BULK_CTX; _BULK_CTX = True
+    try: return _op_refresh_impl(projects=projects, background=background, max_projects=max_projects, force=force)
+    finally: _BULK_CTX = prev
+def _op_refresh_impl(projects=None, background=False, max_projects=3, force=False):
     """Refresh the project list (opens Projects view) and re-read the primary thread of changed / named projects."""
     if background:
         if vnc_viewers(): return {'skipped': 'VNC viewer connected'}
@@ -4224,7 +4622,9 @@ def op_status():
     st = {'vnc_viewers': vnc_viewers(), 'x_idle_min': x_idle_min(), 'effective_user_idle_min': effective_user_idle_min(), 'own_input_age_min': last_own_input_age_min(), 'lock_holder': holder}
     try: st['jobs_running'] = jobs_running() or None
     except Exception as ex: st['jobs_running'] = None; log(f'jobs_running failed: {ex!r}')
-    st['busy'] = bool(holder) or bool(st['jobs_running'])   # deploys: restart only when this is false
+    try: st['ui_queue'] = ui_queue_status()
+    except Exception as ex: st['ui_queue'] = None; log(f'ui_queue_status failed: {ex!r}')
+    st['busy'] = bool(holder) or bool(st['jobs_running']) or bool((st['ui_queue'] or {}).get('length'))   # deploys: restart only when this is false
     try: st['route'] = route(); st['dialogs'] = dialogs() or None; st['stray_open_files'] = len(_open_files_wids()) or None; st['signed_in'] = not re.search(r'/login|/oauth', st['route'] or '')
     except Exception as ex: st['app'] = f'not reachable: {ex}'
     try:
@@ -4314,9 +4714,9 @@ def main(argv=None):
     ap.add_argument('--stay', action='store_true', help='leave the app on the page (default: back to home)'); ap.add_argument('--shot', help='save a screenshot (jpg) at the end')
     sp = ap.add_subparsers(dest='cmd', required=True)
     s = sp.add_parser('projects', help='list projects'); s.add_argument('--refresh', action='store_true'); s.add_argument('--all', action='store_true', help='include archived')
-    s = sp.add_parser('project', help='primary thread + threads of a project'); s.add_argument('project'); s.add_argument('--cached', action='store_true'); s.add_argument('--resolved', action='store_true'); s.add_argument('--all-threads', action='store_true'); s.add_argument('--max', type=int, default=10)
+    s = sp.add_parser('project', help='primary thread + threads of a project'); s.add_argument('project'); s.add_argument('--cached', action='store_true'); s.add_argument('--resolved', action='store_true'); s.add_argument('--all-threads', action='store_true'); s.add_argument('--max', type=int, default=10); s.add_argument('--cache-if-busy', action='store_true'); s.add_argument('--lock-wait', type=float)
     s = sp.add_parser('threads', help='threads of a project'); s.add_argument('project'); s.add_argument('--resolved', action='store_true'); s.add_argument('--all-threads', action='store_true')
-    s = sp.add_parser('read', help='read a thread (primary by default)'); s.add_argument('project'); s.add_argument('--thread'); s.add_argument('--cached', action='store_true'); s.add_argument('--max', type=int, default=20); s.add_argument('--history', type=int, default=0); s.add_argument('--expand', action='store_true'); s.add_argument('--attachments', action='store_true', help='list attachments/blocks per message'); s.add_argument('--images', action='store_true', help='inline image thumbnails (base64, JSON only)'); s.add_argument('--markdown', action='store_true', help='markdown rendering of each message')
+    s = sp.add_parser('read', help='read a thread (primary by default)'); s.add_argument('project'); s.add_argument('--thread'); s.add_argument('--cached', action='store_true'); s.add_argument('--max', type=int, default=20); s.add_argument('--history', type=int, default=0); s.add_argument('--expand', action='store_true'); s.add_argument('--attachments', action='store_true', help='list attachments/blocks per message'); s.add_argument('--images', action='store_true', help='inline image thumbnails (base64, JSON only)'); s.add_argument('--markdown', action='store_true', help='markdown rendering of each message'); s.add_argument('--cache-if-busy', action='store_true', help='when another run holds the app, answer from the cache at once'); s.add_argument('--lock-wait', type=float, help='seconds to queue for the app before answering busy')
     s = sp.add_parser('send', help='type + send a message'); s.add_argument('project'); s.add_argument('message', nargs='?'); s.add_argument('--file'); s.add_argument('--thread'); s.add_argument('--wait', action='store_true'); s.add_argument('--timeout', type=int, default=600); s.add_argument('--poll', type=int, default=10); s.add_argument('--dry-run', action='store_true', help='check targeting only; never presses Send'); s.add_argument('--type-test', action='store_true', help='with --dry-run: type the text, read it back, clear it'); s.add_argument('--attach-test', nargs='?', const='cancel', choices=['cancel', 'open'], default=None, help='with --dry-run and --attach: cancel (default) types each path in the picker, OCRs it and Cancels; --attach-test=open presses Open, waits for the chip, removes it again. Never types the message or presses Send'); s.add_argument('--clear-leftovers', action='store_true', help='remove attachment chips already in the message box (never sent) instead of refusing'); s.add_argument('--attach', action='append', help='file on the Claude Code host to attach (repeatable); --attach-json for base64')
     s.add_argument('--attach-json', help='JSON file: [{"path":...} | {"base64":...,"filename":...}]'); s.add_argument('--bot-name', help='name in the origin bracket: [sent by Grok Bot · NAME]')
     s.add_argument('--budget', type=float, help='answer within this many seconds; the send runs as a background job (call again, or --job-id, for the result)'); s.add_argument('--idempotency-key', help='with --budget: calls with the same key are one send'); s.add_argument('--job-id', help='the result of a send job (nothing is sent)')
@@ -4343,7 +4743,10 @@ def main(argv=None):
     s = sp.add_parser('origin', help='print the origin header (and the full text with --message) without touching the app'); s.add_argument('--message'); s.add_argument('--bot-name'); s.add_argument('--title'); s.add_argument('--instructions')
     sp.add_parser('config', help='print the effective configuration (paths only, no secrets)')
     s = sp.add_parser('permissions', help='READ-ONLY: list permission cards showing in a thread'); s.add_argument('project'); s.add_argument('--thread')
-    s = sp.add_parser('permission', help='approve / deny a permission card by option label (dry run unless --apply)'); s.add_argument('project'); s.add_argument('option'); s.add_argument('--thread'); s.add_argument('--card'); s.add_argument('--apply', action='store_true', help='really press the button (default is a dry run)')
+    s = sp.add_parser('permission', help='approve / deny a permission card by option label (dry run unless --apply)'); s.add_argument('project'); s.add_argument('option'); s.add_argument('--thread'); s.add_argument('--card'); s.add_argument('--apply', action='store_true', help='really press the button (default is a dry run)'); s.add_argument('--only-apps', help='computer-use cards: comma-separated apps an Allow may cover (anything else is refused)'); s.add_argument('--budget', type=float, help='answer within N seconds; the press runs as a background job'); s.add_argument('--job', help='result of a permission job')
+    s = sp.add_parser('permission-job', help=argparse.SUPPRESS); s.add_argument('key')
+    s = sp.add_parser('card-watch', help='press Allow on allowlisted computer-use cards in one thread as they appear'); s.add_argument('project'); s.add_argument('--thread'); s.add_argument('--only-apps', required=True); s.add_argument('--for', dest='duration', type=float, default=600); s.add_argument('--interval', type=float, default=5); s.add_argument('--dry-run', action='store_true'); s.add_argument('--stop-after', type=int, default=0)
+    s = sp.add_parser('computer-card', help='decide a computer-use card from a snapshot of the controlled computer\'s Claude app (presses nothing)'); s.add_argument('action', choices=['decide']); s.add_argument('--snapshot', required=True, help='JSON from hosts/windows/computer-permission.ps1 {"action":"snapshot"} (- = stdin)'); s.add_argument('--option', required=True); s.add_argument('--only-apps'); s.add_argument('--card'); s.add_argument('--apply', action='store_true', help='return the press request (default: dry run)')
     s = sp.add_parser('forward', help='relay one message verbatim to another thread (dry run unless --apply)'); s.add_argument('source_project'); s.add_argument('target_project'); s.add_argument('--source-thread'); s.add_argument('--target-thread'); s.add_argument('--message', type=int); s.add_argument('--role', default='assistant', choices=['assistant', 'user', 'any']); s.add_argument('--note'); s.add_argument('--attachments', action='store_true'); s.add_argument('--cached-source', action='store_true'); s.add_argument('--bot-name'); s.add_argument('--apply', action='store_true')
     s = sp.add_parser('staging', help='managed staging dir: info, or sweep (dry run unless --apply)'); s.add_argument('action', choices=['info', 'sweep']); s.add_argument('--older-than-hours', type=float); s.add_argument('--kind', action='append'); s.add_argument('--apply', action='store_true')
     s = sp.add_parser('skill', help='print the canonical skill with the effective policy'); s.add_argument('--policy-only', action='store_true')
@@ -4352,17 +4755,19 @@ def main(argv=None):
     import signal
     lim = int(os.environ.get('CLAUDE_PROJECTS_MAX_SECONDS', '0')) or ((getattr(a, 'timeout', 0) or 0) + 300 if a.cmd in ('send', 'wait') else 600)
     if a.cmd == 'send-job': lim = int(SEND_DEADLINE + 120)        # the job enforces its own deadline; this is the backstop
+    if a.cmd == 'permission-job': lim = int(PERM_LOCK_WAIT + 180)
+    if a.cmd == 'card-watch': lim = int(a.duration + 180)
     def _alarm(*_): raise Interrupted(f'claude-projects watchdog: {a.cmd} exceeded {lim}s')
     def _term(*_): raise Interrupted('stopped by SIGTERM')    # finally blocks run: composer cleanup, lock release, go home
     signal.signal(signal.SIGALRM, _alarm); signal.alarm(lim); signal.signal(signal.SIGTERM, _term)
     rc = 0
     try:
         if a.cmd == 'projects': res = op_projects(a.refresh, a.all, **F, stay=a.stay)
-        elif a.cmd == 'project': res = op_project_get(a.project, not a.cached, a.resolved, a.all_threads, a.max, **F, stay=a.stay, shot=a.shot)
+        elif a.cmd == 'project': res = op_project_get(a.project, not a.cached, a.resolved, a.all_threads, a.max, **F, stay=a.stay, shot=a.shot, cache_if_busy=a.cache_if_busy, lock_wait=a.lock_wait)
         elif a.cmd == 'threads':
             r = op_project_get(a.project, True, a.resolved, a.all_threads, 1, **F, stay=a.stay, shot=a.shot); res = {'project': r['project'], 'project_id': r['project_id'], 'threads': r.get('threads')}
         elif a.cmd == 'read':
-            res = op_read(a.project, a.thread, not a.cached, a.max, a.history, a.expand, **F, stay=a.stay, shot=a.shot, include_images=a.images, markdown=a.markdown)
+            res = op_read(a.project, a.thread, not a.cached, a.max, a.history, a.expand, **F, stay=a.stay, shot=a.shot, include_images=a.images, markdown=a.markdown, cache_if_busy=a.cache_if_busy, lock_wait=a.lock_wait)
             if a.attachments and not a.json: res['_show_atts'] = True
         elif a.cmd == 'attachment':
             if a.action == 'list':
@@ -4413,7 +4818,18 @@ def main(argv=None):
             res = {'origin_prefix': ORIGIN_PREFIX, 'origin_header': origin_header(bn), 'text': text}
         elif a.cmd == 'config': res = dict(CFG, config_file=str(cfg_mod.CONFIG_FILE))
         elif a.cmd == 'permissions': res = op_permissions(a.project, a.thread, **F, stay=a.stay)
-        elif a.cmd == 'permission': res = op_permission(a.project, a.option, a.thread, a.card, dry_run=not a.apply, **F, stay=a.stay, shot=a.shot)
+        elif a.cmd == 'permission-job': res = run_permission_job(a.key)
+        elif a.cmd == 'card-watch': res = op_card_watch(a.project, a.thread, [x.strip() for x in a.only_apps.split(',') if x.strip()], a.duration, a.interval, force=a.force, dry_run=a.dry_run, stop_after=a.stop_after)
+        elif a.cmd == 'computer-card':
+            from claude_projects import computer_cards as CC
+            snap = json.loads(sys.stdin.read() if a.snapshot == '-' else pathlib.Path(a.snapshot).read_text(encoding='utf-8-sig'))
+            res = CC.plan(snap, a.option, [x.strip() for x in a.only_apps.split(',') if x.strip()] if a.only_apps is not None else None, a.card, a.apply)
+            CC.log_entry(LOGD/'computer-cards.jsonl', {k: v for k, v in res.items() if k != 'cards'})
+        elif a.cmd == 'permission' and (a.job or a.budget is not None):
+            res = op_permission_job(a.project, a.option, a.thread, a.card, dry_run=not a.apply, force=a.force, budget=a.budget, job_id=a.job,
+                                    only_apps=[x.strip() for x in a.only_apps.split(',') if x.strip()] if a.only_apps is not None else None)
+        elif a.cmd == 'permission': res = op_permission(a.project, a.option, a.thread, a.card, dry_run=not a.apply, **F, stay=a.stay, shot=a.shot,
+                                                        only_apps=[x.strip() for x in a.only_apps.split(',') if x.strip()] if a.only_apps is not None else None)
         elif a.cmd == 'forward': res = op_forward(a.source_project, a.target_project, a.source_thread, a.target_thread, a.message, a.role, a.note, a.attachments, not a.cached_source, dry_run=not a.apply, bot_name=a.bot_name, **F, stay=a.stay)
         elif a.cmd == 'staging': res = op_staging(a.action, dry_run=not a.apply, older_than_hours=a.older_than_hours, kinds=a.kind)
         elif a.cmd == 'skill':

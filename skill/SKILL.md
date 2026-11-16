@@ -274,7 +274,7 @@ needs the user sits in the sidebar's **Waiting on you** group while the primary 
 | `claude_thread_send(project, message, thread, dry_run, attachments, attach_test, idempotency_key, job_id, clear_leftovers)` | type + Send + verify; answers within ~45 s (`pending` + `job_id` while it still runs: call again, it never sends twice; a repeat within 30 min says `joined_existing_send`, a new `idempotency_key` sends again on purpose). Refuses when the box holds attachment chips it didn't add (`composer_chips`); `clear_leftovers=true` removes them first. `attach_test="open"` (dry run) attaches each file and removes it again, never Send | yes |
 | `claude_thread_forward(source_project, target_project, ..., dry_run=true)` | relay one message verbatim (+ files) | yes |
 | `claude_thread_permissions(project, thread)` | READ-ONLY list of permission cards | yes |
-| `claude_thread_permission(project, option, thread, card_id, dry_run=true)` | press a card's button by label | yes |
+| `claude_thread_permission(project, option, thread, card_id, dry_run=true, only_apps, job_id)` | press a card's button by label; answers within ~45 s (`pending` + `job_id` while queued); real click + verification | yes |
 | `claude_thread_attachment_get(project, thread, attachment_id, as)` | fetch an image / file / output into staging | yes |
 | `claude_thread_create(project, title, instructions, dry_run)` | ask the primary to start a child thread | yes |
 | `claude_staging(action='info'|'sweep', dry_run=true)` | the managed file directory: paths, sizes, cleanup | no |
@@ -334,6 +334,33 @@ You are the overseer. Unblock what is clearly inside the task the user gave; sur
    (type, target, options) and wait for their answer. Pressing `Not now` / deny also needs a reason from the policy or
    the user, because it can derail the thread.
 4. Record repeat decisions as a proposal (`claude_policy_propose`) so the user can pre-approve them next time.
+
+### Computer use (screen control)
+
+Claude reaches a computer's screen through the Claude desktop app **on that computer** (Settings -> Computer use). Two
+cards can show in the thread:
+
+- **The enable step** (`computer_use_kind: "probe"`): "Claude wants to use your computer", no apps, "Check that computer
+  use is turned on in the Claude desktop app on `<device>`" [Deny] [Continue]. `Continue` tells Claude the user says it
+  is on there; `Deny` makes Claude carry on without the screen for that turn. Press `Continue` only when the user said
+  computer use is on (or the policy pre-approves it).
+- **The apps card** (`computer_use_kind: "apps"`): "Claude wants to use: Sketchpad All ... Notepad All" [Deny] [Allow for
+  this session]. The plugin presses it with a real pointer click at the button's centre, then verifies. AT-SPI
+  `do_action(0)` can only focus this button, not click it: the card stays pending and can cause new requests to decline
+  instantly. Do not assume an Allow needs to be pressed on the controlled computer: a real click from the plugin host
+  has been proven to grant laptop screen access. The laptop UI Automation path is also kept (`hosts/windows/computer-permission.ps1`
+  snapshot -> `claude-projects computer-card decide --only-apps ...` -> press request; dry run first).
+- Under a standing approval for named apps, pass them as `only_apps` (e.g. `["Sketchpad", "Notepad"]`): an Allow on a
+  card that requests anything else is refused (`apps_not_allowed`). Count a press as done only when `card_gone` is true
+  and the thread goes on with the screen.
+- **Why a thread says "turn on computer use" when it is on:** the app writes Claude's note about computer use from the
+  desktop the message was *typed on*. Messages sent through this plugin are typed on its host, where computer use is
+  usually off, so Claude reads "Computer use is available on device X but not turned on yet" on every such turn, even
+  though it is on where it matters. Tell the user; don't conclude that it is off. The fix is a message in the thread
+  (sent only with the user's OK) saying computer use is on in the Claude app on that device and asking Claude to call
+  `computer_resolve_access` for it, then `computer_request_access` with the apps it needs.
+- `claude_thread_permission` always answers within about 45 s: while the app is busy it returns `pending: true`, a
+  `job_id`, `queue_position` and `eta_s`; call it again with `job_id`. Each job's timeline is in `diagnostics_file`.
 
 ## Sending and forwarding
 

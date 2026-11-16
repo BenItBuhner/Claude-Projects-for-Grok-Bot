@@ -2,6 +2,25 @@
 
 ## 1.0.4 (2026-11-15)
 
+### Reliable computer-use presses and bounded jobs
+- Root cause confirmed live: AT-SPI `do_action(0)` only focused "Allow for this session"; it did not click it. The
+  pending card remained and later requests declined immediately. A real xdotool click from the home lab granted laptop
+  screen access and cleared the card in 1 s at 5:56:15 PM CT. Cards now use a real click at the button centre, with
+  `do_action` only as a fallback and a verification after either path. Intro Continue uses a real click too.
+- Computer-use cards distinguish enable probes from apps lists. `only_apps` refuses cards requesting other apps;
+  lasting grants, full-screen control and disabled buttons are refused. The laptop UI Automation path is retained.
+- Permission jobs answer within about 40 s with a result or pending + job id, queue position and ETA. Each job saves
+  diagnostics; repeating a call joins the same job rather than pressing twice.
+- `card-watch` watches one thread for allowlisted apps cards and logs every decision/press. It takes a short urgent lock
+  for each look, freeing the UI between checks.
+
+### Latency and the UI queue
+- Urgent (permission presses, card watcher), normal (reads/sends), and bulk (attachments/refreshes) lanes; FIFO in each.
+  Bulk work steps aside for urgent work at checkpoints. Status exposes queue position and ETA.
+- MCP reads answer cache-first while the app is busy; uncached reads queue at most about 35 s. Already-open targets
+  skip the deep link. AT-SPI calls and tree walks are bounded; post-press verification watches the button, not repeated
+  40000-node walks.
+
 ### The last old name
 - The error class is `ClaudeProjectsError` (was a short-prefixed name, plus an alias for an even older one, both
   removed). Error results report `"error": "ClaudeProjectsError"`; the subclasses `Busy`, `NotFound`, `Refused` and
