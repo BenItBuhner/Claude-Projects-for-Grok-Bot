@@ -115,6 +115,49 @@ def computer_use_apps(lines, text=''):
     return out
 
 
+# Computer-use cards come in two kinds (Claude desktop app 4.16336):
+#   probe  'Claude wants to use your computer' with NO apps: the enable step. Shown on a desktop that is not the computer
+#          Claude controls, it reads 'Check that computer use is turned on in the Claude desktop app on <device>
+#          (Settings -> Computer use), then continue.' [Deny] [Continue]. Continue answers 'the user says computer use is on
+#          there; call computer_resolve_access'; Deny tells Claude to go on without computer use for this turn.
+#   apps   'Claude wants to use: <app> <tier> ...' [Deny] [Allow for this session | Allow once]. A real pointer click
+#          works from another desktop too (proven on 2026-11-15). AT-SPI do_action(0) only focused the button without
+#          firing the click; do not infer device binding from a card that stayed pending after do_action.
+CU_DEVICE_RE = re.compile(r'claude desktop app on (?P<dev>.+?)\s*\((?:settings|open settings)', re.I)
+CU_ALWAYS_RE = re.compile(r'^(always allow|allow always|allow for all tasks|allow all tasks|allow for all scheduled runs)$', re.I)
+CU_FULL_RE = re.compile(r'take over (the|your) screen|full[- ]screen control|full control of your screen|clipboard|system key', re.I)
+
+
+def computer_use_kind(card):
+    """'apps' when the card lists apps, 'probe' for the enable step (no apps), None for other cards."""
+    if (card or {}).get('type') != 'computer_use': return None
+    return 'apps' if card.get('apps') else 'probe'
+
+
+def computer_use_device(text):
+    m = CU_DEVICE_RE.search(text or '')
+    return m.group('dev').strip().strip('"\u201c\u201d') if m else None
+
+
+def _app_keys(a):
+    keys = set()
+    for v in (a.get('displayName'), a.get('bundleId')):
+        if not v: continue
+        v = str(v).strip(); keys.add(v.casefold())
+        base = re.split(r'[\\/]', v)[-1]; keys.add(base.casefold())
+        keys.add(re.sub(r'\.(exe|app)$', '', base, flags=re.I).casefold())
+    return keys
+
+
+def apps_outside(card, only_apps):
+    """Apps on a computer-use card that are not in only_apps (matched by display name, program path or file name,
+    case-insensitively). [] means every requested app is allowed. A card whose apps could not be read returns ['?']."""
+    want = {str(x).strip().casefold() for x in (only_apps or []) if str(x).strip()}
+    apps = (card or {}).get('apps') or []
+    if not apps: return ['?']
+    return [a.get('displayName') or a.get('bundleId') or '?' for a in apps if not (_app_keys(a) & want)]
+
+
 def card_id(kind, target, prompt):
     h = hashlib.sha1(f'{kind}\x00{target or ""}\x00{(prompt or "")[:200]}'.encode('utf-8')).hexdigest()[:10]
     return f'perm_{h}'
@@ -193,7 +236,8 @@ def find_cards(nodes, max_up=6):
         extra = {}
         if kind == 'computer_use':
             apps = computer_use_apps(subtree_lines(c), prompt)
-            extra = {'apps': apps, 'tiers': sorted({a['tier'] for a in apps if a.get('tier')})}
+            extra = {'apps': apps, 'tiers': sorted({a['tier'] for a in apps if a.get('tier')}), 'cu_kind': 'apps' if apps else 'probe',
+                     'device': computer_use_device(prompt)}
             target = ', '.join(a['displayName'] for a in apps if a.get('displayName')) or target
         res.append({'card_id': card_id(kind, target, prompt), 'type': kind, 'target': target, 'prompt': prompt[:600],
                     'options': card['options'], 'affirmative_options': [o for o in card['options'] if AFFIRM_RE.match(o)],

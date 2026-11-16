@@ -56,6 +56,34 @@ data and finds cards generically: the nearest container of option buttons whose 
 `current_state.waiting_on` becomes `permission`. A reply that stalls in prose ("should I proceed?") sets the same flag
 with `permission_hint`. Whether to press anything is the agent's call under the user's policy.
 
+Computer-use cards are typed by `computer_use_kind`. The **probe** (no apps; "Check that computer use is turned on in
+the Claude desktop app on `<device>`" [Deny] [Continue]) can be answered from any desktop. The **apps** card can also
+be answered from the plugin host: use a real pointer click at the button centre. AT-SPI `do_action(0)` only focused
+"Allow for this session" without firing its click, leaving the pending card stuck and causing later requests to decline.
+A real click from the home lab granted laptop screen access in 1 s (2026-11-15, 5:56:15 PM CT). `only_apps` limits an Allow to cards that request nothing
+else; lasting grants and full-screen control are always refused, and a disabled button is never pressed. On the
+controlled Windows PC, `hosts/windows/computer-permission.ps1` reads the app over UI Automation (`{"action":
+"snapshot"}`) and presses one button by runtime id (`{"action": "press", ...}`, Invoke only: no mouse, keys, focus or
+clipboard); `claude-projects computer-card decide --snapshot <file> --option <label> --only-apps A,B [--apply]` turns
+the snapshot into that press request with the same rules (a dry run unless `--apply`), logging each decision to
+`logs/computer-cards.jsonl`.
+
+A press runs as a background job (`permission-jobs/<job>.json`), so the tool answers within about 45 s: the result, or
+`pending` with `job_id`, `queue_position`, `eta_s` and `busy: "busy, queued as job X"`. The worker writes a timeline
+(queue on arrival, lock acquired, thread opened, cards read, refusal or press, verification, result; each with a local
+time) to `permission-jobs/<job>.diag.json`. Verification is cheap: it watches the pressed button's own object (no tree
+walk) for up to 10 s, then reads the cards once.
+
+## The UI queue
+
+One UI action runs at a time. Waiters take a ticket (`ui.queue/`) and get the lock strictly in arrival order; tickets
+of dead processes are dropped. `claude_status` (and `claude-projects status`) shows `ui_queue`: the holder, how long it
+has held the lock and its expected remaining time, and each waiter's position and `eta_s` (from recent lock-hold times
+per kind of operation, `op-durations.json`). A pending send or permission answer carries its own `queue_position` and
+`eta_s`. Reads through MCP are cache-first while another run holds the app: they answer at once from the last read
+(`served_from_cache_because_busy`, `busy.eta_s`, `cache_age_min`); with nothing cached they queue up to about 35 s and
+then answer busy with their queue position.
+
 ## Threads waiting on you, and approval asks
 
 Claude asks for things in child threads as well as the primary, and a child that needs the user lands in the sidebar's

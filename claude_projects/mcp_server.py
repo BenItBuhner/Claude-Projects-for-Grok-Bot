@@ -67,6 +67,8 @@ def _is_busy(res):
 
 ATTACH_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_BUDGET', '40'))   # MCP clients give up near 60 s
 SEND_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_SEND_BUDGET', '40'))
+PERMISSION_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_PERMISSION_BUDGET', '40'))
+READ_LOCK_WAIT = float(os.environ.get('CLAUDE_PROJECTS_READ_LOCK_WAIT', '35'))   # a live read queues this long, then answers busy
 
 
 async def run(args, timeout=900, msg=None, attach=None, busy_budget=None):
@@ -155,9 +157,12 @@ async def claude_project_get(project: str, refresh: bool = True, max_messages: i
     each with index, role user/assistant, text, time_local) plus its child THREADS (title, thread_id cmsg_..., group such as
     'Waiting on you' / 'Working' / 'Idle', status, age, PRs). include_resolved / all_threads expand the collapsed groups.
     refresh=false returns the last cached read without touching the app. project = name (fuzzy), chan_ id or cse_ id.
-    Messages carry `attachments` and `blocks` like claude_thread_read; include_images / markdown work the same."""
-    a = ['project', project, '--max', str(max_messages)] + (['--cached'] if not refresh else []) + (['--resolved'] if include_resolved else []) + (['--all-threads'] if all_threads else []) + (['--images'] if include_images else []) + (['--markdown'] if markdown else []) + (['--stay'] if refresh else [])
-    return with_images(await run(flags(force) + a, 300))
+    Messages carry `attachments` and `blocks` like claude_thread_read; include_images / markdown work the same.
+    CACHE-FIRST WHEN BUSY: while another run holds the app, a refresh answers at once from the last read
+    (served_from_cache_because_busy=true, busy.eta_s, cache_age_min); with nothing cached it queues up to ~35 s, then
+    answers busy with the queue position."""
+    a = ['project', project, '--max', str(max_messages)] + (['--cached'] if not refresh else ['--cache-if-busy', '--lock-wait', str(READ_LOCK_WAIT)]) + (['--resolved'] if include_resolved else []) + (['--all-threads'] if all_threads else []) + (['--images'] if include_images else []) + (['--markdown'] if markdown else []) + (['--stay'] if refresh else [])
+    return with_images(await run(flags(force) + a, 300, busy_budget=0))
 
 @mcp.tool(structured_output=False)
 async def claude_thread_read(project: str, thread: Optional[str] = None, refresh: bool = True, max_messages: int = 20,
@@ -170,9 +175,12 @@ async def claude_thread_read(project: str, thread: Optional[str] = None, refresh
     mime, path_in_project, url; path_on_host + sha256 once fetched) and `blocks` (code with language, table rows, list, heading,
     quote, inline_code). Fetch an attachment's content with claude_thread_attachment_get. include_images=true adds small screen-crop
     thumbnails of image attachments as image content; markdown=true adds a markdown rendering per message.
-    Each user message has sent_by_bot (true when its first line is the origin bracket) - see the server instructions."""
-    a = ['read', project, '--max', str(max_messages), '--history', str(history_pages)] + (['--thread', thread] if thread else []) + (['--cached'] if not refresh else []) + (['--expand'] if expand else []) + (['--images'] if include_images else []) + (['--markdown'] if markdown else []) + (['--stay'] if refresh else [])
-    return with_images(await run(flags(force) + a, 300))
+    Each user message has sent_by_bot (true when its first line is the origin bracket) - see the server instructions.
+    CACHE-FIRST WHEN BUSY: while another run holds the app, a refresh answers at once from the last read
+    (served_from_cache_because_busy=true, busy.eta_s, cache_age_min); retry after eta_s for a live read. With nothing
+    cached it queues (fair FIFO) up to ~35 s, then answers busy with the queue position."""
+    a = ['read', project, '--max', str(max_messages), '--history', str(history_pages)] + (['--thread', thread] if thread else []) + (['--cached'] if not refresh else ['--cache-if-busy', '--lock-wait', str(READ_LOCK_WAIT)]) + (['--expand'] if expand else []) + (['--images'] if include_images else []) + (['--markdown'] if markdown else []) + (['--stay'] if refresh else [])
+    return with_images(await run(flags(force) + a, 300, busy_budget=0))
 
 @mcp.tool(structured_output=False)
 async def claude_thread_attachment_get(project: str, thread: Optional[str] = None, attachment_id: Optional[str] = None,
@@ -363,15 +371,25 @@ async def claude_thread_permissions(project: str, thread: Optional[str] = None, 
 
 @mcp.tool()
 async def claude_thread_permission(project: str, option: str, thread: Optional[str] = None, card_id: Optional[str] = None,
-                                   dry_run: bool = True, force: bool = False) -> dict:
+                                   dry_run: bool = True, force: bool = False, only_apps: Optional[list[str]] = None,
+                                   job_id: Optional[str] = None) -> dict:
     """Approve or deny a permission card by pressing one of its buttons, chosen by label (exact, case-insensitive; a unique prefix
     also works), e.g. option='Add folder' or option='Not now'. card_id picks the card when several are showing.
     dry_run=true (the DEFAULT) finds the card and the button and presses nothing; pass dry_run=false to really press it.
     Policy: press an affirmative option only when the user policy pre-approves it or the action is clearly inside the task the user
     gave; anything questionable (outside the task, secrets, destructive, new machines/repos the user did not mention) goes to the
-    user first. The result says whether the card disappeared (card_gone)."""
-    a = ['permission', project, option] + (['--thread', thread] if thread else []) + (['--card', card_id] if card_id else []) + ([] if dry_run else ['--apply'])
-    return await run(flags(force) + a, 300)
+    user first. The result says whether the card disappeared (card_gone).
+    COMPUTER USE: only_apps=['Ephemeris','Notepad'] refuses an Allow on any card that requests other apps
+    (apps_not_allowed); lasting grants ('Always allow') and full-screen control are refused. All card buttons are pressed
+    with a real pointer click at their centre, then verified; AT-SPI do_action is a fallback (on computer-use cards it
+    can focus the button without clicking it). An Allow can work from this host even for a laptop-targeted card.
+    ALWAYS ANSWERS WITHIN ABOUT 45 S: the press runs as a background job. While it waits for the app the answer is
+    pending=true with job_id, queue_position, eta_s and busy ('busy, queued as job X'); call again with job_id (or the same
+    arguments) for the result; it never presses twice. Every job writes its timeline to diagnostics_file."""
+    if job_id:
+        return await run(flags(force) + ['permission', project, option or '-', '--job', job_id, '--budget', '20'], 60, busy_budget=0)
+    a = ['permission', project, option] + (['--thread', thread] if thread else []) + (['--card', card_id] if card_id else []) + ([] if dry_run else ['--apply']) + (['--only-apps', ','.join(only_apps)] if only_apps is not None else []) + ['--budget', str(PERMISSION_BUDGET)]
+    return await run(flags(force) + a, 60, busy_budget=0)
 
 # ---------------------------------------------------------------- forwarding
 @mcp.tool()

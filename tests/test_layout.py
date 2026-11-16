@@ -37,7 +37,7 @@ def test_old_names_only_in_migration_code():
 
 def test_package_layout_and_entry_points():
     pkg = REPO / 'claude_projects'
-    for m in ('__init__', '__main__', 'core', 'config', 'idb', 'mcp_server', 'origin', 'permissions', 'policy', 'proc', 'setup', 'staging', 'attention'):
+    for m in ('__init__', '__main__', 'core', 'config', 'idb', 'mcp_server', 'origin', 'permissions', 'policy', 'proc', 'setup', 'staging', 'attention', 'computer_cards'):
         assert (pkg / f'{m}.py').is_file(), m
     assert not list(REPO.glob('*.py')), 'no modules at the top level'
     assert 'claude-projects = "claude_projects.__main__:main"' in (REPO / 'pyproject.toml').read_text()
