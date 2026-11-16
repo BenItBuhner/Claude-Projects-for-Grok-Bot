@@ -35,6 +35,7 @@ def app(monkeypatch, files):
     monkeypatch.setattr(C, 'dialogs', lambda: None)
     monkeypatch.setattr(C, '_open_files_wids', lambda: [])
     monkeypatch.setattr(C, 'read_messages', lambda *x, **k: [])
+    monkeypatch.setattr(C, 'last_index', lambda *x, **k: 0)
     monkeypatch.setattr(C, 'composer', lambda **kw: 'composer')
     monkeypatch.setattr(C, 'composer_text', lambda e: a.text)
     monkeypatch.setattr(C, 'main_doc', lambda: (None, ''))

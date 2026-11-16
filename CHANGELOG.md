@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.0.6 (2026-11-15)
+
+### Reads and sends stop walking message bodies
+- Every accessibility walk now skips what it doesn't need. Finding messages, the last message number, settling a
+  page, the Stop check, and the attachment finder never walk into a message body. Page lookups (thread title,
+  "Running on", dialogs, Send/Add buttons, the message box) never walk into the transcripts. Before, each of these
+  walked the whole transcript at 13-20 ms per node.
+- One page snapshot (outside the transcripts) is read once per read and shared by pane info, dialogs, the Stop check
+  and the permission-card scan. Before, each walked the page on its own.
+- The transcript panel and the message box are remembered while they are alive on the same route.
+- Reads parse only the messages they return. Finished messages are reused from the last read (everything before that
+  read's latest message, unless the app cut it short). Expand, images and markdown always parse fresh.
+- Permission cards on reads are looked for outside the transcript and in its last 2 messages. Card presses and the
+  card watcher keep the full scan.
+- Sends get the last message number without parsing anything. Verify and the post check parse only the messages after
+  it.
+- Measured live on a long transcript: a live read went from 120-145 s of UI time to 22 s (settle 4.5, messages 3.2,
+  page snapshot 3.4, busy 2.7, cards 4.2). The last-index probe takes 2.5 s (it used to take 38.6 s).
+
+### Bulk work steps aside faster
+- The bulk cap is 10 s (was 20 s; `CLAUDE_PROJECTS_BULK_CAP_S`). It no longer disarms after one interrupt. If a
+  broad `except` swallowed it, or one slow accessibility call (4 s per-call timeout) delayed it, it fires again a
+  second later until the bulk op lets go.
+- Settle polls every 0.25 s and needs 0.6 s of stability (it was 0.4 and 0.8 s). The polls are cheap now.
+
+### Shared and measured reads
+- `claude_project_get` reads coalesce too: a waiting caller answers from the shared pass when it left the threads in
+  the cache.
+- Every read answer logs `timing readsrc <live|coalesced|cache|cache_busy> ...: parsed N, reused N, total S`. Live
+  reads log their steps (`lock`, `settle`, `messages`, `ui_snapshot`, `busy`, `cards`), so cache hits and live reads
+  can be measured apart.
+
+### Follow-up after the first live samples
+- Identical reads from different bots share one UI pass even when they start at the same moment (a per-read
+  single-flight file lock keyed by project, thread and read options). Joiners get the same answer, stamped
+  `coalesced`, or the same error. Reads with different options never share.
+- The thread list is found and parsed without walking the transcripts (it took 32.5 s on a long Project).
+- The Stop check after the last message is one pruned pass (it took 14.3 s). The read's card scan reuses that pass
+  rather than walking the transcript again (cards took 16.5 s on a thread read).
+- A background read gives way to a waiting send or read as soon as its messages are in, rather than finishing threads
+  and cards first. It does not give way to other bulk work.
+- A preempted bulk op skips its trip back to the home page.
+- An attachment fetch that keeps getting preempted gets one last try with a 60 s cap
+  (`CLAUDE_PROJECTS_ATTACH_FINAL_CAP_S`). If it is preempted again it fails with `Busy` and can be retried later.
+  Before, it could hold the app for minutes.
+
 ## 1.0.5 (2026-11-15)
 
 ### Sends: verified, or loudly not
