@@ -15,6 +15,19 @@
 - install.sh makes the Python environment from /usr/bin/python3 (python3-gi is built for it only) and stops with a
   clear message when the environment can't load the AT-SPI bindings. `setup verify` has an `atspi` check. A pyenv,
   conda or Homebrew python3 on PATH used to give an install where the app only showed as "not reachable".
+- A file whose upload finishes after its per-file limit no longer leaves its chip in the message box. Cleanup waits up
+  to 15 s for that chip (`CLAUDE_PROJECTS_ATTACH_LATE_CHIP_S`) and takes it out, so the retry and later sends to the
+  thread aren't refused over a leftover. A chip that never shows is reported as `late_chips_not_seen`.
+- Attachment workers that store files at the same time no longer clash: the index update and the prune run under a
+  file lock, temp files have their own names, and the prune never deletes another worker's file mid-write. Before, a
+  fetch that worked could be reported as failed and index entries were lost.
+- The bulk cap no longer interrupts the cleanup that closes an Image preview or a file pane, so a preempted fetch
+  doesn't leave a dialog open (the next send stopped with "a dialog is open").
+- A status or busy-check probe no longer turns away a send, fetch or permission worker that starts at that moment
+  (it exited with "already running" and the job stayed queued). Probes take a shared lock; workers retry for 2 s.
+- New tests run the live checks against the fake app: `setup verify --live` on a healthy install, a send with
+  `wait=true` to a thread named by its title (looked up live, sent once, reply returned), and one approve on a
+  permission card.
 
 ### Sends report what really happened
 - A long post that the app shows collapsed (only its first line, then "Show more") now counts as posted. The visible

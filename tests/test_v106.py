@@ -182,3 +182,25 @@ def test_card_scan_reuses_busy_pass(monkeypatch):
     monkeypatch.setattr(c, 'walk', lambda a, *x, **k: (walked.append(idx[id(a)]), iter([]))[1])
     list(c._card_scan_nodes(None, True, snap=[(panel, 'section', 'Messages')]))
     assert walked == [2, 3]
+
+
+def test_preempt_never_fires_inside_cleanup(monkeypatch):
+    """The cap re-fires every couple of seconds; inside the overlay cleanup it must not, or the Image preview / file pane
+    stays open and the next send stops with 'a dialog is open'."""
+    monkeypatch.setattr(c, '_HELD', {'op': 'attachment get x', 'since': time.time() - 60})
+    monkeypatch.setattr(c, '_PREEMPT', {'armed': True, 'off': False})
+    monkeypatch.setattr(c, 'others_waiting', lambda: [{'pid': 1}])
+    closed = []
+    def close_overlays():
+        c._preempt_signal(None, None)                    # the watcher's SIGUSR1 lands mid-cleanup
+        closed.append(True); return True
+    with c.no_preempt(): close_overlays()
+    assert closed == [True] and c._PREEMPT['hold'] == 0
+    with pytest.raises(c.Preempted): c._preempt_signal(None, None)   # outside cleanup the cap still works
+
+
+def test_attachment_fetch_cleanup_closes_overlays_although_preempted(monkeypatch):
+    """A Preempted raised while the fetch runs, then again while its finally closes the overlays: the overlays close."""
+    import inspect
+    src = inspect.getsource(c._attachment_fetch) if hasattr(c, '_attachment_fetch') else ''
+    assert src.count('with no_preempt(): _close_att_overlays()') == 2

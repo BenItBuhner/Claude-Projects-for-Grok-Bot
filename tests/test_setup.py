@@ -504,3 +504,41 @@ def test_install_builds_the_venv_from_the_system_python_and_checks_atspi():
     assert 'run "$VENV_PY" -m venv --system-site-packages' in src
     assert 'run python3 -m venv' not in src
     assert "from gi.repository import Atspi" in src and 'exit 1' in src.split('from gi.repository import Atspi', 1)[1][:800]
+
+
+def test_verify_live_passes_on_a_healthy_install(env, monkeypatch, tmp_path):
+    """The live check `setup verify --live`, against a healthy fake host: every check passes, the send step is a dry run
+    with the origin header, and nothing is typed or sent."""
+    repo = tmp_path / 'repo'; (repo / '.venv' / 'bin').mkdir(parents=True); (repo / '.venv' / 'bin' / 'python').write_text('')
+    (repo / 'bin').mkdir()
+    monkeypatch.setattr(S, 'REPO', repo)
+    monkeypatch.setattr(S, 'CONFIG_FILE', S.CONFIG_DIR / 'config.json'); S.CONFIG_FILE.write_text('{}'); S.CONFIG_FILE.chmod(0o600)
+    monkeypatch.setattr(S, 'CFG', dict(S.CFG, service_mode='systemd', mcp_http=False, viewer_ports=[S.ports()['vnc'], S.ports()['novnc']]))
+    for u in S.core_units(): (S.UNIT_DIR / f'{u}.service').write_text('[Service]\nExecStart=/x\n')
+    env.run_map.update({'is-active': (0, 'active', ''), 'is-enabled': (0, 'enabled', ''), 'Linger': (0, 'yes', ''), '--check': (0, 'chromium', '')})
+    monkeypatch.setattr(S, 'always_on_checks', lambda f, hc: [S.check('always_on', 'pass', 'an always-on Linux machine')])
+    monkeypatch.setattr(S, 'mcp_tool_names', lambda: ['claude_setup'] + [f't{i}' for i in range(S.EXPECTED_TOOLS)])
+    S.save_state({'host': {'class': 'always_on_linux'}, 'beta': {'verdict': 'has_projects'}})
+    env.cli.update({
+        'skill': {'sha256': 'abc123'},
+        'status': {'signed_in': True, 'route': '/', 'dialogs': [], 'vnc_viewers': 0, 'lock_holder': None},
+        'projects': {'count': 1, 'list_fetched_by_app_local': 'today', 'projects': [{'id': 'chan_A', 'name': 'Docs', 'last_activity': '2026-11-16'}]},
+        'thread-status': {'machine': {'resolved': 'the workstation'}},
+        'project-env': {'cloud_environment': 'Default'},
+        'send': {'dry_run': True, 'origin_header': S.ORIGIN_PREFIX + ']'},
+    })
+    r = S.cmd_verify(args(live=True))
+    bad = [c for c in r['checks'] if c['status'] != 'pass']
+    assert r['result'] == 'pass' and not bad, bad
+    ids = {c['id'] for c in r['checks']}
+    assert {'atspi', 'app', 'signed_in', 'project_list', 'project_read', 'cloud_environment', 'send_dry_run'} <= ids
+    sends = [c for c in env.cli_calls if c[0] == 'send']
+    assert sends and all('--dry-run' in c for c in sends), 'verify never sends for real'
+
+
+def test_verify_live_fails_loudly_when_the_venv_has_no_atspi(env, monkeypatch, tmp_path):
+    env.run_map["from gi.repository import Atspi"] = (1, '', "ModuleNotFoundError: No module named 'gi'")
+    monkeypatch.setattr(S, 'mcp_tool_names', lambda: None)
+    r = S.cmd_verify(args(live=True))
+    a = next(c for c in r['checks'] if c['id'] == 'atspi')
+    assert r['result'] == 'fail' and a['status'] == 'fail' and "No module named 'gi'" in a['detail']
