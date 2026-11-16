@@ -687,9 +687,17 @@ def preemptible(op):
     k = op_kind(op)
     if k in URGENT_KINDS or k == 'wait': return False
     return k in PREEMPTIBLE_KINDS or _BULK_CTX
+@contextlib.contextmanager
+def no_preempt():
+    """Cleanup that must finish (closing an Image preview or a file pane): the bulk cap doesn't fire inside it. The cap
+    stays armed and fires every couple of seconds, so a second Preempted used to land in the middle of the cleanup and
+    leave a dialog open, and the next send stopped with 'a dialog is open'."""
+    _PREEMPT['hold'] = _PREEMPT.get('hold', 0) + 1
+    try: yield
+    finally: _PREEMPT['hold'] = max(0, _PREEMPT.get('hold', 1) - 1)
 def bulk_over_cap(t=None):
     """True when this process holds the UI lock for a preemptible bulk op past the cap while someone else waits."""
-    if _PREEMPT.get('off') or not _HELD or not preemptible(_HELD.get('op')): return False
+    if _PREEMPT.get('off') or _PREEMPT.get('hold') or not _HELD or not preemptible(_HELD.get('op')): return False
     if (t or time.time()) - float(_HELD.get('since') or time.time()) < float(_PREEMPT.get('cap') or BULK_HARD_CAP_S): return False
     return bool(others_waiting())
 def _preempt_signal(signum, frame):
@@ -1604,23 +1612,41 @@ def store_bytes(data, name, mime, meta):
     if mime and is_image_mime(mime) and ext not in ('.png', '.jpg', '.jpeg', '.webp', '.gif'): ext = mimetypes.guess_extension(mime) or ext
     p = ATT_DIR/f'{sha[:32]}{ext}'
     if not p.exists():
-        t = p.with_suffix(p.suffix + '.tmp'); t.write_bytes(data); t.replace(p)
+        t = p.with_name(f'{p.name}.{_tmp_tag()}.tmp'); t.write_bytes(data); t.replace(p)   # own temp name: workers storing the same bytes don't collide
     (ATT_DIR/f'{sha[:32]}.json').write_text(json.dumps(dict(meta, sha256=sha, path_on_host=str(p), size=len(data), stored_at=now().isoformat()), ensure_ascii=False))
     _att_index_put(meta, sha, str(p)); _att_prune(); return str(p), sha
 def _att_index():
     try: return json.loads((ATT_DIR/'index.json').read_text())
     except Exception: return {}
 def _att_key(chan, thread, idx, name): return f"{chan}|{thread or 'primary'}|{idx}|{name}"
+def _tmp_tag(): return f'{os.getpid()}-{threading.get_ident()}'
+@contextlib.contextmanager
+def _att_lock():
+    """Attachment workers store files after they let go of the UI lock, several at once: the index update and the
+    prune are read-modify-write, so they run under this file lock (else updates are lost, or replace() and stat()
+    fail on another worker's temp file and a fetch that worked is reported as failed)."""
+    ATT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(ATT_DIR/'.index.lock', 'a') as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try: yield
+        finally: fcntl.flock(lf, fcntl.LOCK_UN)
 def _att_index_put(meta, sha, path):
     if not meta.get('project_id'): return
-    ix = _att_index(); ix[_att_key(meta['project_id'], meta.get('thread_id'), meta.get('message_index'), meta.get('name'))] = {'sha256': sha, 'path_on_host': path, 'source': meta.get('source'), 'mime': meta.get('mime'), 'size': meta.get('size')}
-    t = ATT_DIR/'index.tmp'; t.write_text(json.dumps(ix)); t.replace(ATT_DIR/'index.json')
+    with _att_lock():
+        ix = _att_index(); ix[_att_key(meta['project_id'], meta.get('thread_id'), meta.get('message_index'), meta.get('name'))] = {'sha256': sha, 'path_on_host': path, 'source': meta.get('source'), 'mime': meta.get('mime'), 'size': meta.get('size')}
+        t = ATT_DIR/f'index.{_tmp_tag()}.tmp'; t.write_text(json.dumps(ix)); t.replace(ATT_DIR/'index.json')
 def _att_prune():
-    fs = [f for f in ATT_DIR.iterdir() if f.is_file() and f.name not in ('index.json',) and not f.name.endswith('.json')]
-    tot = sum(f.stat().st_size for f in fs)
-    for f in sorted(fs, key=lambda f: f.stat().st_mtime):
-        if tot <= ATT_TOTAL_CAP: break
-        tot -= f.stat().st_size; f.unlink(missing_ok=True); (ATT_DIR/(f.stem + '.json')).unlink(missing_ok=True)
+    def size_mtime(f):
+        try: st = f.stat(); return st.st_size, st.st_mtime
+        except FileNotFoundError: return None
+    with _att_lock():
+        # never another worker's file being written (*.tmp) or the lock (dot files)
+        fs = [(f, sm) for f in ATT_DIR.iterdir() if f.is_file() and not f.name.endswith(('.json', '.tmp')) and not f.name.startswith('.')
+              for sm in [size_mtime(f)] if sm]
+        tot = sum(sm[0] for _, sm in fs)
+        for f, (size, _) in sorted(fs, key=lambda x: x[1][1]):
+            if tot <= ATT_TOTAL_CAP: break
+            tot -= size; f.unlink(missing_ok=True); (ATT_DIR/(f.stem + '.json')).unlink(missing_ok=True)
 def annotate_known(msgs, chan, thread):
     ix = _att_index()
     for m in msgs:
@@ -2020,26 +2046,36 @@ class Interrupted(BaseException):
 class Preempted(Interrupted):
     """A bulk op went past the bulk hard cap while another op waited for the UI: it stops at once (finally blocks run)
     and its caller retries it behind the waiters."""
-def job_lock(dirp, key):
-    """-> an open file holding the job's exclusive lock, or None when another process holds it."""
+JOB_LOCK_WAIT_S = 2.0     # a worker retries this long, so a status probe that holds the lock for an instant can't turn it away
+def job_lock(dirp, key, wait=0.0):
+    """-> an open file holding the job's exclusive lock, or None when another process holds it (after `wait` seconds)."""
     dirp.mkdir(parents=True, exist_ok=True); os.chmod(dirp, 0o700)
-    f = open(dirp/f'{key}.lock', 'a+')
-    try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); return f
-    except OSError: f.close(); return None
+    f = open(dirp/f'{key}.lock', 'a+'); t_end = time.time() + wait
+    while True:
+        try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); return f
+        except OSError:
+            if time.time() >= t_end: f.close(); return None
+            time.sleep(.1)
 def job_unlock(f):
     try: fcntl.flock(f, fcntl.LOCK_UN)
     except Exception: pass
     f.close()
 def job_running(dirp, key):
-    if not (dirp/f'{key}.lock').exists(): return False
-    f = job_lock(dirp, key)
-    if f is None: return True
-    job_unlock(f); return False
+    """A probe with a shared lock: it fails only while a worker holds the exclusive one, and two probes never clash."""
+    p = dirp/f'{key}.lock'
+    if not p.exists(): return False
+    try: f = open(p, 'a+')
+    except OSError: return False
+    try:
+        try: fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError: return True
+        fcntl.flock(f, fcntl.LOCK_UN); return False
+    finally: f.close()
 def job_read(dirp, key):
     try: return json.loads((dirp/f'{key}.json').read_text())
     except Exception: return None
 def job_write(dirp, key, data):
-    dirp.mkdir(parents=True, exist_ok=True); t = dirp/f'{key}.json.tmp'
+    dirp.mkdir(parents=True, exist_ok=True); t = dirp/f'{key}.json.{_tmp_tag()}.tmp'   # own temp name: the caller and the worker both write
     t.write_text(json.dumps(data, ensure_ascii=False, default=str)); t.replace(dirp/f'{key}.json')
 def jobs_running():
     """Running background jobs (for status and the deploy busy check)."""
@@ -2126,7 +2162,7 @@ def _att_job_running(key): return job_running(ATT_JOBS, key)
 def _att_run_job(key, job):
     """Run one fetch for key under its job lock and write the result file. Returns the result, or None when another
     process already holds the lock (that one writes the result; the caller waits for it)."""
-    f = job_lock(ATT_JOBS, key)
+    f = job_lock(ATT_JOBS, key, JOB_LOCK_WAIT_S)
     if f is None: return None
     try:
         r = _att_cached(key, since=job.get('started_ts'), fresh=bool(job.get('refresh')))
@@ -2235,7 +2271,8 @@ def _attachment_fetch(project, thread, message_index, n, force=False, stay=False
             else:
                 try: dl = _download_via_app(att, a, el)
                 except Exception as ex: log(f'download via app failed for {att["name"]}: {ex!r}')
-                try: _close_att_overlays()
+                try:
+                    with no_preempt(): _close_att_overlays()
                 except Exception: pass
                 if dl:
                     data, name, mime, extra = None, att['name'], att.get('mime') or guess_mime(att['name']) or 'application/octet-stream', {'original': True}
@@ -2246,7 +2283,8 @@ def _attachment_fetch(project, thread, message_index, n, force=False, stay=False
             _mark('fetch')
             if shot: screenshot(shot)
         finally:
-            try: _close_att_overlays()
+            try:
+                with no_preempt(): _close_att_overlays()
             except Exception: pass
             if not stay: go_home()
     meta.update({k: v for k, v in extra.items() if v is not None}); meta['source'] = how; meta['fetched_at_local'] = ct(now().isoformat())
@@ -2544,6 +2582,9 @@ def _click_chooser_open(root, wid):
     time.sleep(1.0)
 ATTACH_BUTTON_NAMES = ('Add', 'Add files', 'Attach', 'Add content', 'Add attachment')
 ATTACH_FILE_TIMEOUT = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_FILE_TIMEOUT', '20'))   # one file: picker, path, Open, chip
+# after a failed send, how long cleanup waits for the chip of a file whose Open was pressed but whose chip hadn't shown:
+# the upload can finish late, and a chip nobody removes blocks every later send to the thread as a leftover
+ATTACH_LATE_CHIP_S = float(os.environ.get('CLAUDE_PROJECTS_ATTACH_LATE_CHIP_S', '15'))
 class AttachError(AppError):
     """One file failed at one step; names both."""
     def __init__(self, name, step, detail=''):
@@ -2698,7 +2739,7 @@ def _chooser_ocr(wid, save=None, needle=None):
         except Exception as ex:
             log(f'chooser OCR unavailable: {ex!r}'); break
     return chr(10).join(out)
-def _attach_one_via_location(f, test_only=False, shot_dir=None, ctx=None, deadline=None, per_file=None):
+def _attach_one_via_location(f, test_only=False, shot_dir=None, ctx=None, deadline=None, per_file=None, pending=None):
     path = str(pathlib.Path(f['path']).expanduser().resolve())
     if not os.path.isfile(path) or not os.access(path, os.R_OK): raise AppError(f'{path} is not a readable file; nothing attached')
     deadline = deadline or Deadline(); limit = deadline.left(per_file or ATTACH_FILE_TIMEOUT); t0 = time.time(); tm = {}
@@ -2718,6 +2759,7 @@ def _attach_one_via_location(f, test_only=False, shot_dir=None, ctx=None, deadli
     if left() <= 0:
         raise AttachError(f['name'], f"opening the file picker and typing the path took longer than {int(limit)} s "
                                      f"(picker {tm.get('picker', 0):.1f} s, path {tm.get('path', 0):.1f} s)")
+    if pending is not None: pending.append(f['name'])     # Open pressed: a chip may still show up, even after we give up
     _click_chooser_open(None, wid); tm['open'] = time.time() - t0 - sum(tm.values())
     scope = getattr(ctx, 'scope', None); polls = 0
     while True:
@@ -2726,13 +2768,14 @@ def _attach_one_via_location(f, test_only=False, shot_dir=None, ctx=None, deadli
         if _composer_has_chip(f['name'], scope if (scope is not None and polls % 5) else None):
             tm['chip'] = time.time() - t0 - sum(tm.values())
             log(f"attached {f['name']} via location bar in {time.time() - t0:.1f} s (" + ', '.join(f'{k} {v:.1f}' for k, v in tm.items()) + ')')
+            if pending is not None and f['name'] in pending: pending.remove(f['name'])
             return {'name': f['name'], 'attached': True, 'seconds': round(time.time() - t0, 1), 'timing': {k: round(v, 1) for k, v in tm.items()}}
         if left() <= 0: break
         time.sleep(.3)
     if _open_files_wids(): _dismiss_open_files('attach timeout')
     log(f"attach {f['name']} timed out after {time.time() - t0:.1f} s (" + ', '.join(f'{k} {v:.1f}' for k, v in tm.items()) + ')')
     raise AttachError(f['name'], f'did not appear in the composer within {int(limit)} s after Open')
-def attach_files(files, test_only=False, shot_dir=None, done=None, deadline=None, per_file=None, progress=None):
+def attach_files(files, test_only=False, shot_dir=None, done=None, deadline=None, per_file=None, progress=None, pending=None):
     """Primary: one picker pass per file, absolute path typed into the GTK location bar, each file bounded by per_file
     seconds (CLAUDE_PROJECTS_ATTACH_FILE_TIMEOUT) and the whole send by deadline. done (a list) collects the names attached so far,
     so a caller can take them out again when a later file fails.
@@ -2749,7 +2792,7 @@ def attach_files(files, test_only=False, shot_dir=None, done=None, deadline=None
             deadline.check(f"before attaching {f['name']} ({i + 1}/{len(files)})")
             if progress: progress('attaching', attached=i, total=len(files), file=f['name'])
             try:
-                results.append(_attach_one_via_location(f, test_only=test_only, shot_dir=shot_dir, ctx=ctx, deadline=deadline, per_file=per_file))
+                results.append(_attach_one_via_location(f, test_only=test_only, shot_dir=shot_dir, ctx=ctx, deadline=deadline, per_file=per_file, pending=pending))
                 if not test_only: done.append(f['name'])
             except AppError as ex:
                 if isinstance(ex, AttachError) and ex.step != 'opening the file picker': raise
@@ -3202,7 +3245,7 @@ def op_permission_job(project, option, thread=None, card_id=None, dry_run=True, 
     return _perm_answer(job_read(PERM_JOBS, key) or {'job_id': key, 'state': 'queued'})
 def run_permission_job(key):
     global _PERM_DIAG, _LOCK_JOB_ID
-    f = job_lock(PERM_JOBS, key)
+    f = job_lock(PERM_JOBS, key, JOB_LOCK_WAIT_S)
     if f is None: return {'job_id': key, 'note': 'this permission job is already running'}
     st = job_read(PERM_JOBS, key) or {}; diag = []; _PERM_DIAG = diag; _LOCK_JOB_ID = key
     dpath = PERM_JOBS/f'{key}.diag.json'
@@ -3687,11 +3730,14 @@ def find_existing_post(project, thread, message, before_max=None, since_utc=None
     """Look in the thread (live read, no typing) for a user message that is this send's post. -> message or None.
     Used before any retry and after an unverified Send, so a message is never posted twice."""
     p = resolve_project(project); chan = p['id']; tid = resolve_thread(chan, thread)
-    cached = read_cache(chan, tid) or {}
-    for m in reversed(cached.get('messages') or []):
+    cached = read_cache(chan, tid) if not (tid and str(tid).startswith('LOOKUP:')) else None
+    for m in reversed((cached or {}).get('messages') or []):
         if post_matches(m, message, before_max, since_utc): return m
     with ui_lock(f'verify {p["name"]} {thread or "primary"} (post check)', force):
         try:
+            # a thread given by title that the cached sidebar doesn't list yet: look it up live, as op_send does
+            # (open_target can't open 'LOOKUP:<title>', so every check of such a send used to fail)
+            if tid and str(tid).startswith('LOOKUP:'): tid = _resolve_tid(p, chan, thread)
             open_target(chan, tid); settle(tid)
             for m in reversed(read_messages(tid, 0 if before_max is not None else 12, min_index=before_max, head_chars=VERIFY_HEAD_CHARS)):
                 if post_matches(m, message, before_max, since_utc): return m
@@ -3968,13 +4014,21 @@ def open_target_settled(chan, tid, maxs=25):
         return True
     raise Busy(f'transcript panel did not settle for {tid or "primary"} after reopen; retry')
 
-def _cleanup_composer(names, scope=None):
+def _cleanup_composer(names, scope=None, late=None):
     """After a failed send: close a file picker, take our chips out of the unsent message, clear typed text.
-    -> report of what was done and what is still there. Never presses Send."""
+    late: files whose Open was pressed but whose chip never showed; their upload may still finish, so wait up to
+    ATTACH_LATE_CHIP_S for each chip and take it out too. -> report of what was done and what is still there.
+    Never presses Send."""
     rep = {'open_files_closed': None, 'chips_removed': [], 'chips_left': [], 'composer_empty': None}
     try: rep['open_files_closed'] = _dismiss_open_files('send cleanup')
     except BaseException as ex: log(f'cleanup: dismiss failed {ex!r}')
-    for nme in names or []:
+    names = list(names or [])
+    for nme in [x for x in (late or []) if x not in names]:
+        try: seen = bool(_wait_until(lambda: _composer_has_chip(nme, scope) or _composer_has_chip(nme), ATTACH_LATE_CHIP_S, .5))
+        except BaseException as ex: seen = False; log(f'cleanup: waiting for the late chip {nme} failed {ex!r}')
+        if seen: log(f'cleanup: {nme} showed up late in the composer; taking it out'); names.append(nme)
+        else: rep.setdefault('late_chips_not_seen', []).append(nme)
+    for nme in names:
         try: (rep['chips_removed'] if _remove_chip(nme, scope) else rep['chips_left']).append(nme)
         except BaseException as ex: rep['chips_left'].append(nme); log(f'cleanup: remove {nme} failed {ex!r}')
     try:
@@ -3989,18 +4043,18 @@ def _attach_test_open(p, tid, files, chips0, e, dl, tmr):
     "Remove <name>" button. The message is never typed and Send is never pressed. The file does upload to claude.ai
     with the chip (that is what Open does); removing the chip leaves it out of any message."""
     if chips0: raise Refused(f'the message box already holds attachment(s) {chips0}; the open test needs an empty box. Nothing was attached.')
-    ctx = AttachCtx(); res = []; attached = []
+    ctx = AttachCtx(); res = []; attached = []; pending = []
     try:
         for i, f in enumerate(files):
             dl.check(f"before attaching {f['name']} ({i + 1}/{len(files)})")
             t0 = time.time()
-            r = _attach_one_via_location(f, test_only=False, ctx=ctx, deadline=dl); attached.append(f['name']); _mark('attach')
+            r = _attach_one_via_location(f, test_only=False, ctx=ctx, deadline=dl, pending=pending); attached.append(f['name']); _mark('attach')
             r['removed'] = bool(_remove_chip(f['name'], ctx.scope)); _mark('remove')
             if r['removed']: attached.remove(f['name'])
             r['total_seconds'] = round(time.time() - t0, 1); res.append(r)
             log(f"attach-test open {f['name']}: chip after {r.get('seconds')} s, removed={r['removed']}")
     except BaseException as ex:
-        rep = _cleanup_composer(attached)
+        rep = _cleanup_composer(attached, late=pending)
         try: ex.cleanup = rep
         except Exception: pass
         raise
@@ -4097,9 +4151,9 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 still = _clear_leftover_chips(chips0)
                 if still: raise AppError(f'could not remove leftover attachment(s) {still} from the message box; nothing was typed or sent')
                 cleared = chips0; log(f'removed leftover chips before sending: {chips0}'); _mark('clear_leftovers')
-            attached = []; send_pressed = False
+            attached = []; pending = []; send_pressed = False
             try:
-                if files: attach_files(files, done=attached, deadline=dl, progress=_progress); e = composer() or e
+                if files: attach_files(files, done=attached, deadline=dl, progress=_progress, pending=pending); e = composer() or e
                 dl.check('before typing'); _progress('typing', attached=len(attached), total=len(files))
                 if message: type_text(e, message)
                 _mark('typed'); dl.check('after typing')
@@ -4136,7 +4190,7 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 _mark('verify')
             except BaseException as ex:
                 if send_pressed: raise                     # it went out: never clear or retry after Send
-                rep = _cleanup_composer(attached)
+                rep = _cleanup_composer(attached, late=pending)
                 try: ex.cleanup = rep
                 except Exception: pass
                 log(f'send to {p["name"]} {tid or "primary"} stopped before Send ({type(ex).__name__}: {ex}); cleanup {rep}')
@@ -4154,8 +4208,15 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
         finally:
             if not (stay or wait): go_home()
     if wait:
-        w = op_wait(p['id'], tid, after_index=res['message_index'] or bmax, timeout=timeout, poll=poll, force=force, stay=stay, shot=shot)
-        res['reply'] = w
+        # Send was pressed: whatever the wait does now, this call has to answer with the send's result. Raising here
+        # (Busy after the lock wait, Refused while a viewer watches) exits non-zero, and the MCP layer retries Busy
+        # by running the whole send again: a second post.
+        try: res['reply'] = op_wait(p['id'], tid, after_index=res['message_index'] or bmax, timeout=timeout, poll=poll, force=force, stay=stay, shot=shot)
+        except ClaudeProjectsError as ex:
+            log(f'send to {p["name"]} {tid or "primary"}: sent, then the wait stopped ({type(ex).__name__}: {ex})')
+            res['reply'] = {'done': False, 'wait_error': type(ex).__name__, 'message': str(ex),
+                            'note': 'The message was sent; only the wait stopped. Do not send it again: call claude_thread_wait with '
+                                    f'after_index={res["message_index"] or bmax}.'}
     return res
 # ---- sends as background jobs: the MCP tool answers within its budget; a retry joins the job and never sends twice
 SEND_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_SEND_BUDGET', '40'))
@@ -4260,7 +4321,7 @@ def run_send_job(key):
     """The worker: one send for key, under its job lock, with progress written to the job file. A SIGTERM or the
     deadline stops it cleanly: the composer is cleaned up, the lock released, the app sent home, the reason recorded."""
     global _PROGRESS, _LOCK_JOB_ID
-    f = job_lock(SEND_JOBS, key)
+    f = job_lock(SEND_JOBS, key, JOB_LOCK_WAIT_S)
     if f is None: return {'job_id': key, 'note': 'this send job is already running'}
     st = job_read(SEND_JOBS, key) or {}; st['pid'] = os.getpid(); _LOCK_JOB_ID = key
     try:
@@ -4288,13 +4349,24 @@ def _send_job_attempts(key, st, spec, prog):
     is re-checked (10, 30, 60 s) and ends 'sent' (seen, with its index) or 'not_posted' - never 'sent' unseen."""
     msg_full = add_origin(spec.get('message') or '', spec.get('bot_name') if spec.get('bot_name') is not None else CFG.get('bot_name'))
     t_job = time.time(); attempt = 0
-    def existing(where):
+    def existing(where, strict=False):
         try: m = find_existing_post(spec['project'], spec.get('thread'), msg_full, st.get('before_max'), _since_utc(st.get('first_started_ts')), force=spec.get('force', False))
-        except BaseException as ex: log(f'send job {key}: post check ({where}) failed: {ex!r}'); return None
+        except BaseException as ex:
+            log(f'send job {key}: post check ({where}) failed: {ex!r}')
+            if strict: raise
+            return None
         if m: log(f"send job {key}: found the post already in the thread ({where}) as #{m.get('index')}; not typing it again")
         return m
     if st.get('check_existing'):
-        m = existing('earlier attempt pressed Send')
+        # An earlier attempt pressed Send. Type it again only when a post check ran and found nothing: a check that
+        # failed (busy app, thread not found, interrupted) proves nothing, so the job stops without typing and stays
+        # not_posted, and the next retry checks again.
+        try: m = existing('earlier attempt pressed Send', strict=True)
+        except BaseException as ex:
+            st.update(state='not_posted', step='not_posted', error_type='AppError', check_failed=True,
+                      error=f'An earlier attempt pressed Send and the check for that post failed ({type(ex).__name__}: {ex}). '
+                            'Nothing was typed, so it is not posted twice. Retry the same send later to check again.')
+            return
         if m: _mark_posted(st, m, 'post check before retry'); return
     while True:
         attempt += 1; st['attempts'] = attempt

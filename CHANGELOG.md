@@ -2,6 +2,33 @@
 
 ## 1.0.7 (2026-11-16)
 
+### Never posted twice, and a broken Python is named
+- A retried send whose earlier attempt pressed Send types again only when the post check ran and found nothing. A
+  check that fails (busy app, thread not found, interrupted) used to count as "not there", so the message was typed a
+  second time. Now the job stops without typing, stays `not_posted`, and the next retry checks again.
+- The post check opens a thread given by title even when the cached sidebar doesn't list it yet (it looks the title up
+  live, as the send does). Before, every check of such a send failed, so it always ended `not_posted`.
+- A send with `wait=true` answers with the send's result when the wait stops after Send (Busy, or Refused while a
+  viewer watches): `reply.wait_error` says what stopped it and to call `claude_thread_wait`. Before, a Busy there exited
+  with code 3 and the MCP layer reran the whole send.
+- An MCP call over its timeout gets SIGTERM, then SIGKILL after 10 s, and is reaped. Before, it only got SIGTERM.
+- install.sh makes the Python environment from /usr/bin/python3 (python3-gi is built for it only) and stops with a
+  clear message when the environment can't load the AT-SPI bindings. `setup verify` has an `atspi` check. A pyenv,
+  conda or Homebrew python3 on PATH used to give an install where the app only showed as "not reachable".
+- A file whose upload finishes after its per-file limit no longer leaves its chip in the message box. Cleanup waits up
+  to 15 s for that chip (`CLAUDE_PROJECTS_ATTACH_LATE_CHIP_S`) and takes it out, so the retry and later sends to the
+  thread aren't refused over a leftover. A chip that never shows is reported as `late_chips_not_seen`.
+- Attachment workers that store files at the same time no longer clash: the index update and the prune run under a
+  file lock, temp files have their own names, and the prune never deletes another worker's file mid-write. Before, a
+  fetch that worked could be reported as failed and index entries were lost.
+- The bulk cap no longer interrupts the cleanup that closes an Image preview or a file pane, so a preempted fetch
+  doesn't leave a dialog open (the next send stopped with "a dialog is open").
+- A status or busy-check probe no longer turns away a send, fetch or permission worker that starts at that moment
+  (it exited with "already running" and the job stayed queued). Probes take a shared lock; workers retry for 2 s.
+- New tests run the live checks against the fake app: `setup verify --live` on a healthy install, a send with
+  `wait=true` to a thread named by its title (looked up live, sent once, reply returned), and one approve on a
+  permission card.
+
 ### Sends report what really happened
 - A long post that the app shows collapsed (only its first line, then "Show more") now counts as posted. The visible
   part, from the origin bracket on, must be the start of the sent text, at a new message index. Before, such sends were

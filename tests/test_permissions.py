@@ -135,3 +135,28 @@ def test_op_permission_dry_run_and_apply(monkeypatch):
     r = C.op_permission('Demo', 'Not now', dry_run=False)
     assert pressed == ['Not now'] and r['card_gone'] and r['pressed'] == 'Not now'
     with pytest.raises(C.NotFound): C.op_permission('Demo', 'Add folder')
+
+
+def test_approve_press_goes_through_and_the_card_is_gone(monkeypatch):
+    """The live check: one approve on a real-shaped 'add this folder' card presses exactly that button once."""
+    cards = P.find_cards(folder_card().nodes)
+    pressed = []
+    class Btn:
+        def __init__(self, label): self.label = label
+    cards[0]['_objs'] = [Btn(o) for o in cards[0]['options']]
+    state = {'cards': cards}
+    monkeypatch.setattr(C, 'resolve_project', lambda p: {'id': 'chan_TEST', 'name': 'Demo', 'primary_thread_id': 'cse_TEST'})
+    monkeypatch.setattr(C, '_resolve_tid', lambda p, chan, thread: thread)
+    monkeypatch.setattr(C, 'open_target_settled', lambda chan, tid: None)
+    monkeypatch.setattr(C, 'go_home', lambda: True)
+    monkeypatch.setattr(C, 'ui_lock', FakeLock)
+    monkeypatch.setattr(C, 'log', lambda m: None); monkeypatch.setattr(C.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(C, 'busy_state', lambda tid: False); monkeypatch.setattr(C, 'dialogs', lambda: [])
+    monkeypatch.setattr(C, 'detect_permission_cards', lambda: state['cards'])
+    def fake_act(e, what=''):
+        pressed.append(e.label); state['cards'] = []; return True
+    monkeypatch.setattr(C, 'act', fake_act)
+    r = C.op_permission('Demo', 'Add folder', dry_run=False)
+    assert pressed == ['Add folder'] and r['pressed'] == 'Add folder' and r['card_gone']
+    with pytest.raises(C.NotFound): C.op_permission('Demo', 'Add folder', dry_run=False)   # pressed once, never twice
+    assert pressed == ['Add folder']

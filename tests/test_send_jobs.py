@@ -19,6 +19,11 @@ class App:
     def __init__(self, stall=None, term_on=None):
         self.chips, self.text, self.stall, self.term_on = [], '', stall, term_on
         self.sent = 0; self.removed = []; self.home = 0; self.current = None; self.dismissed = 0; self.sent_with = None
+        self.late = None; self.late_after = 25.0; self.late_at = None; self.clock = None   # a file whose chip shows after the per-file limit
+
+    def tick(self):
+        if self.late_at is not None and self.clock[0] >= self.late_at:
+            self.chips.append(self.late); self.late_at = None
 
 
 @pytest.fixture
@@ -45,12 +50,13 @@ def app(monkeypatch, files):
     def type_loc(wid, path): a.current = os.path.basename(path)
     def click_open(root, wid):
         if a.term_on == a.current: raise C.Interrupted('stopped by SIGTERM')
-        if a.current != a.stall: a.chips.append(a.current)
+        if a.current == a.late: a.late_at = a.clock[0] + a.late_after
+        elif a.current != a.stall: a.chips.append(a.current)
     monkeypatch.setattr(C, '_open_attach_picker', open_picker)
     monkeypatch.setattr(C, '_chooser_type_location', type_loc)
     monkeypatch.setattr(C, '_click_chooser_open', click_open)
-    monkeypatch.setattr(C, '_composer_has_chip', lambda name, scope=None: name in a.chips)
-    monkeypatch.setattr(C, 'composer_chips', lambda scope=None: list(a.chips))
+    monkeypatch.setattr(C, '_composer_has_chip', lambda name, scope=None: (a.tick(), name in a.chips)[1])
+    monkeypatch.setattr(C, 'composer_chips', lambda scope=None: (a.tick(), list(a.chips))[1])
     monkeypatch.setattr(C, '_dismiss_open_files', lambda reason='': (setattr(a, 'dismissed', a.dismissed + 1), True)[1])
     def remove(name, scope=None):
         a.removed.append(name); a.chips.remove(name); return True
@@ -64,7 +70,7 @@ def app(monkeypatch, files):
     monkeypatch.setattr(C, 'xdo', xdo)
     monkeypatch.setattr(C, '_verify_sent', lambda tid, msg, bmax, secs=40: {'index': 7})
     # a fast clock: every poll advances 1 s, so a 20 s per-file limit ends in 20 polls
-    clock = [1_000_000.0]
+    clock = [1_000_000.0]; a.clock = clock
     monkeypatch.setattr(C.time, 'time', lambda: clock[0])
     monkeypatch.setattr(C.time, 'sleep', lambda s: clock.__setitem__(0, clock[0] + max(s, .3)))
     return a
@@ -79,6 +85,26 @@ def test_six_files_one_stalls_per_file_timeout_and_clean_composer(app, files):
     assert app.removed == ['demo.mp4', 'app.js', 'main.js'] and app.chips == [], 'chips already attached are taken out'
     assert ex.cleanup['chips_left'] == [] and ex.cleanup['composer_empty'] is True
     assert app.sent == 0 and app.text == '' and app.home == 1
+
+
+def test_a_chip_that_shows_up_after_the_timeout_is_taken_out_too(app, files):
+    """The upload finishes after the per-file limit: its chip lands in the box after we gave up on it. Cleanup waits for
+    it and removes it, so the retry (and every later send to the thread) isn't refused over a leftover chip."""
+    app.late = 'util.js'
+    with pytest.raises(C.AttachError) as ei:
+        C.op_send('Notes', 'see the files', prepared_files=files, deadline_s=420)
+    assert ei.value.file == 'util.js' and app.sent == 0
+    assert app.chips == [] and 'util.js' in app.removed, 'the late chip was left in the message box'
+    assert 'util.js' in ei.value.cleanup['chips_removed'] and not ei.value.cleanup.get('late_chips_not_seen')
+    r = C.op_send('Notes', 'see the files', prepared_files=files[:1], deadline_s=420)     # the retry is not refused
+    assert r['sent'] and app.sent == 1
+
+
+def test_a_chip_that_never_shows_is_reported_not_waited_on_forever(app, files):
+    app.stall = 'util.js'
+    with pytest.raises(C.AttachError) as ei:
+        C.op_send('Notes', 'see the files', prepared_files=files, deadline_s=420)
+    assert ei.value.cleanup['late_chips_not_seen'] == ['util.js'] and app.chips == []
 
 
 def test_all_six_attach_then_send(app, files):
@@ -251,7 +277,9 @@ def jobs(monkeypatch, tmp_path, files):
     monkeypatch.setattr(C, 'SEND_REVERIFY_DELAYS', (0.0, 0.0))
     monkeypatch.setattr(C, 'service_limit_recent', lambda *a, **k: None)
     def existing(project, thread, message, before_max=None, since_utc=None, force=False):
-        st['checks'] += 1; return st['existing']
+        st['checks'] += 1
+        if isinstance(st['existing'], BaseException): raise st['existing']
+        return st['existing']
     monkeypatch.setattr(C, 'find_existing_post', existing)
     monkeypatch.setattr(C, 'ATT_JOBS', tmp_path / 'att-jobs')
     monkeypatch.setattr(C.STAGE, 'maybe_sweep', lambda: None)
@@ -356,6 +384,50 @@ def test_retry_finds_existing_post_and_stops(jobs, files):
     assert r['sent'] and r['message_index'] == 150 and r['found_by'] == 'post check before retry' and jobs['sends'] == 0
 
 
+def test_retry_after_send_never_types_when_the_post_check_fails(jobs, files):
+    # an earlier attempt pressed Send and was never seen; on the retry the check itself fails (busy app, thread not
+    # found): that proves nothing, so the job must not type the message again
+    jobs['after_send'] = C.AppError('transcript did not load')
+    assert send(files, budget=5)['not_posted'] and jobs['sends'] == 1
+    jobs['after_send'] = None; jobs['existing'] = C.Busy('the app is busy (held by a read)')
+    again = send(files, budget=5)
+    assert again['not_posted'] and not again['sent'] and jobs['sends'] == 1, 'typed again although the check failed'
+    assert 'check for that post failed' in again['error'] and 'Nothing was typed' in again['error']
+    # the next retry checks again; this time the check runs and finds nothing, so it is sent once more
+    jobs['existing'] = None
+    third = send(files, budget=5)
+    assert third['sent'] and jobs['sends'] == 2
+
+
+def test_post_check_resolves_a_thread_given_by_title(monkeypatch):
+    opened = []
+    monkeypatch.setattr(C, 'log', lambda *x, **k: None)
+    monkeypatch.setattr(C, 'resolve_project', lambda q, snap=None: {'id': 'chan_E', 'name': 'Notes'})
+    monkeypatch.setattr(C, 'resolve_thread', lambda chan, q, threads=None: 'LOOKUP:' + q)
+    monkeypatch.setattr(C, 'read_cache', lambda *a, **k: (_ for _ in ()).throw(AssertionError('no cache for a LOOKUP id')))
+    monkeypatch.setattr(C, '_resolve_tid', lambda p, chan, thread: 'cmsg_found')
+    monkeypatch.setattr(C, 'ui_lock', lambda *x, **k: contextlib.nullcontext())
+    monkeypatch.setattr(C, 'open_target', lambda chan, tid: opened.append(tid))
+    monkeypatch.setattr(C, 'settle', lambda *a, **k: None)
+    monkeypatch.setattr(C, 'go_home', lambda: None)
+    msg = C.add_origin('hello there', None)
+    monkeypatch.setattr(C, 'read_messages', lambda tid, *a, **k: [{'index': 9, 'role': 'user', 'text': msg}])
+    m = C.find_existing_post('Notes', 'Fix the docs', msg, before_max=8)
+    assert opened == ['cmsg_found'] and m and m['index'] == 9
+
+
+@pytest.mark.parametrize('err', [C.Busy('UI lock held by a read for 600 s'), C.Refused('a viewer is connected')])
+def test_send_with_wait_answers_sent_when_the_wait_stops(app, monkeypatch, err):
+    """Send was pressed; an error from the wait must not escape: Busy exits with code 3, and the MCP layer reruns the
+    whole send on Busy, which would post it twice."""
+    def fake_wait(*a, **k): raise err
+    monkeypatch.setattr(C, 'op_wait', fake_wait)
+    r = C.op_send('Notes', 'run the tests', wait=True)
+    assert r['sent'] and r['message_index'] == 7 and app.sent == 1
+    assert r['reply']['done'] is False and r['reply']['wait_error'] == type(err).__name__
+    assert 'Do not send it again' in r['reply']['note'] and 'after_index=7' in r['reply']['note']
+
+
 def test_running_send_counts_as_busy(jobs, files):
     jobs['delay'] = 0.8
     r = send(files, budget=0.1)
@@ -401,3 +473,62 @@ def test_mcp_send_tool_uses_the_job_budget():
     tool = src[src.index('async def claude_thread_send('):src.index('@mcp.tool()', src.index('async def claude_thread_send('))]
     assert "'--budget', str(SEND_BUDGET)" in tool and "'--job-id'" in tool and 'idempotency_key' in tool
     assert float(__import__('re').search(r"CLAUDE_PROJECTS_SEND_BUDGET', '(\d+)'", src).group(1)) <= 45
+
+
+def test_a_status_probe_never_turns_a_starting_worker_away(tmp_path):
+    """Status and the deploy busy check probe each job's lock. A worker that starts during a probe used to find the
+    lock taken, exit with 'already running', and leave its send queued forever."""
+    d = tmp_path / 'jobs'; d.mkdir(); (d / 'k.lock').touch()
+    probe = open(d / 'k.lock', 'a+'); import fcntl
+    fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)             # a probe in progress
+    threading.Timer(0.3, lambda: (fcntl.flock(probe, fcntl.LOCK_UN), probe.close())).start()
+    f = C.job_lock(d, 'k', C.JOB_LOCK_WAIT_S)
+    assert f is not None, 'the worker gave up on a lock that was only probed'
+    assert C.job_running(d, 'k'), 'a held job reads as running'
+    assert C.job_running(d, 'k') and C.job_running(d, 'k'), 'probes do not disturb each other or the holder'
+    C.job_unlock(f)
+    assert not C.job_running(d, 'k')
+    assert C.job_lock(d, 'k') is not None
+
+
+def test_job_running_probe_does_not_take_the_exclusive_lock(tmp_path, monkeypatch):
+    d = tmp_path / 'jobs'; d.mkdir(); (d / 'k.lock').touch()
+    import fcntl
+    taken = []
+    real = fcntl.flock
+    monkeypatch.setattr(C.fcntl, 'flock', lambda f, op: (taken.append(op), real(f, op))[1])
+    C.job_running(d, 'k')
+    assert not any(op & fcntl.LOCK_EX for op in taken), taken
+
+
+# ---------------------------------------------------------------- the live checks, against the fake app
+_REAL_RESOLVE_THREAD = C.resolve_thread          # the app fixture fakes it; these tests need the real title lookup
+
+def test_send_by_title_with_wait_posts_exactly_once(app, files, monkeypatch):
+    """A send with wait=true to a thread named by its title, which the cached sidebar doesn't list yet: the title is
+    looked up live, the message is typed and sent once, verified, and the reply comes back from the wait."""
+    looked_up, opened, waited = [], [], []
+    monkeypatch.setattr(C, 'resolve_thread', _REAL_RESOLVE_THREAD)
+    monkeypatch.setattr(C, 'read_cache', lambda *a, **k: None)               # nothing cached: the title can't resolve offline
+    def parse_threads(chan, include_resolved=False, show_all=False):
+        looked_up.append(chan); return [{'title': 'Fix the docs', 'thread_id': 'cmsg_DOCS'}, {'title': 'Release notes', 'thread_id': 'cmsg_REL'}]
+    monkeypatch.setattr(C, 'parse_threads', parse_threads)
+    monkeypatch.setattr(C, 'ensure_threads_panel', lambda *a, **k: None)
+    monkeypatch.setattr(C, 'open_target', lambda chan, tid: opened.append(tid))
+    def fake_wait(project, thread=None, after_index=None, **k):
+        waited.append((thread, after_index)); return {'done': True, 'reply_text': 'On it.', 'new_messages': [{'index': 8, 'role': 'assistant'}]}
+    monkeypatch.setattr(C, 'op_wait', fake_wait)
+    r = C.op_send('Notes', 'fix the broken links', thread='Fix the docs', wait=True)
+    assert looked_up == ['chan_E'] and opened[-1] == 'cmsg_DOCS'
+    assert app.sent == 1 and app.text.endswith('fix the broken links') and app.text.startswith('[sent by Grok Bot')
+    assert r['sent'] and r['verified_in_transcript'] and r['thread_id'] == 'cmsg_DOCS' and r['message_index'] == 7
+    assert waited == [('cmsg_DOCS', 7)] and r['reply']['reply_text'] == 'On it.'
+
+
+def test_send_to_an_unknown_title_types_nothing(app, monkeypatch):
+    monkeypatch.setattr(C, 'resolve_thread', _REAL_RESOLVE_THREAD)
+    monkeypatch.setattr(C, 'read_cache', lambda *a, **k: None)
+    monkeypatch.setattr(C, 'parse_threads', lambda *a, **k: [{'title': 'Release notes', 'thread_id': 'cmsg_REL'}])
+    monkeypatch.setattr(C, 'ensure_threads_panel', lambda *a, **k: None)
+    with pytest.raises(C.NotFound): C.op_send('Notes', 'hello', thread='Fix the docs', wait=True)
+    assert app.sent == 0 and app.text == ''

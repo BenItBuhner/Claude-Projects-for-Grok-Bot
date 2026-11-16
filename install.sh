@@ -188,10 +188,21 @@ fi
 
 # ---------------------------------------------------------------- 2. python env
 say "Creating the Python environment in $REPO/.venv"
-run python3 -m venv --system-site-packages "$REPO/.venv"
+# The venv must come from the system Python: python3-gi (the AT-SPI bindings every UI action uses) is built for it
+# only. A pyenv, conda or Homebrew python3 earlier on PATH makes a venv that can't import gi, and the app then shows
+# as "not reachable" with no other hint. CLAUDE_PROJECTS_VENV_PYTHON overrides (tests).
+VENV_PY="${CLAUDE_PROJECTS_VENV_PYTHON:-}"
+[ -n "$VENV_PY" ] || { [ -x /usr/bin/python3 ] && VENV_PY=/usr/bin/python3; } || VENV_PY="$(command -v python3)"
+run "$VENV_PY" -m venv --system-site-packages "$REPO/.venv"
 run "$REPO/.venv/bin/pip" install -q --upgrade pip
 run "$REPO/.venv/bin/pip" install -q -r "$REPO/requirements.txt"
 run "$REPO/.venv/bin/pip" install -q --no-deps -r "$REPO/requirements-nodeps.txt"
+if [ "$DRY" = 0 ] && ! "$REPO/.venv/bin/python" -c "import gi; gi.require_version('Atspi', '2.0'); from gi.repository import Atspi" >/dev/null 2>&1; then
+  echo "The Python environment can't load the AT-SPI bindings (python3-gi, gir1.2-atspi-2.0), so the plugin can't drive the app." >&2
+  echo "It was made with $VENV_PY ($("$VENV_PY" --version 2>&1)). Make sure python3-gi and gir1.2-atspi-2.0 are installed for that" >&2
+  echo "Python (apt installs them for /usr/bin/python3), then run: rm -rf '$REPO/.venv' && ./install.sh --no-apt" >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------- 3. config + local secrets (never printed)
 say "Writing $CONFIG_FILE"

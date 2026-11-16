@@ -915,6 +915,20 @@ def mcp_tool_names():
     except Exception: return None
 
 
+ATSPI_IMPORT = "import gi; gi.require_version('Atspi', '2.0'); from gi.repository import Atspi"
+
+
+def atspi_check():
+    """Can the plugin's Python load the AT-SPI bindings? Without them every UI action fails and the app only shows as
+    'not reachable', which points at the desktop service instead of the Python environment."""
+    rc, _, e = RUN([str(venv_python()), '-c', ATSPI_IMPORT], timeout=30, env=dict(os.environ, PYTHONWARNINGS='ignore'))
+    if rc == 0: return check('atspi', 'pass', 'AT-SPI bindings load')
+    last = ((e or '').strip().splitlines() or ['import failed'])[-1][:200]
+    return check('atspi', 'fail', f'the Python environment can\'t load the AT-SPI bindings: {last}',
+                 fix=f'sudo apt-get install python3-gi gir1.2-atspi-2.0; then rm -rf {REPO}/.venv and claude-projects setup install '
+                     '(the venv must be made from /usr/bin/python3, not a pyenv, conda or Homebrew python)')
+
+
 def cmd_verify(a):
     checks = []; lay = layout(); mode = service_mode()
     checks.append(check('layout', 'pass' if lay == 'standard' else 'warn' if lay == 'legacy' else 'fail',
@@ -954,6 +968,7 @@ def cmd_verify(a):
     checks.append(signin_browser_check())
     vp = [int(x) for x in (CFG.get('viewer_ports') or [])]; exp = [ports()['vnc'], ports()['novnc']]
     checks.append(check('viewer_ports', 'pass' if set(exp) <= set(vp) else 'warn', f'{vp}', fix=None if set(exp) <= set(vp) else f'set viewer_ports to {exp}'))
+    checks.append(atspi_check())
     tools = mcp_tool_names()
     if tools is None: checks.append(check('mcp_tools', 'fail', 'could not load the MCP server module', fix='claude-projects setup install'))
     else:
