@@ -20,7 +20,12 @@ def test_readme_local_links_resolve():
     assert not missing, missing
 
 
-def test_readme_has_no_video_download_link_and_keeps_the_demo_placeholder():
+DEMO_POST = 'https://x.com/BennettBuhner/status/2122494767435014640'
+
+
+def test_readme_has_no_video_download_link_and_links_the_demo_post():
     visible = re.sub(r'<!--.*?-->', '', README, flags=re.S)
     assert not re.search(r'\.(mp4|mov|webm)\b', visible, re.I)
-    assert 'Demo: coming soon on X' in visible and '<!-- DEMO_URL: replace with X post link -->' in README
+    assert f'Demo: <a href="{DEMO_POST}">watch it on X</a>' in visible and 'coming soon' not in visible
+    assert f'<a href="{DEMO_POST}"><img src="docs/assets/' in visible, 'the hero image opens the demo post'
+    assert 'DEMO_URL' not in README and 'HERO_LINK' not in README and '?' not in DEMO_POST
