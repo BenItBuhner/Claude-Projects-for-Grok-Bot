@@ -586,12 +586,50 @@ def op_priority(op):
     if k in URGENT_KINDS: return 0
     return 2 if (k in BULK_KINDS or _BULK_CTX) else 1
 _BULK_CTX = False   # set while a background refresh / attention pass runs: its reads queue in the bulk lane
-def _ticket_new(op, job_id=None, prio=None):
+def _ticket_new(op, job_id=None, prio=None, target=None):
     UIQ.mkdir(parents=True, exist_ok=True)
     pr = op_priority(op) if prio is None else int(prio)
     name = f'{pr}-{time.time_ns():020d}-{os.getpid()}-{threading.get_ident() % 100000}.json'
-    (UIQ/name).write_text(json.dumps({'pid': os.getpid(), 'op': op, 'since': now().isoformat(), 'job_id': job_id, 'priority': pr}))
+    (UIQ/name).write_text(json.dumps({'pid': os.getpid(), 'op': op, 'since': now().isoformat(), 'ts': time.time(), 'job_id': job_id, 'priority': pr,
+                                      'target': target}))
     return UIQ/name
+# ---- per-Project batching: the app is left on the last target while others wait (see leave_app), so a waiter for that
+# same target (or the same Project) skips the deep link and the page load. Such a waiter may go ahead of older waiters
+# in its lane, but never past one that has already waited AFFINITY_MAX_S, so nobody is starved.
+UI_LAST = ROOT/'ui.last'
+AFFINITY_MAX_S = float(os.environ.get('CLAUDE_PROJECTS_AFFINITY_MAX_S', '30'))
+_SHOWN: dict[str, Any] = {'target': None}   # what this process left the app showing: 'chan|thread' (None after go_home)
+def ui_target(chan, thread=None):
+    return f'{chan}|{thread or "primary"}'
+def _last_target():
+    """The target the app was left on by the last lock holder (None when it went home, or over 5 min ago)."""
+    try:
+        d = json.loads(UI_LAST.read_text())
+        if d.get('target') and time.time() - float(d.get('at') or 0) < 300: return d['target']
+    except Exception: pass
+    return None
+def _ticket_ts(d):
+    try: return float(d['ts'])
+    except Exception: pass
+    try: return datetime.datetime.fromisoformat(str(d.get('since'))).timestamp()
+    except Exception: return time.time()
+def _service_order(live, last=None, t=None):
+    """Live tickets [(path, data)] in the order they will get the lock: the lowest lane first, FIFO in each lane, except
+    that a waiter for the target the app shows (the same thread first, else the same Project) goes first in its lane
+    while the oldest in that lane has waited less than AFFINITY_MAX_S."""
+    t = time.time() if t is None else t; rest = list(live); out = []
+    while rest:
+        lane = min(int(d.get('priority', 1)) for _, d in rest)
+        cand = [x for x in rest if int(x[1].get('priority', 1)) == lane]
+        pick = cand[0]
+        if last and t - _ticket_ts(cand[0][1]) < AFFINITY_MAX_S and cand[0][1].get('target') != last:
+            chan = last.split('|', 1)[0]
+            same = ([x for x in cand if x[1].get('target') == last] or
+                    [x for x in cand if str(x[1].get('target') or '').split('|', 1)[0] == chan])
+            if same: pick = same[0]
+        out.append(pick); rest.remove(pick)
+        last = pick[1].get('target') or last
+    return out
 def _tickets():
     """Live tickets, oldest first: [(path, data)]. Removes tickets whose process is gone."""
     out = []
@@ -618,32 +656,46 @@ def ui_queue_status():
         ahead = max(5.0, expected_op_seconds(h.get('op'), durs) - el)
         h = dict(h, held_s=round(el, 1), expected_remaining_s=round(ahead, 1), since_local=ct(h.get('since')) if h.get('since') else None)
     q = []
-    for i, (fp, d) in enumerate(_tickets()):
+    for i, (fp, d) in enumerate(_service_order(_tickets(), _last_target(), t)):
         try: waited = t - datetime.datetime.fromisoformat(str(d.get('since'))).timestamp()
         except Exception: waited = None
-        q.append({'position': i + 1, 'op': d.get('op'), 'pid': d.get('pid'), 'job_id': d.get('job_id'), 'lane': d.get('priority', 1),
+        q.append({'position': i + 1, 'op': d.get('op'), 'pid': d.get('pid'), 'job_id': d.get('job_id'), 'lane': d.get('priority', 1), 'target': d.get('target'),
                   'since_local': ct(d.get('since')) if d.get('since') else None,
                   'waited_s': round(waited, 1) if waited is not None else None, 'eta_s': round(ahead, 1)})
         ahead += expected_op_seconds(d.get('op'), durs)
     return {'holder': h, 'queue': q, 'length': len(q)}
 def queue_entry_for(pid=None, job_id=None):
     """This waiter's place in the queue (or None when it is not waiting)."""
-    for e in ui_queue_status()['queue']:
-        if (pid is not None and e['pid'] == pid) or (job_id and e.get('job_id') == job_id): return e
+    qs = ui_queue_status()
+    for e in qs['queue']:
+        if (pid is not None and e['pid'] == pid) or (job_id and e.get('job_id') == job_id): return dict(e, length=qs['length'])
     return None
 _LOCK_JOB_ID = None   # set by job workers so their ticket names the job (queue position per job in status answers)
 
-def _acquire_flock(op, ticket_prio, timeout, t0):
-    """Queue (ticket in lane ticket_prio) until first in line, then take the flock. -> open file."""
-    ticket = _ticket_new(op, _LOCK_JOB_ID, ticket_prio); logged_wait = False; f = None
+def _busy_queue(ticket, live, t0, last=None):
+    """Structured queue status for a lock wait that hit its deadline: the caller can retry at retry_after_s."""
+    order = _service_order(live, last); pos = next((i + 1 for i, (fp, _) in enumerate(order) if fp == ticket), None)
+    ahead = 0.0; durs = _op_durations(); h = ui_lock_holder()
+    if h:
+        try: el = time.time() - datetime.datetime.fromisoformat(str(h.get('since'))).timestamp()
+        except Exception: el = 0.0
+        ahead = max(5.0, expected_op_seconds(h.get('op'), durs) - el)
+    for fp, d in order[:max(0, (pos or 1) - 1)]: ahead += expected_op_seconds(d.get('op'), durs)
+    return {'queued': True, 'queue_position': pos, 'queue_length': len(order), 'eta_s': round(ahead, 1),
+            'waited_s': round(time.time() - t0, 1), 'retry_after_s': int(min(120, max(5, ahead)))}
+def _acquire_flock(op, ticket_prio, timeout, t0, target=None):
+    """Queue (ticket in lane ticket_prio) until first in service order (see _service_order), then take the flock. -> open
+    file. Past `timeout` raises Busy with .queue = {queued, queue_position, queue_length, eta_s, waited_s, retry_after_s}."""
+    ticket = _ticket_new(op, _LOCK_JOB_ID, ticket_prio, target); logged_wait = False; f = None
     try:
         while True:
             if time.time() - t0 > 2 and not logged_wait:
                 log(f'lock wait >2s for {op!r} waiter_pid={os.getpid()} holder={_read_ui_holder()}'); logged_wait = True
             live = _tickets()
             if not any(fp == ticket for fp, _ in live):                 # our ticket vanished: re-queue
-                ticket = _ticket_new(op, _LOCK_JOB_ID, ticket_prio); live = _tickets()
-            first = bool(live) and live[0][0] == ticket
+                ticket = _ticket_new(op, _LOCK_JOB_ID, ticket_prio, target); live = _tickets()
+            last = _last_target()
+            first = bool(live) and _service_order(live, last)[0][0] == ticket
             if first:
                 f = open(LOCKP, 'a+')
                 try:
@@ -655,15 +707,22 @@ def _acquire_flock(op, ticket_prio, timeout, t0):
                 except OSError: pass
                 f.close(); f = None
             if time.time() - t0 > timeout:
-                pos = next((i + 1 for i, (fp, _) in enumerate(live) if fp == ticket), None)
-                raise Busy(_busy_detail(time.time() - t0, 'the app is busy with another claude-projects run') + (f'; queue_position={pos} of {len(live)}' if pos else ''))
+                q = _busy_queue(ticket, live, t0, last)
+                ex = Busy(_busy_detail(time.time() - t0, 'the app is busy with another claude-projects run') +
+                          (f"; queue_position={q['queue_position']} of {q['queue_length']}" if q['queue_position'] else '') +
+                          f"; eta_s={q['eta_s']}; retry_after_s={q['retry_after_s']}")
+                ex.queue = q; ex.lock_deadline = True
+                raise ex
             time.sleep(0.2 if first else 0.4)
-        (ROOT/'ui.holder').write_text(json.dumps({'pid': os.getpid(), 'op': op, 'since': now().isoformat(), 'job_id': _LOCK_JOB_ID, 'priority': op_priority(op)}))
+        (ROOT/'ui.holder').write_text(json.dumps({'pid': os.getpid(), 'op': op, 'since': now().isoformat(), 'job_id': _LOCK_JOB_ID, 'priority': op_priority(op),
+                                                  'target': target}))
         return f
     finally:
         try: ticket.unlink()
         except Exception: pass
 def _release_flock(f):
+    try: UI_LAST.write_text(json.dumps({'target': _SHOWN.get('target'), 'at': time.time()}))
+    except Exception: pass
     try: (ROOT/'ui.holder').unlink()
     except Exception: pass
     try: LOCKP.unlink()
@@ -747,10 +806,11 @@ def ui_checkpoint(restore=None, where=''):
     return waited
 
 @contextlib.contextmanager
-def ui_lock(op, force=False, timeout=None):
+def ui_lock(op, force=False, timeout=None, target=None):
     """Serialize UI work through CFG['ui_lock_file'] (holders unlink the file on exit, so re-check the inode).
     Waiters queue in lanes (urgent, normal, bulk; FIFO in each; see ui_queue_status). Default timeout 600s (override via
-    timeout= or CLAUDE_PROJECTS_UI_LOCK_TIMEOUT); a Busy raised on timeout names the holder and the queue position."""
+    timeout= or CLAUDE_PROJECTS_UI_LOCK_TIMEOUT); a Busy raised on timeout names the holder and the queue position, and
+    carries .queue (position, eta_s, retry_after_s). target=ui_target(chan, thread) lets same-target waiters batch up."""
     if timeout is None: timeout = UI_LOCK_DEFAULT_TIMEOUT
     if vnc_viewers() and not force:
         raise Refused(f'a VNC/noVNC viewer is connected to {os.environ.get("DISPLAY")} ({OPERATOR} may be using the app); retry later or pass force=true')
@@ -758,7 +818,7 @@ def ui_lock(op, force=False, timeout=None):
     if not _tlock.acquire(timeout=timeout):
         raise Busy(_busy_detail(time.time() - t0, 'another claude-projects operation in this process is running'))
     try:
-        f = _acquire_flock(op, None, timeout, t0)
+        f = _acquire_flock(op, None, timeout, t0, target=target) if target else _acquire_flock(op, None, timeout, t0)
         _HELD.update(f=f, op=op, since=time.time()); _PREEMPT['fired'] = 0
         log(f'lock acquired for {op} (waited {time.time()-t0:.1f}s)')
         guard = _bulk_guard_start(op)
@@ -980,10 +1040,21 @@ def dialogs(snap=None):
 def go_home():
     # Preemption must release the app, not spend another 5-25 s navigating home in a finally block.
     if _HELD and preemptible(_HELD.get('op')) and (_PREEMPT.get('fired') or bulk_over_cap()): return False
-    if re.fullmatch(r'/epitaxy/?(\?.*)?', route() or ''): return True
+    if re.fullmatch(r'/epitaxy/?(\?.*)?', route() or ''): _SHOWN['target'] = None; return True
     deeplink('claude://code/new?source=desktop_action')
     ok = re.fullmatch(r'/epitaxy/?(\?.*)?', wait_route(lambda u: re.fullmatch(r'/epitaxy/?(\?.*)?', u or '') is not None, 20) or '') is not None
+    if ok: _SHOWN['target'] = None
     _mark('go_home'); return ok
+def leave_app(where=''):
+    """End of a UI op: go home, unless another op already waits for the lock. That op opens its own target anyway, so
+    the 2-20 s trip home is skipped, and a waiter for this same target (see _service_order) needs no deep link at all.
+    The last op of a burst still goes home. -> True when it went home (or was already there)."""
+    try: waiting = others_waiting()
+    except Exception: waiting = []
+    if waiting:
+        log(f'leave_app{(" " + where) if where else ""}: {len(waiting)} op(s) waiting; staying on {_SHOWN.get("target")}'); _mark('home_skipped')
+        return False
+    return go_home()
 def screenshot(path):
     from PIL import ImageGrab
     im = ImageGrab.grab(xdisplay=os.environ['DISPLAY']).convert('RGB'); p = pathlib.Path(path).expanduser(); p.parent.mkdir(parents=True, exist_ok=True)
@@ -1006,9 +1077,14 @@ def _already_on(chan, thread):
         return None
     return u if is_primary_route(u, chan) else None
 def open_target(chan, thread=None):
+    _SHOWN['target'] = None              # unknown until this open succeeds
     u = _already_on(chan, thread)
     if u:
-        log(f'open_target: already on {u}; no deep link'); _mark('already_open'); return u
+        log(f'open_target: already on {u}; no deep link'); _mark('already_open'); _SHOWN['target'] = ui_target(chan, thread); return u
+    u = _open_target_nav(chan, thread)
+    _SHOWN['target'] = ui_target(chan, thread)
+    return u
+def _open_target_nav(chan, thread=None):
     if thread:
         deeplink(f'claude://code/project/{chan}?thread={thread}')
         u = wait_route(lambda u: f'thread={thread}' in (u or ''), 25); ok = f'thread={thread}' in (u or '')
@@ -3643,6 +3719,7 @@ def op_project_get(project, refresh=True, include_resolved=False, show_all=False
     return r
 VERIFY_SECS = float(os.environ.get('CLAUDE_PROJECTS_VERIFY_S', '60'))
 VERIFY_JOB_SECS = float(os.environ.get('CLAUDE_PROJECTS_VERIFY_JOB_S', '8'))   # send jobs: the rest of the check runs off the lock
+VERIFY_BUSY_SECS = float(os.environ.get('CLAUDE_PROJECTS_VERIFY_BUSY_S', '4'))  # ... and only this long while other ops wait for the app
 VERIFY_HEAD_CHARS = 400
 def post_matches(m, text, before_max=None, since_utc=None):
     """m (a parsed transcript message) is the post of text: role user, a new index (> before_max) or a time at/after
@@ -3733,7 +3810,7 @@ def find_existing_post(project, thread, message, before_max=None, since_utc=None
     cached = read_cache(chan, tid) if not (tid and str(tid).startswith('LOOKUP:')) else None
     for m in reversed((cached or {}).get('messages') or []):
         if post_matches(m, message, before_max, since_utc): return m
-    with ui_lock(f'verify {p["name"]} {thread or "primary"} (post check)', force):
+    with ui_lock(f'verify {p["name"]} {thread or "primary"} (post check)', force, target=ui_target(chan, tid)):
         try:
             # a thread given by title that the cached sidebar doesn't list yet: look it up live, as op_send does
             # (open_target can't open 'LOOKUP:<title>', so every check of such a send used to fail)
@@ -3743,7 +3820,7 @@ def find_existing_post(project, thread, message, before_max=None, since_utc=None
                 if post_matches(m, message, before_max, since_utc): return m
             return None
         finally:
-            try: go_home()
+            try: leave_app('after post check')
             except Exception: pass
 def _has_non_ascii(s):
     return any(ord(c) > 127 for c in (s or ''))
@@ -3876,7 +3953,7 @@ def _paste_via_clipboard(text):
         if not clipboard_set(text):
             return False
         xdo('key', '--clearmodifiers', 'ctrl+v')
-        time.sleep(0.5)
+        time.sleep(0.15)                 # the caller polls the composer for the pasted text (_wait_composer_match)
         return True
     finally:
         try:
@@ -4095,7 +4172,10 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
     message = add_origin(message or '', bot_name if bot_name is not None else CFG.get('bot_name'))
     if len(message) > 20000: raise ClaudeProjectsError('message longer than 20000 characters')
     p = resolve_project(project); chan = p['id']; tid = resolve_thread(chan, thread)
-    with step_timer(f'send {p["name"]} {thread or "primary"}') as tmr, ui_lock(f'send {p["name"]} {thread or "primary"}', force, timeout=max(UI_LOCK_DEFAULT_TIMEOUT, int(timeout or 0))):
+    lock_wait = SEND_LOCK_WAIT if _LOCK_JOB_ID else max(UI_LOCK_DEFAULT_TIMEOUT, int(timeout or 0))
+    _progress('queued')
+    with step_timer(f'send {p["name"]} {thread or "primary"}') as tmr, ui_lock(f'send {p["name"]} {thread or "primary"}', force, timeout=lock_wait,
+                                                                          target=ui_target(chan, tid if not str(tid or '').startswith('LOOKUP:') else None)):
         try:
             _mark('lock')
             if tid and str(tid).startswith('LOOKUP:'):
@@ -4182,7 +4262,8 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 else: xdo('key', '--clearmodifiers', 'Return')
                 log(f'sent {len(message)} chars to {p["name"]} {tid or "primary"}: {message[:80]!r}'); _mark('send')
                 _progress('verifying', attached=len(attached), total=len(files), before_max=bmax)
-                m = _verify_sent(tid, message, bmax, secs=VERIFY_JOB_SECS if _LOCK_JOB_ID else None)
+                # a job checks briefly on the lock (shorter still while others wait) and re-checks off the lock
+                m = _verify_sent(tid, message, bmax, secs=((VERIFY_BUSY_SECS if others_waiting() else VERIFY_JOB_SECS) if _LOCK_JOB_ID else None))
                 if m is None and not _LOCK_JOB_ID:  # one more look after the page settles (long replies re-render the list); jobs re-check off the lock
                     try: settle(tid, 15)
                     except Exception: pass
@@ -4206,7 +4287,7 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
                 log(f'UNVERIFIED send to {p["name"]} {tid or "primary"}: Send pressed, no matching new message after index {bmax}' + (f'; service limit shown: {lim}' if lim else ''))
             if shot: screenshot(shot)
         finally:
-            if not (stay or wait): go_home()
+            if not (stay or wait): leave_app('after send')
     if wait:
         # Send was pressed: whatever the wait does now, this call has to answer with the send's result. Raising here
         # (Busy after the lock wait, Refused while a viewer watches) exits non-zero, and the MCP layer retries Busy
@@ -4221,6 +4302,8 @@ def op_send(project, message, thread=None, wait=False, timeout=600, poll=10, for
 # ---- sends as background jobs: the MCP tool answers within its budget; a retry joins the job and never sends twice
 SEND_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_SEND_BUDGET', '40'))
 SEND_DEADLINE = float(os.environ.get('CLAUDE_PROJECTS_SEND_DEADLINE', '420'))          # a whole send, enforced inside the job
+SEND_LOCK_WAIT = float(os.environ.get('CLAUDE_PROJECTS_SEND_LOCK_WAIT', '360'))       # a job keeps its place in the queue this long, then fails (nothing typed)
+SEND_QUEUED_ANSWER_S = float(os.environ.get('CLAUDE_PROJECTS_SEND_QUEUED_ANSWER_S', '3'))   # a queued send answers after this, not after the whole budget
 SEND_DEDUPE_WINDOW = float(os.environ.get('CLAUDE_PROJECTS_SEND_DEDUPE_S', '1800'))    # the same send again within this window joins the old job
 SEND_FINAL = ('sent', 'failed', 'not_posted')
 SEND_RETRIES = int(os.environ.get('CLAUDE_PROJECTS_SEND_RETRIES', '2'))                  # extra attempts after a failure before Send
@@ -4261,17 +4344,25 @@ def _send_answer(st, joined=False):
         out['note'] = 'nothing was sent' + ('; ' + st['cleanup_note'] if st.get('cleanup_note') else '') + \
                       (f" after {st['attempts']} attempts" if (st.get('attempts') or 0) > 1 else '') + '. Calling again starts a new attempt.'
         if st.get('service_limit'): out['service_limit'] = st['service_limit']
+        if st.get('lock_deadline'):
+            q = st.get('queue') or {}
+            out.update(lock_deadline=True, retry_after_s=q.get('retry_after_s', 30), queue_position=q.get('queue_position'), eta_s=q.get('eta_s'))
+            out['note'] = (f"NOT SENT: the app stayed busy with other runs for {int(SEND_LOCK_WAIT)} s, so this send gave up its place "
+                           f"before typing anything. Nothing was sent. Call again (after retry_after_s) to queue it again.")
         return out
-    extra = {}
+    extra = {}; retry_after = 15
     try:
         q = queue_entry_for(pid=st.get('pid'), job_id=st.get('job_id')) if st.get('job_id') else None
-        if q: extra = {'queue_position': q['position'], 'eta_s': q['eta_s'], 'busy': f"busy, queued as job {st['job_id']}"}
+        if q:
+            extra = {'queued': True, 'queue_position': q['position'], 'queue_length': q.get('length'), 'eta_s': q['eta_s'],
+                     'estimated_wait_s': q['eta_s'], 'busy': f"busy, queued as job {st['job_id']}"}
+            retry_after = int(min(60, max(5, float(q['eta_s'] or 0))))
     except Exception: pass
     if st.get('state') == 'unverified':
         extra['warning'] = 'Send was pressed but the post is not confirmed yet; the job is re-checking the thread. NOT confirmed as sent.'
     if st.get('state') == 'retry_wait':
         extra['last_error'] = st.get('last_error'); extra['retry_in_s'] = st.get('retry_in_s')
-    return dict(_send_state_public(st), **extra, pending=True, sent=False, posted=False, retry_after_s=15,
+    return dict(_send_state_public(st), **extra, pending=True, sent=False, posted=False, retry_after_s=retry_after,
                 note='NOT SENT YET: still sending in the app; call claude_thread_send again with the same arguments (or job_id) for the result. '
                      'It joins this send and never types or sends the message twice.')
 def op_send_job(project, message, thread=None, force=False, attachments=None, bot_name=None, budget=None, idempotency_key=None, job_id=None, clear_leftovers=False):
@@ -4315,6 +4406,12 @@ def op_send_job(project, message, thread=None, force=False, attachments=None, bo
     while time.time() - t_start < budget:
         st = job_read(SEND_JOBS, key) or {}
         if st.get('state') in SEND_FINAL: return _send_answer(st, joined=joined)
+        if st.get('state') == 'queued' and time.time() - t_start >= SEND_QUEUED_ANSWER_S:
+            # fail fast: waiting behind other runs longer than this call may wait -> answer now with the place in the queue.
+            # The job keeps its place and still sends exactly once; calling again (or job_id) joins it.
+            try: q = queue_entry_for(pid=st.get('pid'), job_id=key)
+            except Exception: q = None
+            if q and float(q.get('eta_s') or 0) > budget - (time.time() - t_start): return _send_answer(st, joined=joined)
         time.sleep(.3)
     return _send_answer(job_read(SEND_JOBS, key) or {'job_id': key, 'state': 'queued'})
 def run_send_job(key):
@@ -4384,6 +4481,9 @@ def _send_job_attempts(key, st, spec, prog):
             if not isinstance(ex, (ClaudeProjectsError, Interrupted)): log(f'send job {key} crashed: {ex!r}')
             lim = service_limit_recent(600)
             if lim: st['service_limit'] = lim
+            if getattr(ex, 'lock_deadline', False):
+                # waited its whole turn in the queue: a retry would only re-queue at the back. Nothing was typed.
+                st.update(state='failed', step='failed', lock_deadline=True, queue=getattr(ex, 'queue', None)); return
             if send_retryable(ex) and attempt <= SEND_RETRIES and time.time() - t_job < SEND_RETRY_WINDOW:
                 wait = SEND_RETRY_BACKOFF[min(attempt - 1, len(SEND_RETRY_BACKOFF) - 1)] * (3 if lim else 1)
                 log(f'send job {key}: attempt {attempt} failed before Send ({type(ex).__name__}: {ex}); retrying in {wait:.0f} s')
@@ -5509,6 +5609,7 @@ def main(argv=None):
         if isinstance(ex, Busy):
             h = _read_ui_holder()
             if h: out['holder'] = h
+            if getattr(ex, 'queue', None): out.update(ex.queue)
         print(json.dumps(out, ensure_ascii=False) if a.json else f'claude-projects: {ex}', file=sys.stdout if a.json else sys.stderr); log(f'{a.cmd} error {ex}'); return ex.code
     if CFG.get('legacy_field_aliases'): res = legacy_aliases(res)
     if a.json: print(json.dumps(res, ensure_ascii=False, default=str))

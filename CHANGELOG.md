@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.0.8 (2026-11-18)
+
+### Sends hold up when several bots send at once
+- A send holds the app for less time. It no longer goes back to the home page when another call is already waiting
+  for the app (that call opens its own target anyway); the last call of a burst still goes home. A send job looks for
+  its post under the lock for 4 s while others wait (`CLAUDE_PROJECTS_VERIFY_BUSY_S`; 8 s otherwise), then re-checks
+  off the lock as before. The paste waits 0.15 s instead of 0.5 s before reading the box back.
+- Sends to the same Project run back to back. A waiter for the Project the app is showing goes first in its lane,
+  skipping the deep link and the page load, but never past a waiter that has already waited 30 s
+  (`CLAUDE_PROJECTS_AFFINITY_MAX_S`). Queue status answers show each waiter's `target`.
+- A queued send answers fast. When a send job is waiting behind other runs and its estimated wait is longer than the
+  call's budget, the answer comes after about 3 s (`CLAUDE_PROJECTS_SEND_QUEUED_ANSWER_S`) with `pending`, `queued`,
+  `queue_position`, `queue_length`, `eta_s` and `retry_after_s` (the estimated wait, 5-60 s). The job keeps its place
+  and still sends once; calling again with the same arguments, the same `idempotency_key` or the `job_id` joins it.
+- A send job waits at most 360 s for the app (`CLAUDE_PROJECTS_SEND_LOCK_WAIT`). Past that it ends `failed` with
+  `lock_deadline: true`, its queue position and `retry_after_s`, before anything is typed, and is not retried at the
+  back of the queue. Any lock wait that runs out now carries `queued`, `queue_position`, `queue_length`, `eta_s`,
+  `waited_s` and `retry_after_s` in the CLI's JSON error.
+- `tools/send_burst.py` runs N concurrent `claude_thread_send` dry runs to different Projects through the MCP tool
+  handler and reports p50, p95 and max from queued to done, lock waits and holds, and an estimate for real sends.
+- Measured on a live install: five concurrent dry-run sends to five different Projects finished with p50 14.9 s
+  and p95 about 24 s (p95 was 152.9 s before; target under 120 s).
+
+### Known limit
+- Each attached file still holds the app for about 16 s, so sends with attachments are the slow case in a burst.
+
 ## 1.0.7 (2026-11-16)
 
 ### Never posted twice, and a broken Python is named
