@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-projects"
-version = "1.0.7"
+version = "1.0.8"
 description = "Claude Code Projects for Grok Bot: an MCP server and CLI that drive the Claude desktop app's Projects"
 readme = "README.md"
 license = { text = "MIT" }
