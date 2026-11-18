@@ -406,7 +406,10 @@ async def claude_thread_permission(project: str, option: str, thread: Optional[s
     dry_run=true (the DEFAULT) finds the card and the button and presses nothing; pass dry_run=false to really press it.
     Policy: press an affirmative option only when the user policy pre-approves it or the action is clearly inside the task the user
     gave; anything questionable (outside the task, secrets, destructive, new machines/repos the user did not mention) goes to the
-    user first. The result says whether the card disappeared (card_gone).
+    user first. The result says whether the card disappeared (card_gone) and gives outcome: 'success' or 'pressed_unverified'
+    (with reason). A cleared computer-use card is not a working grant: after an Allow the job reads the thread for up to 90 s
+    (state 'verifying_grant'; poll with job_id) and says success only when computer use starts or no declined / locked text
+    appears. Never report a pressed_unverified card as approved.
     COMPUTER USE: only_apps=['Sketchpad','Notepad'] refuses an Allow on any card that requests other apps
     (apps_not_allowed); lasting grants ('Always allow') and full-screen control are refused. All card buttons are pressed
     with a real pointer click at their centre, then verified; AT-SPI do_action is a fallback (on computer-use cards it

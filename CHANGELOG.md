@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.9 (2026-11-18)
+
+### Card presses report what really happened
+- A computer-use Allow no longer counts as approved just because the card went away. The permission job reads the
+  thread for up to 90 s after the press and reports `outcome: success` only when computer use starts or no declined /
+  locked text appears; otherwise `pressed_unverified` with the reason. The card watcher marks its presses `grant: not_checked`.
+
 ## 1.0.8 (2026-11-18)
 
 ### Sends hold up when several bots send at once
