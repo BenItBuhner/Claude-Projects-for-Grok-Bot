@@ -3228,7 +3228,8 @@ def card_watch_once(chan, tid, only_apps, force=False, dry_run=False):
                 except Exception: pass
                 gone, w2 = _wait_button_gone(btn, 4.0); waited += w2
             after = detect_permission_cards(); gone = not any(x['card_id'] == c['card_id'] for x in after)
-            ent.update(action='pressed', pressed_with=how, card_gone=gone, press_s=round(time.time() - t0, 1), pressed_at_local=ct(now().isoformat()))
+            ent.update(action='pressed', pressed_with=how, card_gone=gone, press_s=round(time.time() - t0, 1), pressed_at_local=ct(now().isoformat()),
+                       grant='not_checked', note='the card cleared; whether computer use started is not checked here (claude_thread_permission checks it)')
             log(f'card-watch pressed {label!r} on {c["card_id"]} gone={gone}'); _watch_log(ent); acts.append(ent)
     return acts
 WATCH_YIELD_MIN_S = float(os.environ.get('CLAUDE_PROJECTS_WATCH_YIELD_S', '15'))
@@ -3268,6 +3269,55 @@ PERM_BUDGET = float(os.environ.get('CLAUDE_PROJECTS_PERMISSION_BUDGET', '40'))
 PERM_LOCK_WAIT = float(os.environ.get('CLAUDE_PROJECTS_PERMISSION_LOCK_WAIT', '300'))
 PERM_JOIN_WINDOW = 120.0
 PERM_FINAL = ('done', 'failed')
+# ---- computer-use grants: a cleared card is not a working grant (Nov 16: the card went, Claude then said the request was
+# declined). After an Allow the job keeps reading the thread, off the UI lock, until computer use visibly starts.
+CU_GRANT_WAIT_S = float(os.environ.get('CLAUDE_PROJECTS_CU_GRANT_WAIT_S', '90'))
+CU_GRANT_POLL_S = 15.0
+CU_DECLINED_RE = re.compile(r"(declin|denied|\bnot (?:been )?(?:granted|allowed|approved)|(?:screen|computer|session|pc|machine) (?:is |was |seems |appears )?(?:to be )?locked"
+                            r"|locked (?:screen|session)|lock screen|(?:permission|access|request) (?:was |is )?(?:refused|rejected|blocked|denied)"
+                            r"|could(?:n.t| not) (?:get|obtain|start) (?:access|permission|computer use|control)|no (?:screen )?access)", re.I)
+CU_STARTED_RE = re.compile(r"(\b(?:took|taking|take) a screenshot|\bscreenshot (?:shows|of)|i can (?:now )?see (?:the|your) (?:screen|window|app)"
+                           r"|\bclick(?:ed|ing)\b|\btyp(?:ed|ing) (?:into|in)\b|\bzoom(?:ed|ing)\b|\bscroll(?:ed|ing)\b|computer use (?:is )?(?:on|active|started))", re.I)
+def cu_grant_verdict(msgs, since_index, since_utc=None):
+    """From the messages after a computer-use Allow: 'declined' (declined / locked / not granted text), 'started'
+    (Claude visibly using the computer), or None (nothing either way yet). Only Claude's messages after the press count."""
+    seen = None
+    for m in msgs or []:
+        if m.get('role') != 'assistant': continue
+        new = int(m.get('index') or 0) > int(since_index or 0) or (since_utc and str(m.get('time_utc') or '') >= since_utc) or m.get('is_latest')
+        if not new or int(m.get('index') or 0) < int(since_index or 0): continue
+        t = m.get('text') or ''
+        if CU_DECLINED_RE.search(t): return 'declined', t[:300]
+        if CU_STARTED_RE.search(t): seen = ('started', t[:300])
+    return seen or (None, None)
+def verify_cu_grant(chan, tid, since_index, since_utc, wait_s=None, read=None, sleep=None, clock=None):
+    """Read the thread (short live reads, no lock held in between) until the grant shows. -> {'grant', 'evidence', 'checked_s', 'reads'}.
+    grant: 'started' | 'no_decline_seen' (wait_s passed with no declined/locked text) | 'declined' | 'unverified' (reads failed)."""
+    wait_s = CU_GRANT_WAIT_S if wait_s is None else wait_s
+    read = read or (lambda: op_read(chan, tid, True, 6, lock_wait=60, fresh_ok=False))
+    sleep = sleep or time.sleep; clock = clock or time.time
+    t0 = clock(); reads = 0; errors = []
+    while True:
+        sleep(min(CU_GRANT_POLL_S, max(0.0, wait_s - (clock() - t0))) if reads else 5.0)
+        try:
+            r = read(); reads += 1
+            v, ev = cu_grant_verdict(r.get('messages'), since_index, since_utc)
+            if v: return {'grant': v, 'evidence': ev, 'checked_s': round(clock() - t0, 1), 'reads': reads}
+        except Exception as ex: errors.append(f'{type(ex).__name__}: {ex}'[:160])
+        if clock() - t0 >= wait_s:
+            if reads: return {'grant': 'no_decline_seen', 'evidence': None, 'checked_s': round(clock() - t0, 1), 'reads': reads}
+            return {'grant': 'unverified', 'evidence': '; '.join(errors[-2:]) or None, 'checked_s': round(clock() - t0, 1), 'reads': 0}
+def cu_grant_outcome(r, g):
+    """Merge a grant check into a press result: success only for started / no_decline_seen; else pressed_unverified + reason."""
+    out = dict(r, grant_check=g)
+    if g['grant'] in ('started', 'no_decline_seen'): out['outcome'] = 'success'
+    else:
+        out['outcome'] = 'pressed_unverified'
+        out['reason'] = ('Claude said the computer-use request was declined or the screen was locked: ' + (g.get('evidence') or '')[:200]
+                         if g['grant'] == 'declined' else 'could not read the thread after the press: ' + (g.get('evidence') or 'no reads'))
+        out['warning'] = ('The card went away but the grant did not take effect. Do not report it as approved; check the controlled '
+                          'computer (lock screen, a "Background computer use" / Continue prompt there) and ask Claude to retry.')
+    return out
 def perm_job_key(chan, thread, option, card_id, dry_run, only_apps):
     t = norm(str(thread)).casefold() if thread else 'primary'
     base = f'{chan}|{t}|{(option or "").strip().casefold()}|{card_id or ""}|{int(bool(dry_run))}|{",".join(sorted(only_apps or []))}'
@@ -3334,8 +3384,17 @@ def run_permission_job(key):
         if st.get('state') in PERM_FINAL: return _perm_answer(st)
         spec = st.get('spec') or {}; save('waiting_for_app')
         try:
+            pc = resolve_project(spec['project']); ptid = resolve_thread(pc['id'], spec.get('thread'))
+            before_idx = ((read_cache(pc['id'], ptid if ptid and not str(ptid).startswith('LOOKUP:') else None) or {}).get('latest_message_index')) or 0
+            t_job = now().isoformat()
             r = op_permission(spec['project'], spec['option'], spec.get('thread'), spec.get('card_id'), dry_run=spec.get('dry_run', True),
                               force=spec.get('force', False), only_apps=spec.get('only_apps'), lock_wait=PERM_LOCK_WAIT)
+            if r.get('pressed') and r.get('card_gone') and (r.get('card') or {}).get('type') == 'computer_use' and PERM.AFFIRM_RE.match(str(r.get('pressed'))):
+                save('verifying_grant', result=dict(r, outcome='verifying_grant', note=f'pressed; checking the thread for up to {int(CU_GRANT_WAIT_S)} s that computer use starts'))
+                g = verify_cu_grant(r.get('project_id') or pc['id'], r.get('thread_id') if r.get('thread_id') != 'primary' else None, before_idx, t_job)
+                _pdiag('grant_check', **g); r = cu_grant_outcome(r, g)
+                log(f"permission job {key}: computer-use grant {g['grant']} after {g['checked_s']} s ({r['outcome']})")
+            elif r.get('pressed'): r = dict(r, outcome='success' if r.get('card_gone') else 'pressed_unverified')
             st['finished_ts'] = time.time(); save('done', result=r)
         except BaseException as ex:
             _pdiag('error', error=str(ex)[:500], error_type=type(ex).__name__)
@@ -3483,12 +3542,12 @@ def same_read_inflight(op):
     for _, d in _tickets():
         if d.get('op') == op and int(d.get('pid') or 0) != me: return d
     return None
-def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0, expand=False, force=False, stay=False, shot=None, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None):
-    args = (project, thread, refresh, max_messages, history_pages, expand, force, stay, shot, with_threads, include_resolved, show_all, include_images, markdown, cache_if_busy, lock_wait)
+def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0, expand=False, force=False, stay=False, shot=None, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None, fresh_ok=True):
+    args = (project, thread, refresh, max_messages, history_pages, expand, force, stay, shot, with_threads, include_resolved, show_all, include_images, markdown, cache_if_busy, lock_wait, fresh_ok)
     if not refresh or force or shot: return _read_dispatch(*args)
     # Canonical ids + requested representation: aliases share one flight; incompatible history/images/limits do not.
     p = resolve_project(project); tid = resolve_thread(p['id'], thread)
-    key = hashlib.sha256(json.dumps([p['id'], tid, max_messages, history_pages, expand, with_threads, include_resolved, show_all, include_images, markdown]).encode()).hexdigest()[:32]
+    key = hashlib.sha256(json.dumps([p['id'], tid, max_messages, history_pages, expand, with_threads, include_resolved, show_all, include_images, markdown, fresh_ok]).encode()).hexdigest()[:32]
     folder = CACHE/'read-flights'; folder.mkdir(parents=True, exist_ok=True)
     result_path = folder/(key + '.json'); t0 = time.time(); joined = False
     with open(folder/(key + '.lock'), 'a+') as lf:
@@ -3521,13 +3580,13 @@ def op_read(project, thread=None, refresh=True, max_messages=20, history_pages=0
             tmp = result_path.with_suffix(f'.{os.getpid()}.tmp'); tmp.write_text(json.dumps(saved)); tmp.replace(result_path)
             return out
         finally: fcntl.flock(lf, fcntl.LOCK_UN)
-def _read_dispatch(project, thread=None, refresh=True, max_messages=20, history_pages=0, expand=False, force=False, stay=False, shot=None, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None):
+def _read_dispatch(project, thread=None, refresh=True, max_messages=20, history_pages=0, expand=False, force=False, stay=False, shot=None, with_threads=False, include_resolved=False, show_all=False, include_images=False, markdown=False, cache_if_busy=False, lock_wait=None, fresh_ok=True):
     """Read a thread. Live reads of the same thread by several callers at once are coalesced: a caller that finds the same
     read already running (or queued) waits for it and answers from the transcript it wrote, instead of queueing a second
     UI pass. Every answer carries freshness (source, read_at, age_s, stale)."""
     if refresh and not force and not expand and not history_pages and not shot and not (with_threads and thread):
         p = resolve_project(project); op = f'read {p["name"]} {thread or "primary"}'; t0 = time.time()
-        if not include_images and not markdown:
+        if fresh_ok and not include_images and not markdown:
             fresh = _fresh_cache(p['id'], resolve_thread(p['id'], thread), with_threads)
             if fresh:
                 out = _op_read_impl(project, thread, False, max_messages)
